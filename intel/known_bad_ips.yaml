@@ -1,0 +1,47 @@
+# PyNIDS — Known Malicious IP Feed
+# CIDR notation supported.  All entries are illustrative placeholders —
+# replace with real threat-intel data from your preferred feed provider
+# (e.g. Emerging Threats, AbuseIPDB, MaxMind, AlienVault OTX).
+#
+# Severity values: LOW, MEDIUM, HIGH, CRITICAL
+# Category suggestions: tor_exit, c2, scanner, botnet, proxy, malware
+
+entries:
+  # Tor exit relay ranges (illustrative)
+  - cidr: "185.220.101.0/24"
+    category: tor_exit
+    severity: MEDIUM
+    description: "Known Tor exit relay range (Emerald Onion)"
+
+  - cidr: "185.220.102.0/24"
+    category: tor_exit
+    severity: MEDIUM
+    description: "Known Tor exit relay range"
+
+  # Shodan / mass-scanner IP ranges (illustrative)
+  - cidr: "198.20.69.96/27"
+    category: scanner
+    severity: LOW
+    description: "Shodan scanning infrastructure"
+
+  - cidr: "209.126.110.0/24"
+    category: scanner
+    severity: LOW
+    description: "Censys research scanning range"
+
+  # Known C2 hosts (illustrative / RFC 5737 documentation addresses)
+  - cidr: "198.51.100.10/32"
+    category: c2
+    severity: HIGH
+    description: "Simulated C2 server — replace with real TI"
+
+  - cidr: "203.0.113.50/32"
+    category: malware
+    severity: CRITICAL
+    description: "Simulated malware dropper host — replace with real TI"
+
+  # Example botnet range
+  - cidr: "185.234.218.0/24"
+    category: botnet
+    severity: HIGH
+    description: "Known botnet infrastructure (example)"

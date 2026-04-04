@@ -1,0 +1,53 @@
+# PyNIDS — Malicious Domain Feed
+# Supports exact matches and suffix patterns (prefix with "." to match all subdomains).
+# Replace with real data from your preferred threat-intel provider
+# (e.g. Emerging Threats, Cisco Umbrella Investigate, Quad9 blocklist).
+#
+# Severity values: LOW, MEDIUM, HIGH, CRITICAL
+# Category suggestions: c2, malware, phishing, tor_proxy, dga, spam
+
+entries:
+  # Tor proxies
+  - domain: ".onion.to"
+    category: tor_proxy
+    severity: MEDIUM
+    description: "Tor2Web proxy suffix — anonymous routing"
+
+  - domain: ".tor2web.org"
+    category: tor_proxy
+    severity: MEDIUM
+    description: "Tor2Web proxy suffix"
+
+  # DGA-style / known bad zones (illustrative)
+  - domain: "malware-c2.example"
+    category: c2
+    severity: CRITICAL
+    description: "Illustrative C2 domain — replace with real indicator"
+
+  - domain: "payload-dropper.example"
+    category: malware
+    severity: HIGH
+    description: "Illustrative malware dropper — replace with real indicator"
+
+  # Known DNS tunneling tool domains (illustrative)
+  - domain: "dns.cat"
+    category: c2
+    severity: HIGH
+    description: "DNS tunneling beacon endpoint (example)"
+
+  # Suspicious dynamic DNS providers often abused for C2
+  - domain: ".duckdns.org"
+    category: dyndns
+    severity: LOW
+    description: "Free dynamic DNS — frequently abused for C2 staging"
+
+  - domain: ".no-ip.com"
+    category: dyndns
+    severity: LOW
+    description: "Free dynamic DNS — frequently abused for C2 staging"
+
+  # Phishing (illustrative)
+  - domain: "secure-login-verify.example"
+    category: phishing
+    severity: HIGH
+    description: "Illustrative phishing domain"

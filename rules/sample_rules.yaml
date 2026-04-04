@@ -1,0 +1,17 @@
+rules:
+  - id: "TELNET_DEFAULT"
+    description: "Cleartext telnet"
+    when:
+      dst_port: 23
+    action: alert
+  - id: "SUSPICIOUS_DNS_QUERY"
+    description: "DNS query for suspicious domain"
+    when:
+      protocol: udp
+      dst_port: 53
+      payload_contains: "bad-domain.example"
+    action: alert
+
+
+
+

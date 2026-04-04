@@ -1,0 +1,318 @@
+# PyNIDS Enterprise Signature Rules
+# Format documentation: see pynids/detection/signature.py
+#
+# Condition operators: eq, ne, lt, gt, lte, gte, in, not_in, contains, startswith, regex, exists
+# Field prefixes:
+#   - Plain name  →  packet meta (src_ip, dst_ip, src_port, dst_port, protocol, payload_bytes)
+#   - layer7.*    →  dissected application layer (layer7.http.uri, layer7.dns.query_name, etc.)
+#
+# MITRE ATT&CK references: https://attack.mitre.org/
+
+rules:
+
+  # =========================================================================
+  # Reconnaissance / Scanning
+  # =========================================================================
+
+  - id: "SIG-REC-001"
+    description: "Known web scanner user-agent detected"
+    severity: LOW
+    confidence: 0.95
+    mitre: "T1595"
+    tags: [recon, scanning, webapp]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: in, value: [80, 443, 8080, 8443]}
+        - {field: layer7.http.user_agent, op: regex,
+           value: "(nikto|sqlmap|nmap|masscan|dirbuster|gobuster|wfuzz|nuclei|burpsuite|acunetix|nessus|openvas|zgrab|metasploit)"}
+    action: alert
+
+  - id: "SIG-REC-002"
+    description: "Suspicious DNS query for high-risk TLD"
+    severity: LOW
+    mitre: "T1071.004"
+    tags: [recon, dns, suspicious_tld]
+    match:
+      all:
+        - {field: protocol, op: eq, value: udp}
+        - {field: dst_port, op: eq, value: 53}
+        - {field: layer7.dns.query_name, op: regex, value: "\\.(top|xyz|pw|cc|su|tk|ml|ga|cf|gq)$"}
+    action: alert
+
+  # =========================================================================
+  # Initial Access / Exploitation
+  # =========================================================================
+
+  - id: "SIG-EXP-001"
+    description: "SQL injection pattern in HTTP request URI"
+    severity: CRITICAL
+    confidence: 0.88
+    mitre: "T1190"
+    tags: [sqli, webapp, initial_access]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: in, value: [80, 8080, 8000, 8008]}
+        - {field: layer7.http.sqli_suspect, op: eq, value: true}
+    action: alert
+
+  - id: "SIG-EXP-002"
+    description: "Cross-site scripting (XSS) pattern in HTTP request"
+    severity: HIGH
+    confidence: 0.82
+    mitre: "T1059.007"
+    tags: [xss, webapp]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: in, value: [80, 8080, 8000]}
+        - {field: layer7.http.xss_suspect, op: eq, value: true}
+    action: alert
+
+  - id: "SIG-EXP-003"
+    description: "HTTP path traversal attempt"
+    severity: HIGH
+    mitre: "T1083"
+    tags: [path_traversal, webapp]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: in, value: [80, 443, 8080]}
+        - {field: layer7.http.path_traversal_suspect, op: eq, value: true}
+    action: alert
+
+  - id: "SIG-EXP-004"
+    description: "Shellshock exploit attempt (bash CVE-2014-6271)"
+    severity: CRITICAL
+    confidence: 0.97
+    mitre: "T1190"
+    tags: [shellshock, rce, initial_access]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: payload_bytes, op: contains, value: "() { :;};"}
+    action: alert
+
+  - id: "SIG-EXP-005"
+    description: "Log4Shell exploit attempt (CVE-2021-44228)"
+    severity: CRITICAL
+    confidence: 0.96
+    mitre: "T1190"
+    tags: [log4shell, rce, initial_access]
+    match:
+      all:
+        - {field: payload_bytes, op: regex,
+           value: "\\$\\{jndi:(ldap|rmi|dns|ldaps|iiop|corba|nds|http)://"}
+    action: alert
+
+  - id: "SIG-EXP-006"
+    description: "EternalBlue / MS17-010 SMB exploit probe"
+    severity: CRITICAL
+    confidence: 0.90
+    mitre: "T1210"
+    tags: [eternalblue, smb, rce]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: eq, value: 445}
+        - {field: payload_bytes, op: contains, value: "\\x00\\x00\\x00\\x85\\xff\\x53\\x4d\\x42"}
+    action: alert
+
+  # =========================================================================
+  # Execution
+  # =========================================================================
+
+  - id: "SIG-EXE-001"
+    description: "Reverse shell — bash payload detected"
+    severity: CRITICAL
+    confidence: 0.87
+    mitre: "T1059.004"
+    tags: [reverse_shell, execution]
+    match:
+      any:
+        - {field: payload_bytes, op: contains, value: "bash -i >& /dev/tcp/"}
+        - {field: payload_bytes, op: contains, value: "bash -i >& /dev/udp/"}
+        - {field: payload_bytes, op: regex, value: "0>&1\\s*$"}
+    action: alert
+
+  - id: "SIG-EXE-002"
+    description: "Reverse shell — Python one-liner"
+    severity: CRITICAL
+    confidence: 0.85
+    mitre: "T1059.006"
+    tags: [reverse_shell, execution, python]
+    match:
+      all:
+        - {field: payload_bytes, op: contains, value: "import socket,subprocess"}
+    action: alert
+
+  - id: "SIG-EXE-003"
+    description: "Reverse shell — PowerShell download cradle"
+    severity: CRITICAL
+    confidence: 0.88
+    mitre: "T1059.001"
+    tags: [reverse_shell, execution, powershell]
+    match:
+      any:
+        - {field: payload_bytes, op: regex, value: "IEX\\s*\\(.*DownloadString"}
+        - {field: payload_bytes, op: regex, value: "powershell.*-enc\\s+[A-Za-z0-9+/=]{20,}"}
+    action: alert
+
+  # =========================================================================
+  # Credential Access
+  # =========================================================================
+
+  - id: "SIG-CRED-001"
+    description: "FTP cleartext credentials (USER command)"
+    severity: MEDIUM
+    mitre: "T1078"
+    tags: [credential_access, ftp, cleartext]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: eq, value: 21}
+        - {field: payload_bytes, op: regex, value: "^(USER|PASS)\\s"}
+    action: alert
+
+  - id: "SIG-CRED-002"
+    description: "Telnet cleartext session"
+    severity: MEDIUM
+    mitre: "T1021"
+    tags: [credential_access, lateral_movement, telnet, cleartext]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: eq, value: 23}
+    action: alert
+
+  - id: "SIG-CRED-003"
+    description: "HTTP Basic authentication credentials in cleartext"
+    severity: HIGH
+    mitre: "T1078"
+    tags: [credential_access, cleartext, http]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: payload_bytes, op: regex, value: "Authorization:\\s*Basic\\s+[A-Za-z0-9+/=]+"}
+    action: alert
+
+  # =========================================================================
+  # Lateral Movement
+  # =========================================================================
+
+  - id: "SIG-LAT-001"
+    description: "SMB lateral movement attempt"
+    severity: HIGH
+    mitre: "T1021.002"
+    tags: [lateral_movement, smb]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: in, value: [445, 139]}
+    action: alert
+
+  - id: "SIG-LAT-002"
+    description: "RDP exposed to network"
+    severity: MEDIUM
+    mitre: "T1021.001"
+    tags: [lateral_movement, rdp]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: eq, value: 3389}
+    action: alert
+
+  - id: "SIG-LAT-003"
+    description: "VNC remote access attempt"
+    severity: MEDIUM
+    mitre: "T1021.005"
+    tags: [lateral_movement, vnc]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: in, value: [5900, 5901, 5902]}
+    action: alert
+
+  - id: "SIG-LAT-004"
+    description: "WinRM remote management access"
+    severity: MEDIUM
+    mitre: "T1021.006"
+    tags: [lateral_movement, winrm]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: in, value: [5985, 5986]}
+    action: alert
+
+  # =========================================================================
+  # Command and Control (C2)
+  # =========================================================================
+
+  - id: "SIG-C2-001"
+    description: "IRC-based C2 communication"
+    severity: HIGH
+    mitre: "T1071"
+    tags: [c2, botnet, irc]
+    match:
+      any:
+        - {field: dst_port, op: eq, value: 6667}
+        - {field: dst_port, op: eq, value: 6697}
+        - {field: dst_port, op: eq, value: 6666}
+    action: alert
+
+  - id: "SIG-C2-002"
+    description: "Cobalt Strike default malleable C2 user-agent"
+    severity: CRITICAL
+    confidence: 0.92
+    mitre: "T1071.001"
+    tags: [c2, cobaltstrike]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: layer7.http.user_agent, op: regex,
+           value: "^(Mozilla/5\\.0 \\(compatible; MSIE 9\\.0;|Internet Explorer)"}
+    action: alert
+
+  - id: "SIG-C2-003"
+    description: "LLMNR/NBT-NS — credential hijacking surface"
+    severity: MEDIUM
+    mitre: "T1557.001"
+    tags: [mitm, credential_access, llmnr]
+    match:
+      any:
+        - {field: dst_port, op: eq, value: 5355}
+        - {field: dst_port, op: eq, value: 137}
+    action: alert
+
+  # =========================================================================
+  # Exfiltration
+  # =========================================================================
+
+  - id: "SIG-EXF-001"
+    description: "DNS TXT record query — possible exfiltration"
+    severity: MEDIUM
+    mitre: "T1048.003"
+    tags: [exfiltration, dns]
+    match:
+      all:
+        - {field: protocol, op: eq, value: udp}
+        - {field: dst_port, op: eq, value: 53}
+        - {field: layer7.dns.query_type, op: eq, value: TXT}
+    action: alert
+
+  # =========================================================================
+  # Impact
+  # =========================================================================
+
+  - id: "SIG-IMP-001"
+    description: "NTP monlist amplification attempt (CVE-2013-5211)"
+    severity: HIGH
+    mitre: "T1498.002"
+    tags: [dos, amplification, ntp]
+    match:
+      all:
+        - {field: protocol, op: eq, value: udp}
+        - {field: dst_port, op: eq, value: 123}
+        - {field: payload_bytes, op: contains, value: "\\x17\\x00\\x03\\x2a"}
+    action: alert

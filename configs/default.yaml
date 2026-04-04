@@ -1,0 +1,7 @@
+# PyNIDS default configuration — minimal settings for quick-start usage.
+# For enterprise deployment, use configs/enterprise.yaml instead.
+
+anomaly:
+  ewma_alpha: 0.3
+  sigma_threshold: 4.0
+  window_seconds: 10

@@ -1,0 +1,107 @@
+# PyNIDS Enterprise Configuration
+# All settings shown with their default values.
+# Override only the keys you need to change.
+
+# ---------------------------------------------------------------------------
+# Anomaly detection — volumetric spike (EWMA)
+# ---------------------------------------------------------------------------
+anomaly:
+  ewma_alpha: 0.3          # Smoothing factor (0=slow adapt, 1=instant)
+  sigma_threshold: 3.5     # Standard deviations above EWMA to trigger
+  window_seconds: 10       # Counting window width
+
+# ---------------------------------------------------------------------------
+# Port scan detection
+# ---------------------------------------------------------------------------
+scan:
+  horizontal_threshold: 15   # Unique dst IPs on same port before alert
+  horizontal_window: 60      # Window in seconds
+  vertical_threshold: 12     # Unique dst ports on same host before alert
+  vertical_window: 60
+
+# ---------------------------------------------------------------------------
+# Brute-force detection
+# ---------------------------------------------------------------------------
+brute_force:
+  threshold: 8              # Connection attempts before alert
+  window: 30                # Sliding window in seconds
+  ports:                    # Services to monitor
+    - 21    # FTP
+    - 22    # SSH
+    - 23    # Telnet
+    - 25    # SMTP
+    - 110   # POP3
+    - 143   # IMAP
+    - 389   # LDAP
+    - 636   # LDAPS
+    - 3389  # RDP
+    - 5900  # VNC
+    - 8080  # HTTP alternate
+
+# ---------------------------------------------------------------------------
+# Behavioral detection
+# ---------------------------------------------------------------------------
+behavioral:
+  dns_entropy_threshold: 3.5  # Shannon entropy (bits) above = suspicious
+  dns_length_threshold: 50    # Query name length above = suspicious
+  exfil_threshold_bytes: 10485760  # 10 MiB per flow before exfil alert
+  beacon_min_connections: 6   # Minimum samples before beaconing analysis
+  beacon_cv_threshold: 0.20   # Coefficient of variation below = beaconing
+
+# ---------------------------------------------------------------------------
+# Flow / connection tracking
+# ---------------------------------------------------------------------------
+flow:
+  max_flows: 100000           # Max concurrent tracked flows
+  idle_timeout: 300           # Seconds of inactivity before flow expires
+
+# ---------------------------------------------------------------------------
+# Threat intelligence feeds
+# ---------------------------------------------------------------------------
+intel:
+  enabled: true
+  bad_ips_file: intel/known_bad_ips.yaml
+  malicious_domains_file: intel/malicious_domains.yaml
+
+# ---------------------------------------------------------------------------
+# Alert management
+# ---------------------------------------------------------------------------
+alert_manager:
+  dedup_window: 60            # Seconds to suppress duplicate alerts
+  correlation_window: 120     # Window for multi-vector correlation
+  correlation_threshold: 3    # Distinct rule IDs to trigger correlation
+  min_severity: LOW
+
+  # Suppression whitelist — silence specific alerts from known-good sources
+  suppression: []
+  # Example:
+  # suppression:
+  #   - rule_id: "SIG-LAT-001"
+  #     src_cidr: "10.10.0.0/16"   # Authorised admin VLAN
+  #   - rule_id: "*"
+  #     src_cidr: "192.168.1.1/32"  # Silence all alerts from bastion host
+
+# ---------------------------------------------------------------------------
+# Output backends
+# ---------------------------------------------------------------------------
+outputs:
+  console:
+    enabled: true
+    min_severity: LOW
+    show_evidence: false
+
+  json_file:
+    enabled: false
+    path: /var/log/pynids/alerts.json
+    max_bytes: 10485760     # 10 MiB per file
+    backup_count: 10
+
+  sqlite:
+    enabled: false
+    path: /var/db/pynids/alerts.db
+
+  syslog:
+    enabled: false
+    host: localhost
+    port: 514
+    protocol: udp          # udp | tcp

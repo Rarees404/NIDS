@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling>=1.18.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pynids"
+version = "1.0.0"
+description = "Enterprise-grade Python Network Intrusion Detection System (NIDS) with signature, anomaly, behavioral, and threat-intel detection."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Your Name" }
+]
+keywords = ["nids", "ids", "security", "network", "intrusion-detection", "scapy", "cybersecurity"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Security",
+  "Topic :: System :: Networking :: Monitoring",
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: Developers",
+]
+dependencies = [
+  "scapy>=2.5.0",
+  "PyYAML>=6.0.0",
+  "click>=8.1.0",
+  "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4.0",
+  "pytest-cov>=4.1.0",
+]
+
+[project.scripts]
+pynids = "pynids.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pynids"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["pynids"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
