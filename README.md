@@ -29,7 +29,7 @@ signature, statistical anomaly, behavioral, and threat-intelligence — all in o
 | 🌐 **Threat Intelligence** | Local CIDR-based bad-IP feeds + malicious domain suffix matching |
 | 🔔 **Alert Management** | Deduplication, IP/CIDR suppression allowlists, multi-vector correlation |
 | 💾 **Output Backends** | Console (Rich), rotating JSON file, SQLite, Syslog (UDP/TCP) |
-| 🖥️ **CLI** | Five commands: `live`, `pcap`, `query`, `validate`, `--version` |
+| 🖥️ **CLI** | Six commands: `live`, `pcap`, `query`, `stats`, `validate`, `--version` |
 
 ---
 
@@ -129,6 +129,13 @@ pynids pcap \
 ```bash
 pynids query --db alerts.db --min-severity HIGH
 pynids query --db alerts.db --src-ip 10.0.0.5 --type signature --json
+```
+
+### `pynids stats` — Alert statistics from SQLite
+
+```bash
+pynids stats --db alerts.db
+pynids stats --db alerts.db --json
 ```
 
 ### `pynids validate` — Validate rules/config YAML

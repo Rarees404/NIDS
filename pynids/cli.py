@@ -9,13 +9,14 @@ Commands
 live       Real-time capture from a network interface
 pcap       Replay and analyse a PCAP/PCAPNG file
 query      Search persisted alerts in a SQLite database
-stats      Display engine statistics
+stats      Display live engine statistics
 validate   Validate a rules or configuration file
 """
 from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -27,11 +28,12 @@ from rich.table import Table
 from rich.text import Text
 
 from . import __version__
-from .alerts.manager import AlertManager
-from .alerts.model import Severity
+from .alerts.manager import AlertManager, BaseOutput
+from .alerts.model import Alert, Severity
 from .alerts.outputs.console import ConsoleOutput
 from .alerts.outputs.json_file import JsonFileOutput
 from .alerts.outputs.sqlite_out import SQLiteOutput
+from .alerts.outputs.syslog_out import SyslogOutput
 from .config import load_config
 from .engine import DetectionEngine
 from .intel.threat_intel import ThreatIntel
@@ -103,6 +105,14 @@ def _resolve_config(config: Optional[str]) -> str:
     return "__default__"
 
 
+class _JsonStdout(BaseOutput):
+    """Write each alert as a JSON line to stdout."""
+
+    def emit(self, alert: Alert) -> None:
+        sys.stdout.write(json.dumps(alert.to_dict()) + "\n")
+        sys.stdout.flush()
+
+
 def _build_engine(
     config_path: str,
     rules_path: Optional[str],
@@ -132,33 +142,29 @@ def _build_engine(
         suppression_rules=am_cfg.get("suppression", []),
     )
 
-    # Console output
+    # Console / JSON stdout output
+    out_cfg = cfg.get("outputs", {})
     if not json_output:
+        con_cfg = out_cfg.get("console", {})
         mgr.register_output(
             ConsoleOutput(
                 min_severity=Severity(min_severity),
-                show_evidence=show_evidence,
+                show_evidence=show_evidence or bool(con_cfg.get("show_evidence", False)),
             )
         )
     else:
-        # JSON output goes directly to stdout
-        import sys as _sys
-        from ..alerts.manager import BaseOutput
-        from ..alerts.model import Alert as _Alert
-
-        class _JsonStdout(BaseOutput):
-            def emit(self, alert: _Alert) -> None:
-                _sys.stdout.write(json.dumps(alert.to_dict()) + "\n")
-                _sys.stdout.flush()
-
         mgr.register_output(_JsonStdout())
 
-    # Optional SQLite
-    if sqlite_path:
-        mgr.register_output(SQLiteOutput(path=sqlite_path))
+    # SQLite — CLI flag takes precedence, then config
+    effective_sqlite = sqlite_path
+    if not effective_sqlite:
+        sq_cfg = out_cfg.get("sqlite", {})
+        if sq_cfg.get("enabled"):
+            effective_sqlite = sq_cfg.get("path", "pynids-alerts.db")
+    if effective_sqlite:
+        mgr.register_output(SQLiteOutput(path=effective_sqlite))
 
-    # Optional JSON file from config
-    out_cfg = cfg.get("outputs", {})
+    # JSON file from config
     jf_cfg = out_cfg.get("json_file", {})
     if jf_cfg.get("enabled"):
         mgr.register_output(
@@ -166,6 +172,18 @@ def _build_engine(
                 path=jf_cfg.get("path", "pynids-alerts.json"),
                 max_bytes=int(jf_cfg.get("max_bytes", 10 * 1024 * 1024)),
                 backup_count=int(jf_cfg.get("backup_count", 5)),
+            )
+        )
+
+    # Syslog from config
+    sl_cfg = out_cfg.get("syslog", {})
+    if sl_cfg.get("enabled"):
+        mgr.register_output(
+            SyslogOutput(
+                host=sl_cfg.get("host", "localhost"),
+                port=int(sl_cfg.get("port", 514)),
+                protocol=sl_cfg.get("protocol", "udp"),
+                min_severity=Severity(min_severity),
             )
         )
 
@@ -194,6 +212,13 @@ def _build_engine(
 @click.option("--iface", "-i", required=True, help="Network interface (e.g. en0, eth0).")
 @click.option("--bpf", default=None, help="BPF capture filter (e.g. 'tcp port 80').")
 @click.option("--sqlite", default=None, help="Persist alerts to this SQLite file.", metavar="FILE")
+@click.option(
+    "--reload-interval",
+    default=30,
+    show_default=True,
+    type=int,
+    help="Check for rules file changes every N seconds (0 = disable hot-reload).",
+)
 @_config_option
 @_rules_option
 @_output_option
@@ -203,6 +228,7 @@ def live(
     iface: str,
     bpf: Optional[str],
     sqlite: Optional[str],
+    reload_interval: int,
     config: Optional[str],
     rules: Optional[str],
     output: str,
@@ -217,6 +243,7 @@ def live(
     Examples:
       pynids live --iface en0 --rules rules/enterprise_rules.yaml
       pynids live --iface eth0 --bpf "not port 22" --sqlite alerts.db
+      pynids live --iface eth0 --rules rules/enterprise_rules.yaml --reload-interval 15
     """
     config_path = _resolve_config(config)
     engine = _build_engine(
@@ -225,9 +252,24 @@ def live(
     )
     _print_banner(iface=iface, rules=rules, config=config_path)
 
+    # Hot-reload background watcher
+    _stop_event = threading.Event()
+    if rules and reload_interval > 0:
+        def _watcher() -> None:
+            while not _stop_event.wait(timeout=reload_interval):
+                if engine.reload_rules():
+                    console.print(
+                        f"[dim][{time.strftime('%H:%M:%S')}] Rules hot-reloaded from "
+                        f"{rules}[/dim]"
+                    )
+
+        watcher_thread = threading.Thread(target=_watcher, daemon=True, name="rules-watcher")
+        watcher_thread.start()
+
     try:
         sniff_live(iface=iface, engine_callback=engine.process_packet, bpf_filter=bpf)
     finally:
+        _stop_event.set()
         engine.alert_manager.close()
         _print_stats(engine)
 
@@ -368,6 +410,137 @@ def query(
 
 
 # ---------------------------------------------------------------------------
+# stats command
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.option("--db", default=None, help="Path to SQLite alerts database for aggregate stats.", metavar="FILE")
+@click.option("--json", "as_json", is_flag=True, help="Output stats as JSON.")
+def stats(db: Optional[str], as_json: bool) -> None:
+    """Display aggregate alert statistics from a SQLite database.
+
+    \b
+    Examples:
+      pynids stats --db alerts.db
+      pynids stats --db alerts.db --json
+    """
+    if not db:
+        console.print("[red]--db is required for the stats command.[/red]")
+        sys.exit(1)
+    if not Path(db).exists():
+        console.print(f"[red]Database not found: {db}[/red]")
+        sys.exit(1)
+
+    import sqlite3
+    conn = sqlite3.connect(db)
+    cur = conn.cursor()
+
+    # Total counts
+    cur.execute("SELECT COUNT(*) FROM alerts")
+    total = cur.fetchone()[0]
+
+    # By severity
+    cur.execute(
+        "SELECT severity, COUNT(*) FROM alerts GROUP BY severity ORDER BY severity_numeric DESC"
+    )
+    by_severity = dict(cur.fetchall())
+
+    # By type
+    cur.execute("SELECT alert_type, COUNT(*) FROM alerts GROUP BY alert_type ORDER BY COUNT(*) DESC")
+    by_type = dict(cur.fetchall())
+
+    # Top 10 source IPs
+    cur.execute(
+        "SELECT src_ip, COUNT(*) as cnt FROM alerts WHERE src_ip IS NOT NULL "
+        "GROUP BY src_ip ORDER BY cnt DESC LIMIT 10"
+    )
+    top_sources = cur.fetchall()
+
+    # Top MITRE techniques
+    cur.execute(
+        "SELECT mitre_technique, COUNT(*) as cnt FROM alerts WHERE mitre_technique IS NOT NULL "
+        "GROUP BY mitre_technique ORDER BY cnt DESC LIMIT 10"
+    )
+    top_mitre = cur.fetchall()
+
+    # Time range
+    cur.execute("SELECT MIN(timestamp), MAX(timestamp) FROM alerts")
+    ts_min, ts_max = cur.fetchone()
+    conn.close()
+
+    if as_json:
+        from datetime import datetime
+        output_data = {
+            "total_alerts": total,
+            "by_severity": by_severity,
+            "by_type": by_type,
+            "top_source_ips": [{"ip": r[0], "count": r[1]} for r in top_sources],
+            "top_mitre_techniques": [{"technique": r[0], "count": r[1]} for r in top_mitre],
+            "time_range": {
+                "earliest": datetime.fromtimestamp(ts_min).isoformat() if ts_min else None,
+                "latest": datetime.fromtimestamp(ts_max).isoformat() if ts_max else None,
+            },
+        }
+        print(json.dumps(output_data, indent=2))
+        return
+
+    from datetime import datetime
+
+    console.print(Panel(
+        f"[bold cyan]PyNIDS Alert Statistics[/bold cyan]\n"
+        f"Database: [dim]{db}[/dim]",
+        expand=False,
+    ))
+
+    # Summary table
+    summary = Table(title="Summary", show_header=False, box=None)
+    summary.add_column("Key", style="dim")
+    summary.add_column("Value", style="bold")
+    summary.add_row("Total alerts", str(total))
+    if ts_min and ts_max:
+        summary.add_row("Earliest", datetime.fromtimestamp(ts_min).strftime("%Y-%m-%d %H:%M:%S"))
+        summary.add_row("Latest", datetime.fromtimestamp(ts_max).strftime("%Y-%m-%d %H:%M:%S"))
+    console.print(summary)
+
+    # Severity breakdown
+    sev_table = Table(title="By Severity")
+    sev_table.add_column("Severity")
+    sev_table.add_column("Count", justify="right")
+    _sev_colors = {"CRITICAL": "bold red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}
+    for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
+        cnt = by_severity.get(sev, 0)
+        if cnt:
+            sev_table.add_row(Text(sev, style=_sev_colors.get(sev, "")), str(cnt))
+    console.print(sev_table)
+
+    # Type breakdown
+    type_table = Table(title="By Detection Type")
+    type_table.add_column("Type")
+    type_table.add_column("Count", justify="right")
+    for t, cnt in by_type.items():
+        type_table.add_row(t, str(cnt))
+    console.print(type_table)
+
+    # Top sources
+    if top_sources:
+        src_table = Table(title="Top Source IPs")
+        src_table.add_column("IP")
+        src_table.add_column("Alerts", justify="right")
+        for ip, cnt in top_sources:
+            src_table.add_row(ip or "-", str(cnt))
+        console.print(src_table)
+
+    # Top MITRE techniques
+    if top_mitre:
+        mitre_table = Table(title="Top MITRE Techniques")
+        mitre_table.add_column("Technique")
+        mitre_table.add_column("Count", justify="right")
+        for technique, cnt in top_mitre:
+            mitre_table.add_row(technique, str(cnt))
+        console.print(mitre_table)
+
+
+# ---------------------------------------------------------------------------
 # validate command
 # ---------------------------------------------------------------------------
 
@@ -441,14 +614,15 @@ def _print_banner(iface: Optional[str] = None, rules: Optional[str] = None,
 
 
 def _print_stats(engine: DetectionEngine) -> None:
-    stats = engine.stats
-    am = stats.get("alert_stats", {})
+    s = engine.stats
+    am = s.get("alert_stats", {})
     table = Table(title="Session Statistics", show_header=False, box=None)
     table.add_column("Key", style="dim")
     table.add_column("Value", style="bold")
-    table.add_row("Packets processed", str(stats["packets_processed"]))
-    table.add_row("Throughput", f"{stats['packets_per_second']} pkt/s")
-    table.add_row("Active flows", str(stats["active_flows"]))
+    table.add_row("Packets processed", str(s["packets_processed"]))
+    table.add_row("Throughput", f"{s['packets_per_second']} pkt/s")
+    table.add_row("Active flows", str(s["active_flows"]))
+    table.add_row("Uptime", f"{s['uptime_seconds']:.1f}s")
     table.add_row("Alerts seen", str(am.get("total_seen", 0)))
     table.add_row("Alerts emitted", str(am.get("total_emitted", 0)))
     table.add_row("Deduplicated", str(am.get("total_deduplicated", 0)))

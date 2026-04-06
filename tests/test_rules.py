@@ -1,4 +1,4 @@
-from pynids.rules import SignatureDetector
+from pynids.detection.signature import SignatureDetector
 
 
 def test_signature_detector_matches_port_and_payload():
