@@ -95,11 +95,13 @@ _SCANNER_UA_RE = re.compile(
 
 
 def _parse_http(payload: bytes) -> Dict[str, Any]:
+    if not payload:
+        return {}
     info: Dict[str, Any] = {}
     try:
         text = payload.decode("utf-8", errors="replace")
         lines = text.split("\r\n")
-        if not lines:
+        if not lines or not lines[0]:
             return info
 
         first = lines[0]
@@ -136,11 +138,13 @@ def _parse_http(payload: bytes) -> Dict[str, Any]:
         info["referer"] = headers.get("referer")
         info["headers"] = headers
 
-        # Security heuristics
-        search_target = info.get("uri", "") + text
+        # Security heuristics — replace URL-encoded '+' (space) before matching
+        uri = info.get("uri", "")
+        uri_decoded = uri.replace("+", " ")
+        search_target = uri_decoded + text.replace("+", " ")
         info["sqli_suspect"] = bool(_SQLI_RE.search(search_target))
         info["xss_suspect"] = bool(_XSS_RE.search(search_target))
-        info["path_traversal_suspect"] = bool(_PATH_TRAVERSAL_RE.search(info.get("uri", "")))
+        info["path_traversal_suspect"] = bool(_PATH_TRAVERSAL_RE.search(uri))
         info["scanner_ua"] = bool(_SCANNER_UA_RE.search(info.get("user_agent") or ""))
 
     except Exception:
