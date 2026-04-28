@@ -17,11 +17,13 @@
    - 8.1 [Signature Detection](#81-signature-detection)
    - 8.2 [Anomaly Detection](#82-anomaly-detection)
    - 8.3 [Behavioral Detection](#83-behavioral-detection)
+   - 8.4 [Stealth / X-Ray Detection](#84-stealth--x-ray-detection)
 9. [Threat Intelligence — `intel/threat_intel.py`](#9-threat-intelligence--intelthreat_intelpy)
 10. [Alert System](#10-alert-system)
     - 10.1 [Alert Model](#101-alert-model)
     - 10.2 [Alert Manager](#102-alert-manager)
     - 10.3 [Output Backends](#103-output-backends)
+    - 10.4 [X-Ray Live Dashboard](#104-x-ray-live-dashboard)
 11. [CLI — `cli.py`](#11-cli--clipy)
 12. [Configuration Reference](#12-configuration-reference)
 13. [Rule Language Reference](#13-rule-language-reference)
@@ -46,11 +48,12 @@ PyNIDS is an **enterprise-grade, pure-Python Network Intrusion Detection System*
 | Signature detection | Declarative YAML rule language with threshold gating |
 | Statistical anomaly detection | EWMA volumetric spikes, port-scan, brute-force |
 | Behavioral detection | DNS tunneling, HTTP attacks, data exfiltration, C2 beaconing |
+| Stealth / X-Ray detection | WebRTC IP leaks, QUIC/HTTP-3, WebSockets, localhost probes, beacons, DNS prefetch storms, third-party trackers — everything the browser hides from DevTools |
 | Threat intelligence | CIDR/domain IOC feeds (YAML), checked every packet |
 | Alert management | Deduplication, suppression allowlists, multi-vector correlation |
-| Output backends | Console (Rich), JSON (rotating file), SQLite, Syslog |
+| Output backends | Console (Rich), JSON (rotating file), SQLite, Syslog, **X-Ray live dashboard** |
 | Hot-reload | Rules can be swapped atomically at runtime without stopping the engine |
-| CLI | Click + Rich, five commands: `live`, `pcap`, `query`, `stats`, `validate` |
+| CLI | Click + Rich, six commands: `live`, `pcap`, `xray`, `query`, `stats`, `validate` |
 
 ---
 
@@ -71,10 +74,11 @@ Network Interface / PCAP File
   │                  DetectionEngine                       │  engine.py
   │                                                       │
   │  1. dissect(meta)    ──► Protocol Dissector           │
+  │     (HTTP/DNS/TLS/SSH/SMTP + STUN, QUIC, WebSocket)   │
   │  2. flow_tracker.update(meta) ──► Flow Table          │
   │  3. _run_threat_intel(meta, layer7)                   │
   │  4. for detector in [Signature, Anomaly×3,            │
-  │                       Behavioral×4]:                  │
+  │                       Behavioral×4, Stealth×7]:       │
   │        detector.analyze(meta, layer7, flow)           │
   └────────┬──────────────────────────────────────────────┘
            │ List[Alert]
@@ -86,10 +90,10 @@ Network Interface / PCAP File
   │  • Correlate      │
   └────────┬──────────┘
            │
-     ┌─────┼──────────┬───────────┐
-     ▼     ▼          ▼           ▼
-  Console  JSON    SQLite      Syslog
-  (Rich)   file    database    server
+     ┌─────┼──────────┬───────────┬───────────┐
+     ▼     ▼          ▼           ▼           ▼
+  Console  JSON    SQLite      Syslog     XRayDashboard
+  (Rich)   file    database    server     (Rich Live)
 ```
 
 The engine is **single-threaded and synchronous** by design — predictable, testable, and debuggable. The only concurrency is in the sniffer layer itself: Scapy's `AsyncSniffer` runs in a background thread and hands packets to the engine via a bounded `queue.Queue`, preventing the capture callback from blocking the sniffer thread.
@@ -119,7 +123,8 @@ PyNIDS/
 │   ├── test_flow.py
 │   ├── test_protocols.py
 │   ├── test_rules.py
-│   └── test_signature.py
+│   ├── test_signature.py
+│   └── test_stealth.py             # Stealth parsers, detectors, X-Ray dashboard
 └── pynids/                         # The installable package
     ├── __init__.py                 # Version, quick-start docstring
     ├── cli.py                      # Click CLI (live, pcap, query, validate)
@@ -135,18 +140,22 @@ PyNIDS/
     │       ├── console.py          # Rich-formatted terminal output
     │       ├── json_file.py        # Rotating JSON-lines file
     │       ├── sqlite_out.py       # SQLite persistence + query API
-    │       └── syslog_out.py       # UDP/TCP syslog forwarding
+    │       ├── syslog_out.py       # UDP/TCP syslog forwarding
+    │       └── xray_dashboard.py   # Rich Live multi-panel X-Ray dashboard
     ├── detection/
     │   ├── base.py                 # BaseDetector abstract class
     │   ├── signature.py            # YAML rule engine
     │   ├── anomaly.py              # EWMA, PortScan, BruteForce detectors
-    │   └── behavioral.py          # DNS tunneling, HTTP attacks, Exfil, Beaconing
+    │   ├── behavioral.py           # DNS tunneling, HTTP attacks, Exfil, Beaconing
+    │   └── stealth.py              # WebRTC leak, Localhost probe, QUIC, WebSocket,
+    │                               #   Beacon, DNS prefetch, Tracker detectors
     ├── flow/
     │   └── tracker.py              # FlowTracker + Flow dataclass
     ├── intel/
     │   └── threat_intel.py         # ThreatIntel IOC loader & lookup
     └── protocols/
-        └── dissector.py            # HTTP, DNS, TLS, SSH, SMTP parsers
+        ├── dissector.py            # HTTP, DNS, TLS, SSH, SMTP parsers + STUN/QUIC routing
+        └── stealth.py              # STUN/TURN, QUIC, WebSocket, beacon parsers
 ```
 
 ---
@@ -209,10 +218,17 @@ Port routing table:
 | Ports | Protocol | Parser |
 |---|---|---|
 | 53 (src or dst) | DNS | `_parse_dns` |
-| 80, 8080, 8000, 8008 | HTTP | `_parse_http` |
+| 80, 8080, 8000, 8008 | HTTP | `_parse_http` (+ WebSocket / beacon flags) |
 | 443, 8443 | TLS | `_parse_tls_client_hello` |
 | 22 | SSH | `_parse_ssh_banner` |
 | 25, 465, 587 | SMTP | `_parse_smtp` |
+
+In addition, **before** any port-based routing, every UDP datagram is run through two **port-independent probes** (`protocols/stealth.py`):
+
+1. `is_stun(payload)` — checks the STUN magic cookie at offset 4. If it matches, `_parse_stun` is called and `layer7["stun"]` is populated.
+2. `is_quic(payload)` — checks the long-header bit pattern + version field. Successful matches populate `layer7["quic"]`.
+
+This is essential: WebRTC and HTTP/3 routinely fly over arbitrary UDP ports (3478, 19302, 50000+, 443, …) and a port-only router would miss them.
 
 The `layer7` dict is keyed by `app_proto` plus a protocol-specific nested dict. All parsers are purely defensive (wrapped in `try/except`) — a malformed packet that causes a parser exception simply returns an empty dict, and detection continues.
 
@@ -270,6 +286,45 @@ Useful for detecting old or vulnerable SSH software versions via signature rules
 ### 5.6 SMTP Parser (`_parse_smtp`)
 
 Extracts: `EHLO`/`HELO` hostname, `MAIL FROM`, `RCPT TO`, and `AUTH` mechanism from SMTP command streams. Supports phishing/spam detection and unusual mail routing via signature rules.
+
+### 5.7 Stealth-Protocol Parsers (`protocols/stealth.py`)
+
+This module powers the **X-Ray** detection layer. It contains four pure-Python decoders for transports that the browser's DevTools Network tab does **not** show.
+
+#### `parse_stun(payload) → dict`  (RFC 5389 / RFC 8489)
+
+A complete STUN/TURN message decoder.
+
+- **Magic cookie check** at offset 4 (`0x2112A442`) acts as a port-independent classifier.
+- Walks the TLV attribute list and decodes:
+  - `XOR-MAPPED-ADDRESS` (type `0x0020`) — IPv4 and IPv6, with the full RFC 5389 §15.2 XOR scheme (port XORed with the upper 16 bits of the magic cookie; IPv6 address XORed with magic ‖ transaction-ID).
+  - `XOR-RELAYED-ADDRESS` (type `0x0016`) — TURN-allocation responses.
+  - `MAPPED-ADDRESS` (type `0x0001`) — legacy plain-text address.
+  - `SOFTWARE` (type `0x8022`) — server identity string.
+  - `USERNAME` (type `0x0006`) — short-term-credential username.
+- Output keys: `message_type`, `txid`, `is_response`, `is_error`, `is_turn`, `software`, `addresses`, `mapped_address`.
+
+#### `parse_quic(payload) → dict`  (RFC 9000 long-header probe)
+
+- Checks the **long-header bit pattern** `0b11xxxxxx` at byte 0 (the long-header bit and the fixed bit) before reading the 32-bit version field.
+- Recognises QUIC v1 (`0x00000001`), v2 (`0x6B3343CF`), draft-29 (`0xFF00001D`), version-negotiation (`0x00000000`), and Quicly drafts.
+- Extracts long-header packet type (Initial / 0-RTT / Handshake / Retry), Destination Connection ID, and Source Connection ID.
+- Output keys: `version`, `version_code`, `packet_type`, `dcid`, `scid`.
+
+#### `is_websocket_upgrade(http_info) → bool`
+
+Returns true when the dissected HTTP request carries `Upgrade: websocket` **and** `Connection: upgrade` (case-insensitive). Used by the dissector to add `websocket_upgrade: true` to the `http` dict and consumed by the `WebSocketDetector`.
+
+#### `is_beacon_request(http_info) → bool`
+
+Heuristic that flags fire-and-forget HTTP requests typical of `navigator.sendBeacon` and 1×1 tracking pixels:
+
+- POSTs ≤ 1500 bytes with a beacon-family `Content-Type` (`text/plain`, `application/json`, `application/x-www-form-urlencoded`, or empty) **and** no `Accept` header.
+- GETs whose path matches a curated hint list (`/beacon`, `/collect`, `/__utm.gif`, `/pixel`, `/cdn-cgi/rum`, …) or `*.gif?…` URLs that are clearly tracking pixels.
+
+#### `classify_ip(ip) → str`
+
+Convenience wrapper around `ipaddress` that returns one of `'loopback'`, `'private'`, `'link_local'`, `'multicast'`, `'public'`, `'unknown'`. The X-Ray dashboard uses it to colour-code leaked addresses, and the `LocalhostProbeDetector` uses it as its primary gate.
 
 ---
 
@@ -343,6 +398,14 @@ On construction the engine:
    - `HttpAttackDetector`
    - `DataExfiltrationDetector`
    - `BeaconingDetector`
+   - **Stealth pack** (gated by `stealth.enabled`, default `true`):
+     - `WebRtcLeakDetector`
+     - `LocalhostProbeDetector`
+     - `QuicHttp3Detector`
+     - `WebSocketDetector`
+     - `BeaconDetector`
+     - `DnsPrefetchDetector`
+     - `TrackerDetector` (gated by `stealth.trackers_enabled`)
 
 ### 7.2 `process_packet(meta) → List[Alert]`
 
@@ -565,6 +628,85 @@ Confidence: `max(0, 1.0 - cv / cv_threshold)` — a CV of 0 gives confidence 1.0
 
 **MITRE:** `T1071`
 
+### 8.4 Stealth / X-Ray Detection
+
+**File:** `detection/stealth.py`
+
+The DevTools "Network" tab is a curated view: it shows the renderer's own `fetch`/`XHR` calls and very little else. The stealth pack surfaces every category of activity the browser performs **outside** that view, so the operator finally sees what their machine is doing on their behalf.
+
+All stealth detectors emit `BEHAVIORAL` alerts with `rule_id` strings starting with `STEALTH-…`, so they sit naturally alongside the rest of the alert ecosystem and can be persisted, queried, suppressed, and correlated identically.
+
+#### `WebRtcLeakDetector` — STUN / TURN IP-leak surveillance
+
+For every UDP datagram dissected as STUN, the detector inspects `XOR-MAPPED-ADDRESS` (binding response) and `XOR-RELAYED-ADDRESS` (TURN allocation):
+
+- If the leaked address is `loopback` / `private` / `link_local` → **HIGH** severity `STEALTH-WEBRTC-LEAK`. This is the textbook "WebRTC IP leak" that bypasses VPN/proxy tunnels.
+- If the leaked address is `public` → **LOW** severity `STEALTH-WEBRTC-REFLEXIVE` (the browser still revealed the user's public IP to a third-party STUN server outside any visible page traffic).
+- If the message is a Binding Request with no mapped address yet → **LOW** severity `STEALTH-WEBRTC-STUN` (or `STEALTH-WEBRTC-TURN` for TURN methods) — purely informational, useful for the dashboard's "WebRTC peers" panel.
+
+**MITRE:** `T1592.004` (Gather Victim Host Information: Identify Network Configuration)
+
+#### `LocalhostProbeDetector` — Browser-side fingerprinting
+
+Detects the well-documented technique of webpages probing `127.0.0.1` (and RFC1918 ranges) to fingerprint locally-running developer tools, password managers, malware-analysis sandboxes, etc.
+
+The detector is gated tightly to avoid false-positive storms:
+
+- Only **TCP packets with the SYN flag set and ACK clear** (genuine connection initiations) are considered, plus all UDP datagrams.
+- Quiet ports that the OS legitimately uses are ignored unless the destination is loopback (e.g. `mDNS:5353`, `dhcp:67/68`, `netbios:137`, `http:80`, `https:443` to a private gateway are not interesting).
+- A single qualifying packet → **HIGH** severity `STEALTH-LOCALHOST-PROBE` for loopback, **MEDIUM** for private subnets.
+- Per `(src_ip, dst_ip)` pair, the detector tracks a 64-slot deque of `(timestamp, dst_port)` samples within a sliding `scan_window` (default 30 s). When `scan_threshold` (default 5) **distinct** ports appear in that window, an additional **CRITICAL** `STEALTH-LOCALHOST-SCAN` alert is emitted with the full list of probed ports.
+
+**MITRE:** `T1046` (Network Service Discovery)
+
+#### `QuicHttp3Detector` — HTTP/3 endpoint surfacing
+
+Emits a single `STEALTH-QUIC-INITIAL` alert per unique `(src_ip, dst_ip, dst_port)` whenever a QUIC long-header **Initial** packet is observed. Subsequent packets of the same connection are silently swallowed. This gives the X-Ray panel a clean list of HTTP/3 endpoints without flooding the alert stream.
+
+**MITRE:** `T1071.001`
+
+#### `WebSocketDetector` — Long-lived bi-directional channels
+
+When the dissector sets `layer7.http.websocket_upgrade = true`, this detector emits a `STEALTH-WEBSOCKET` alert carrying `host`, `path`, and (truncated) `user_agent` in the evidence dict.
+
+#### `BeaconDetector` — `navigator.sendBeacon` and tracking pixels
+
+Triggered by the `layer7.http.beacon_suspect` flag set by the dissector. Emits a `STEALTH-BEACON` alert with the full request line and content metadata. Severity is **LOW** because beacons are pervasive; the detector's value is **visibility**, not severity.
+
+#### `DnsPrefetchDetector` — Page-load DNS storms
+
+Maintains a per-`src_ip` deque of `(timestamp, query_name)` samples within a sliding `window_seconds` (default 5 s). When the deque holds at least `burst_threshold` (default 8) **distinct** names, a `STEALTH-DNS-PREFETCH` alert is emitted with up to 20 of the unique hosts in the evidence. A cool-down equal to the window prevents alert flooding while the burst is ongoing.
+
+This is the fingerprint of `<link rel="dns-prefetch">` / `<link rel="preconnect">` browser hints firing the moment a page starts loading — none of which appear in DevTools.
+
+#### `TrackerDetector` — Built-in third-party tracker list
+
+Maintains a curated dictionary of ~60 well-known analytics / advertising / RUM domains (Google Analytics, Meta Pixel, DoubleClick, Hotjar, FullStory, Sentry RUM, Datadog RUM, Segment, Mixpanel, Amplitude, …). The detector matches on three signal sources, in priority order:
+
+1. TLS SNI (`layer7.tls.sni`)
+2. HTTP `Host` (`layer7.http.host`)
+3. DNS query name (`layer7.dns.query_name`, requests only)
+
+Domain matches are **suffix-based** — `doubleclick.net` matches `stats.g.doubleclick.net` but not `notdoubleclick.net`. Each `(src_ip, host)` is reported at most once via a `_reported` set, keeping the stream concise.
+
+The domain list is overridable: pass a custom `domains={"my.tracker.example": "Internal"}` dict to the constructor.
+
+#### Summary of stealth rule IDs
+
+| Rule ID | Default Severity | MITRE | Detector |
+|---|---|---|---|
+| `STEALTH-WEBRTC-LEAK` | HIGH | T1592.004 | `WebRtcLeakDetector` |
+| `STEALTH-WEBRTC-REFLEXIVE` | LOW | T1592.004 | `WebRtcLeakDetector` |
+| `STEALTH-WEBRTC-STUN` | LOW | T1071 | `WebRtcLeakDetector` |
+| `STEALTH-WEBRTC-TURN` | LOW | T1071 | `WebRtcLeakDetector` |
+| `STEALTH-LOCALHOST-PROBE` | HIGH (loopback) / MEDIUM (private) | T1046 | `LocalhostProbeDetector` |
+| `STEALTH-LOCALHOST-SCAN` | CRITICAL | T1046 | `LocalhostProbeDetector` |
+| `STEALTH-QUIC-INITIAL` | LOW | T1071.001 | `QuicHttp3Detector` |
+| `STEALTH-WEBSOCKET` | LOW | T1071.001 | `WebSocketDetector` |
+| `STEALTH-BEACON` | LOW | T1071.001 | `BeaconDetector` |
+| `STEALTH-DNS-PREFETCH` | LOW | T1071.004 | `DnsPrefetchDetector` |
+| `STEALTH-TRACKER` | LOW | T1071.001 | `TrackerDetector` |
+
 ---
 
 ## 9. Threat Intelligence — `intel/threat_intel.py`
@@ -675,6 +817,71 @@ All backends extend `BaseOutput` and must implement `emit(alert)`. They are regi
 | `JsonFileOutput` | `outputs/json_file.py` | Appends `alert.to_dict()` as a JSON line. Rotates at `max_bytes` with `backup_count` archives. |
 | `SQLiteOutput` | `outputs/sqlite_out.py` | Stores alerts in a `pynids_alerts` table. Provides a `query()` method for the `pynids query` CLI command. |
 | `SyslogOutput` | `outputs/syslog_out.py` | Forwards alerts to a remote syslog server over UDP or TCP. RFC-5424 compatible. |
+| `XRayDashboard` | `outputs/xray_dashboard.py` | Multi-panel Rich Live terminal dashboard for stealth-class alerts. See § 10.4. |
+
+### 10.4 X-Ray Live Dashboard
+
+**File:** `alerts/outputs/xray_dashboard.py`
+
+`XRayDashboard` is the visual centrepiece of `pynids xray`. It is a regular `BaseOutput` that the `AlertManager` dispatches every alert to, but instead of printing each event as a single line it **maintains an in-memory model of every category of stealth event** and renders the model into a multi-panel layout that refreshes several times per second.
+
+#### Architecture
+
+```
+AlertManager.add(alert)
+        │
+        ▼
+emit(alert)  ──► classify (kind ∈ {webrtc, localhost, quic, websocket,
+        │                          tracker, beacon, prefetch, other})
+        │       update per-panel state under self._lock
+        │
+Background "xray-render" thread (daemon):
+   while not stop_event:
+       sleep(1 / refresh_hz)
+       Live.update(self._render())
+```
+
+The render thread reads the same protected state that `emit()` writes; both sides hold `self._lock` (an `RLock`) for the brief duration of their data accesses. Rendering itself happens **outside** the lock — Rich computes the layout from the snapshot it just read, not from the live data structures.
+
+#### Layout
+
+```
+┌─ banner — name, interface, uptime, hidden-event counters ─┐
+├──────────────────────────┬─────────────────────────────────┤
+│ WebRTC / IP leaks        │ Localhost / private probes      │
+├──────────────────────────┼─────────────────────────────────┤
+│ QUIC / HTTP-3 endpoints  │ WebSocket sessions              │
+├──────────────────────────┴─────────────────────────────────┤
+│ Trackers · Beacons · Prefetch                              │
+├────────────────────────────────────────────────────────────┤
+│ Live event stream — newest at the bottom                   │
+└────────────────────────────────────────────────────────────┘
+```
+
+| Panel | Aggregation key | Surfaces |
+|---|---|---|
+| **WebRTC / IP leaks** | `(src_ip, dst_ip, leaked_ip)` | Newest leaks first; private/loopback IPs highlighted in bold red, public reflexive addresses in cyan |
+| **Localhost / private probes** | `(src_ip, dst_ip, dst_port)` | Probes coloured by destination class; full port list shown when a `STEALTH-LOCALHOST-SCAN` lands |
+| **QUIC / HTTP-3** | `(src_ip, dst_ip)` | One row per destination with version detected and packet count |
+| **WebSocket sessions** | `(src_ip, host)` | Host + path + count |
+| **Trackers · Beacons · Prefetch** | `(src_ip, host)` | Top-8 trackers by hit count plus running beacon and prefetch totals |
+| **Live event stream** | rolling deque (200) | Last 25 events shown chronologically |
+
+#### Constructor parameters
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `iface` | `"?"` | Cosmetic banner label (set to the interface or `pcap:<file>` by the CLI). |
+| `refresh_hz` | `6.0` | Render rate; 4–6 Hz feels live without flicker. |
+| `max_stream` | `200` | Cap on the rolling event deque. |
+| `max_per_panel` | `12` | Rows kept (and panel height seed) for the four top panels. |
+| `console` | `None` | Inject a `rich.console.Console` (used in tests with `record=True`). |
+
+#### Lifecycle
+
+`start()` creates a `rich.live.Live` in `screen=True` mode (alternate-buffer fullscreen) and spawns the daemon render thread. `close()` sets the stop event, joins the render thread, performs a final paint, and stops the `Live` so the previous terminal contents are restored cleanly.
+
+The CLI's `pynids xray` command always wraps both calls in a `try/finally` so the user's terminal is never left in a corrupted state.
 
 ---
 
@@ -697,6 +904,28 @@ pynids pcap --file capture.pcap --rules rules/enterprise_rules.yaml \
             [--sqlite alerts.db] [--output json]
 ```
 Replays and analyses a PCAP file. Prints packet throughput and stats on completion.
+
+### `pynids xray`
+```
+pynids xray --iface en0 \
+            [--bpf "..."] [--pcap capture.pcap] \
+            [--also-localhost / --no-localhost] [--loopback-iface lo0] \
+            [--refresh 6.0] [--json-log xray.jsonl] [--sqlite alerts.db] \
+            [--config configs/enterprise.yaml] [--rules rules/...]
+```
+
+Runs the full detection pipeline with the stealth pack enabled and replaces the per-line console output with the multi-panel **X-Ray live dashboard** (`XRayDashboard`).
+
+Implementation notes:
+
+- Forces `cfg["stealth"]["enabled"] = true` regardless of config defaults.
+- Builds a fresh `AlertManager` with `dedup_window=0` so the dashboard can show every event verbatim. The `correlation_threshold` is intentionally raised out of reach (999) — multi-vector correlation is meaningless for a privacy-monitoring view.
+- When `--also-localhost` is set (default) **and** the primary interface is not the loopback, a second `sniff_live` thread is started on the loopback device so the dashboard can detect browser-initiated connections to `127.0.0.1`, which never leave the host's main NIC.
+- `--pcap` runs `replay_pcap()` to completion and then keeps the dashboard alive (a sleep loop) until the user hits Ctrl-C. This lets the operator read the result without the terminal screen being torn down immediately.
+- `--json-log` and `--sqlite` register additional `BaseOutput` backends in parallel with the dashboard, so the same events are simultaneously persisted.
+- All capture is gracefully torn down in a `try/finally` that calls `dashboard.close()` and `alert_manager.close()`.
+
+Requires **root/administrator privileges** when sniffing live (raw socket access). PCAP replay runs without privileges.
 
 ### `pynids query`
 ```
@@ -744,6 +973,14 @@ behavioral:
   exfil_threshold_bytes: 10485760 # Flow bytes ≥ → exfil alert (10 MiB)
   beacon_min_connections: 6       # Sample size before beaconing analysis
   beacon_cv_threshold: 0.20       # CV ≤ → beaconing alert
+
+stealth:
+  enabled: true                   # Master switch for the whole stealth pack
+  trackers_enabled: true          # Match against the built-in tracker domain list
+  scan_threshold: 5               # Distinct localhost ports → scan alert
+  scan_window: 30.0               # Sliding window for localhost-scan check (s)
+  dns_prefetch_threshold: 8       # Distinct DNS lookups in burst window
+  dns_prefetch_window: 5.0        # Burst window in seconds
 
 flow:
   max_flows: 100000        # Max concurrent tracked flows
@@ -849,10 +1086,16 @@ rules:
                        ▼
 2.                 dissect(meta)
                        │
-                       │  layer7 = {
-                       │    app_proto: "http",
-                       │    http: {uri, method, sqli_suspect: true, …}
-                       │  }
+                       │  • UDP first → is_stun()? is_quic()?  (port-independent)
+                       │  • else port-routed → HTTP/DNS/TLS/SSH/SMTP
+                       │  • layer7 = {
+                       │      app_proto: "http",
+                       │      http: {uri, method, sqli_suspect: true,
+                       │             websocket_upgrade?, beacon_suspect?},
+                       │      stun?: {message_type, mapped_address: {…}},
+                       │      quic?: {version, packet_type, dcid, scid},
+                       │      …
+                       │    }
                        ▼
 3.             flow_tracker.update(meta)
                        │
@@ -874,18 +1117,27 @@ rules:
 10.            HttpAttackDetector.analyze(meta, layer7, …)
 11.            DataExfiltrationDetector.analyze(meta, …, flow)
 12.            BeaconingDetector.analyze(meta, …)
+13.            WebRtcLeakDetector.analyze(meta, layer7.stun, …)
+14.            LocalhostProbeDetector.analyze(meta, …)
+15.            QuicHttp3Detector.analyze(meta, layer7.quic, …)
+16.            WebSocketDetector.analyze(meta, layer7.http, …)
+17.            BeaconDetector.analyze(meta, layer7.http, …)
+18.            DnsPrefetchDetector.analyze(meta, layer7.dns, …)
+19.            TrackerDetector.analyze(meta, layer7.{tls,http,dns}, …)
                        │
-                       │  alerts = [Alert(SIGNATURE, CRITICAL, …), …]
+                       │  alerts = [Alert(SIGNATURE, CRITICAL, …),
+                       │            Alert(BEHAVIORAL, HIGH, "STEALTH-WEBRTC-LEAK"), …]
                        ▼
-13.            AlertManager.add(alert) for each alert
+20.            AlertManager.add(alert) for each alert
                    A. Severity gate → pass
                    B. Suppression check → not suppressed
                    C. Dedup check → first occurrence, not duplicate
-                   D. Dispatch to ConsoleOutput / JsonFileOutput / SQLiteOutput
+                   D. Dispatch to ConsoleOutput / JsonFileOutput /
+                      SQLiteOutput / XRayDashboard
                    E. Update correlation window → no correlation yet
                        │
                        ▼
-14.            Terminal / JSON file / SQLite / Syslog
+21.            Terminal / JSON file / SQLite / Syslog / X-Ray dashboard
 ```
 
 ---
@@ -905,6 +1157,9 @@ rules:
 | `test_protocols.py` | HTTP/DNS/TLS/SSH/SMTP parsers with crafted payloads |
 | `test_rules.py` | Rule loading from YAML |
 | `test_signature.py` | Rule evaluation, operators, threshold gating, dot-notation fields |
+| `test_stealth.py` | STUN encode/decode round-trip, QUIC long-header recognition, WebSocket / beacon heuristics, every stealth detector with canonical positive/negative inputs, X-Ray dashboard ingest classification, render-doesn't-raise smoke tests |
+
+Total: **139 tests** (105 pre-existing + 34 stealth).
 
 **Fixtures (`conftest.py`):**
 - `make_meta(**kwargs)` — factory for a minimal packet meta dict
@@ -930,3 +1185,7 @@ rules:
 | **Bounded capture queue** | Prevents unbounded memory growth under traffic bursts at the cost of dropping packets. |
 | **Alert dedup keyed on (rule|type, src, dst, port)** | Suppresses alert storms from sustained attacks without losing the first occurrence. |
 | **Correlation as a meta-alert** | Lets SIEM consumers treat multi-vector attacks as a single high-priority event. |
+| **Port-independent STUN / QUIC probes** | WebRTC and HTTP/3 routinely use random high UDP ports; classifying by magic-cookie / long-header bits rather than port is the only way to catch them reliably. |
+| **Stealth detectors emit `BEHAVIORAL` alerts with `STEALTH-…` rule IDs** | Reuses the entire alert-management, persistence, and querying ecosystem instead of inventing a parallel pipeline. The X-Ray dashboard is just another `BaseOutput`. |
+| **X-Ray dashboard runs on a daemon render thread** | Decouples render rate from packet rate. The engine's hot path remains dedup-free and deterministic; the dashboard re-renders at a fixed Hz no matter how busy the wire is. |
+| **Dual sniffer (main NIC + loopback) in `pynids xray`** | Loopback packets never traverse the primary interface, so a second `sniff_live` thread on `lo`/`lo0` is required to detect browser-side localhost probes. |

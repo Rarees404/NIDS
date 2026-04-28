@@ -41,6 +41,15 @@ from .detection.behavioral import (
     BeaconingDetector,
 )
 from .detection.signature import SignatureDetector, load_rules
+from .detection.stealth import (
+    BeaconDetector,
+    DnsPrefetchDetector,
+    LocalhostProbeDetector,
+    QuicHttp3Detector,
+    TrackerDetector,
+    WebRtcLeakDetector,
+    WebSocketDetector,
+)
 from .flow.tracker import FlowTracker
 from .intel.threat_intel import ThreatIntel
 from .protocols.dissector import dissect
@@ -252,6 +261,31 @@ class DetectionEngine:
                 cv_threshold=float(beh_cfg.get("beacon_cv_threshold", 0.20)),
             )
         )
+
+        # Stealth-activity detectors — surface what browsers hide from
+        # the DevTools Network tab (WebRTC IP leaks, localhost probes,
+        # QUIC/HTTP3, WebSockets, beacons, prefetch storms, trackers).
+        # Enabled by default; disable with `stealth: { enabled: false }`.
+        stealth_cfg = config.get("stealth", {}) or {}
+        if stealth_cfg.get("enabled", True):
+            self._detectors.append(WebRtcLeakDetector())
+            self._detectors.append(
+                LocalhostProbeDetector(
+                    scan_threshold=int(stealth_cfg.get("scan_threshold", 5)),
+                    scan_window=float(stealth_cfg.get("scan_window", 30.0)),
+                )
+            )
+            self._detectors.append(QuicHttp3Detector())
+            self._detectors.append(WebSocketDetector())
+            self._detectors.append(BeaconDetector())
+            self._detectors.append(
+                DnsPrefetchDetector(
+                    burst_threshold=int(stealth_cfg.get("dns_prefetch_threshold", 8)),
+                    window_seconds=float(stealth_cfg.get("dns_prefetch_window", 5.0)),
+                )
+            )
+            if stealth_cfg.get("trackers_enabled", True):
+                self._detectors.append(TrackerDetector())
 
         logger.info("Initialised %d detectors", len(self._detectors))
 

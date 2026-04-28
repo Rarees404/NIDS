@@ -21,6 +21,15 @@ import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from .stealth import (
+    is_quic,
+    is_stun,
+    is_websocket_upgrade,
+    is_beacon_request,
+    parse_quic,
+    parse_stun,
+)
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -36,7 +45,7 @@ def dissect(meta: Dict[str, Any]) -> Dict[str, Any]:
 
     Returns:
         A ``layer7`` dict which may contain keys such as ``app_proto``,
-        ``http``, ``dns``, ``tls``, ``ssh``, and ``smtp``.
+        ``http``, ``dns``, ``tls``, ``ssh``, ``smtp``, ``stun``, or ``quic``.
     """
     dst_port: int = meta.get("dst_port") or 0
     src_port: int = meta.get("src_port") or 0
@@ -48,13 +57,36 @@ def dissect(meta: Dict[str, Any]) -> Dict[str, Any]:
 
     layer7: Dict[str, Any] = {}
 
+    # --- Port-independent stealth-protocol probes ---------------------------
+    # WebRTC's STUN/TURN and HTTP/3's QUIC routinely fly over any UDP port
+    # (3478, 19302, 50000+, 443 for QUIC).  We probe by magic-cookie /
+    # header bits before falling back to port-based routing.
+    if proto == "udp":
+        if is_stun(payload):
+            stun = parse_stun(payload)
+            if stun:
+                layer7["app_proto"] = "stun"
+                layer7["stun"] = stun
+                return layer7
+        if is_quic(payload):
+            quic = parse_quic(payload)
+            if quic:
+                layer7["app_proto"] = "quic"
+                layer7["quic"] = quic
+                return layer7
+
     if dst_port == 53 or src_port == 53:
         layer7["app_proto"] = "dns"
         layer7["dns"] = _parse_dns(payload, proto)
 
     elif dst_port in (80, 8080, 8000, 8008) or src_port in (80, 8080, 8000, 8008):
         layer7["app_proto"] = "http"
-        layer7["http"] = _parse_http(payload)
+        http_info = _parse_http(payload)
+        layer7["http"] = http_info
+        if is_websocket_upgrade(http_info):
+            http_info["websocket_upgrade"] = True
+        if is_beacon_request(http_info):
+            http_info["beacon_suspect"] = True
 
     elif dst_port in (443, 8443) or src_port in (443, 8443):
         layer7["app_proto"] = "tls"

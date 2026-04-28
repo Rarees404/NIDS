@@ -8,6 +8,15 @@ from .behavioral import (
     DataExfiltrationDetector,
     BeaconingDetector,
 )
+from .stealth import (
+    WebRtcLeakDetector,
+    LocalhostProbeDetector,
+    QuicHttp3Detector,
+    WebSocketDetector,
+    BeaconDetector,
+    DnsPrefetchDetector,
+    TrackerDetector,
+)
 
 __all__ = [
     "BaseDetector",
@@ -17,4 +26,11 @@ __all__ = [
     "HttpAttackDetector",
     "DataExfiltrationDetector",
     "BeaconingDetector",
+    "WebRtcLeakDetector",
+    "LocalhostProbeDetector",
+    "QuicHttp3Detector",
+    "WebSocketDetector",
+    "BeaconDetector",
+    "DnsPrefetchDetector",
+    "TrackerDetector",
 ]

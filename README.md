@@ -29,7 +29,8 @@ signature, statistical anomaly, behavioral, and threat-intelligence — all in o
 | 🌐 **Threat Intelligence** | Local CIDR-based bad-IP feeds + malicious domain suffix matching |
 | 🔔 **Alert Management** | Deduplication, IP/CIDR suppression allowlists, multi-vector correlation |
 | 💾 **Output Backends** | Console (Rich), rotating JSON file, SQLite, Syslog (UDP/TCP) |
-| 🖥️ **CLI** | Six commands: `live`, `pcap`, `query`, `stats`, `validate`, `--version` |
+| 🩻 **X-Ray Mode** | Live terminal dashboard surfacing what browsers hide from DevTools — WebRTC IP leaks, QUIC/HTTP-3, WebSockets, localhost port-scans, trackers, beacons |
+| 🖥️ **CLI** | Seven commands: `live`, `pcap`, `xray`, `query`, `stats`, `validate`, `--version` |
 
 ---
 
@@ -114,6 +115,48 @@ sudo pynids live \
   --min-severity MEDIUM \               # LOW | MEDIUM | HIGH | CRITICAL
   --verbose                             # Show evidence fields
 ```
+
+### `pynids xray` — Live "what is my browser hiding from me?"
+
+The DevTools "Network" tab is a curated view: it shows the renderer's
+own `fetch`/`XHR` calls and very little else. **X-Ray mode** reveals
+everything the browser does behind that view — in a single live
+terminal dashboard.
+
+```bash
+sudo pynids xray --iface en0
+```
+
+Surfaces, in real time:
+
+| Panel | What it shows |
+|---|---|
+| **WebRTC / IP leaks** | STUN/TURN exchanges + leaked private/loopback IPs (the classic "WebRTC IP leak" that bypasses VPN tunnels) |
+| **Localhost / private probes** | Connections to `127.0.0.0/8` and RFC1918 ranges — the fingerprinting trick where webpages port-scan your machine |
+| **QUIC / HTTP-3 endpoints** | Every QUIC Initial packet — every HTTP/3 connection starts here and is invisible in DevTools |
+| **WebSocket sessions** | Bi-directional channels initiated by `Upgrade: websocket` |
+| **Trackers · Beacons · Prefetch** | Known third-party trackers (Google Analytics, Meta Pixel, DoubleClick, Hotjar, …), `navigator.sendBeacon` POSTs, 1×1 tracking pixels, and DNS prefetch storms |
+| **Live event stream** | Rolling chronological log of every hidden event |
+
+Common invocations:
+
+```bash
+# Watch a single interface (most common)
+sudo pynids xray --iface en0
+
+# Persist a JSON line per event in addition to the live dashboard
+sudo pynids xray --iface en0 --json-log xray.jsonl
+
+# Replay a PCAP through the X-Ray pipeline
+pynids xray --iface en0 --pcap capture.pcapng --no-localhost
+
+# Linux: the loopback interface is `lo`, not `lo0`
+sudo pynids xray --iface eth0 --loopback-iface lo
+```
+
+> **Note:** `--also-localhost` (default on) launches a second sniffer
+> on the loopback device so the dashboard can detect browser-initiated
+> connections to `127.0.0.1`, which never leave the host's main NIC.
 
 ### `pynids pcap` — PCAP analysis
 
@@ -296,6 +339,26 @@ Every detection event is a structured `Alert` with rich metadata:
 ```
 
 Alert types: `signature`, `anomaly`, `behavioral`, `threat_intel`, `correlation`
+
+### Stealth / X-Ray rule IDs
+
+X-Ray detectors emit `behavioral` alerts whose `rule_id` starts with
+`STEALTH-…`, so they sit naturally alongside the rest of the alert
+ecosystem and can be queried, persisted, and correlated like any other
+alert.
+
+| Rule ID | What triggered it |
+|---|---|
+| `STEALTH-WEBRTC-LEAK` | STUN response leaked a private/loopback IP (HIGH) |
+| `STEALTH-WEBRTC-REFLEXIVE` | STUN response leaked a public reflexive address (LOW) |
+| `STEALTH-WEBRTC-STUN` / `STEALTH-WEBRTC-TURN` | STUN/TURN binding/allocate request (LOW) |
+| `STEALTH-LOCALHOST-PROBE` | TCP/UDP packet to `127.0.0.0/8` or RFC1918 on an unusual port |
+| `STEALTH-LOCALHOST-SCAN` | Same source probed N+ ports on a private/loopback host (CRITICAL) |
+| `STEALTH-QUIC-INITIAL` | First QUIC Initial packet to a destination (HTTP/3) |
+| `STEALTH-WEBSOCKET` | HTTP `Upgrade: websocket` handshake |
+| `STEALTH-BEACON` | `navigator.sendBeacon` POST or 1×1 tracking pixel |
+| `STEALTH-DNS-PREFETCH` | Burst of unique third-party DNS lookups (`<link rel="dns-prefetch">`) |
+| `STEALTH-TRACKER` | Connection to a known analytics/tracker domain |
 
 ---
 

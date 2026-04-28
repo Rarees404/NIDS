@@ -49,6 +49,19 @@ behavioral:
   beacon_cv_threshold: 0.20   # Coefficient of variation below = beaconing
 
 # ---------------------------------------------------------------------------
+# Stealth / X-Ray detectors — surface what browsers hide from DevTools
+# (WebRTC IP leaks, localhost probes, QUIC/HTTP-3, WebSockets, beacons,
+# DNS prefetch storms, third-party trackers).
+# ---------------------------------------------------------------------------
+stealth:
+  enabled: true               # Master switch for the whole stealth pack
+  trackers_enabled: true      # Match against the built-in tracker domain list
+  scan_threshold: 5           # Unique localhost ports before scan alert
+  scan_window: 30.0           # Sliding window for the localhost scan check
+  dns_prefetch_threshold: 8   # Unique DNS lookups in the burst window
+  dns_prefetch_window: 5.0    # Burst window in seconds
+
+# ---------------------------------------------------------------------------
 # Flow / connection tracking
 # ---------------------------------------------------------------------------
 flow:

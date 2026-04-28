@@ -34,6 +34,7 @@ from .alerts.outputs.console import ConsoleOutput
 from .alerts.outputs.json_file import JsonFileOutput
 from .alerts.outputs.sqlite_out import SQLiteOutput
 from .alerts.outputs.syslog_out import SyslogOutput
+from .alerts.outputs.xray_dashboard import XRayDashboard
 from .config import load_config
 from .engine import DetectionEngine
 from .intel.threat_intel import ThreatIntel
@@ -324,6 +325,191 @@ def pcap(
             f"\n[dim]Processed [bold]{count}[/bold] packets in {elapsed:.2f}s "
             f"({count / max(elapsed, 0.001):.0f} pkt/s)[/dim]"
         )
+        _print_stats(engine)
+
+
+# ---------------------------------------------------------------------------
+# xray command — live "what is my browser hiding from me" dashboard
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.option("--iface", "-i", required=True, help="Network interface to monitor (e.g. en0, lo0).")
+@click.option(
+    "--bpf",
+    default=None,
+    help="Optional BPF capture filter.  Defaults to a reasonable filter "
+         "that keeps web/RTC/DNS traffic.",
+)
+@click.option(
+    "--pcap",
+    default=None,
+    help="Replay an existing PCAP/PCAPNG file instead of live capture.",
+    metavar="FILE",
+)
+@click.option(
+    "--also-localhost/--no-localhost",
+    default=True,
+    show_default=True,
+    help=(
+        "Also sniff the loopback interface in a second thread to catch "
+        "browser-side localhost probes (recommended)."
+    ),
+)
+@click.option(
+    "--loopback-iface",
+    default="lo0",
+    show_default=True,
+    help="Interface name of the loopback device (lo0 on macOS, lo on Linux).",
+)
+@click.option(
+    "--refresh",
+    default=6.0,
+    show_default=True,
+    type=float,
+    help="Dashboard refresh rate in Hz.",
+)
+@click.option(
+    "--json-log",
+    default=None,
+    metavar="FILE",
+    help="In addition to the dashboard, append every event as JSON to FILE.",
+)
+@click.option(
+    "--sqlite",
+    default=None,
+    metavar="FILE",
+    help="In addition to the dashboard, persist every event to this SQLite database.",
+)
+@_config_option
+@_rules_option
+def xray(
+    iface: str,
+    bpf: Optional[str],
+    pcap: Optional[str],
+    also_localhost: bool,
+    loopback_iface: str,
+    refresh: float,
+    json_log: Optional[str],
+    sqlite: Optional[str],
+    config: Optional[str],
+    rules: Optional[str],
+) -> None:
+    """X-Ray mode — surface every hidden network behaviour your browser performs.
+
+    The DevTools "Network" tab is a curated view: it shows the renderer's
+    own ``fetch``/``XHR`` calls and very little else.  This command reveals
+    everything else — WebRTC IP leaks, QUIC/HTTP-3 connections, WebSocket
+    sessions, fire-and-forget beacons, third-party trackers, and the
+    classic "website is port-scanning my localhost" fingerprinting trick —
+    in a single live terminal dashboard.
+
+    \b
+    Examples:
+      sudo pynids xray --iface en0
+      sudo pynids xray --iface en0 --json-log xray.jsonl
+      pynids xray --iface en0 --pcap capture.pcap --no-localhost
+    """
+    config_path = _resolve_config(config)
+
+    if config_path == "__default__":
+        cfg: dict = {}
+    else:
+        try:
+            cfg = load_config(config_path)
+        except FileNotFoundError:
+            console.print(f"[red]Config file not found: {config_path}[/red]")
+            sys.exit(1)
+
+    # Force-enable stealth detectors regardless of config defaults.
+    cfg.setdefault("stealth", {})["enabled"] = True
+    cfg["stealth"].setdefault("trackers_enabled", True)
+
+    # Build a dedicated alert manager so the dashboard can run beside any
+    # SQLite/JSON sinks without dedup interfering with the live counts.
+    am_cfg = cfg.get("alert_manager", {})
+    mgr = AlertManager(
+        dedup_window=float(am_cfg.get("dedup_window", 0)),
+        correlation_window=float(am_cfg.get("correlation_window", 120)),
+        correlation_threshold=int(am_cfg.get("correlation_threshold", 999)),
+        min_severity=Severity.LOW,
+        suppression_rules=am_cfg.get("suppression", []),
+    )
+
+    dashboard = XRayDashboard(iface=iface if not pcap else f"pcap:{pcap}",
+                              refresh_hz=refresh)
+    mgr.register_output(dashboard)
+
+    if json_log:
+        mgr.register_output(JsonFileOutput(path=json_log))
+    if sqlite:
+        mgr.register_output(SQLiteOutput(path=sqlite))
+
+    intel_cfg = cfg.get("intel", {})
+    intel = None
+    if intel_cfg.get("enabled"):
+        intel = ThreatIntel(
+            bad_ips_path=intel_cfg.get("bad_ips_file"),
+            malicious_domains_path=intel_cfg.get("malicious_domains_file"),
+        )
+
+    engine = DetectionEngine(
+        config=cfg,
+        rules_path=rules,
+        intel=intel,
+        alert_manager=mgr,
+    )
+
+    dashboard.start()
+
+    capture_threads: list[threading.Thread] = []
+    stop_signal = threading.Event()
+
+    try:
+        if pcap:
+            replay_pcap(pcap_path=pcap, engine_callback=engine.process_packet)
+            # Keep the dashboard up after replay so the user can read it.
+            console.bell()
+            try:
+                while not stop_signal.wait(timeout=0.5):
+                    pass
+            except KeyboardInterrupt:
+                pass
+        else:
+            def _run(if_name: str, filter_str: Optional[str]) -> None:
+                try:
+                    sniff_live(
+                        iface=if_name,
+                        engine_callback=engine.process_packet,
+                        bpf_filter=filter_str,
+                    )
+                except Exception as exc:  # noqa: BLE001 — surface in dashboard
+                    console.print(f"[red]Capture on {if_name} failed: {exc}[/red]")
+
+            primary = threading.Thread(
+                target=_run, args=(iface, bpf), name=f"xray-{iface}", daemon=True
+            )
+            primary.start()
+            capture_threads.append(primary)
+
+            if also_localhost and iface != loopback_iface:
+                lo_thread = threading.Thread(
+                    target=_run,
+                    args=(loopback_iface, bpf),
+                    name=f"xray-{loopback_iface}",
+                    daemon=True,
+                )
+                lo_thread.start()
+                capture_threads.append(lo_thread)
+
+            try:
+                while any(t.is_alive() for t in capture_threads):
+                    for t in capture_threads:
+                        t.join(timeout=0.5)
+            except KeyboardInterrupt:
+                pass
+    finally:
+        dashboard.close()
+        engine.alert_manager.close()
         _print_stats(engine)
 
 
