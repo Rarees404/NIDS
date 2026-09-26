@@ -15,6 +15,8 @@ struct BriefAlert: Codable, Hashable {
     let timestamp: Double?
     let severity: String?
     let kind: String?
+    let title: String?
+    let subject: String?
     let message: String?
     let app: String?
 }

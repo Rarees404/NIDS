@@ -9,6 +9,7 @@ anomaly:
   ewma_alpha: 0.3          # Smoothing factor (0=slow adapt, 1=instant)
   sigma_threshold: 3.5     # Standard deviations above EWMA to trigger
   window_seconds: 10       # Counting window width
+  min_rate_pps: 100        # Never alert below this absolute rate (unsolicited packets/s)
 
 # ---------------------------------------------------------------------------
 # Port scan detection
@@ -44,7 +45,7 @@ brute_force:
 behavioral:
   dns_entropy_threshold: 3.5  # Shannon entropy (bits) above = suspicious
   dns_length_threshold: 50    # Query name length above = suspicious
-  exfil_threshold_bytes: 10485760  # 10 MiB per flow before exfil alert
+  exfil_threshold_bytes: 104857600  # 100 MiB uploaded by one connection before a "large upload" alert
   beacon_min_connections: 6   # Minimum samples before beaconing analysis
   beacon_cv_threshold: 0.20   # Coefficient of variation below = beaconing
 

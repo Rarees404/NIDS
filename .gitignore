@@ -12,6 +12,7 @@ build/
 
 
 macos/build/
+macos/build.noindex/
 
 # Secrets and local data — never commit
 .env

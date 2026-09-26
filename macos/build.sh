@@ -2,7 +2,7 @@
 # Build the PyNIDS menu bar app + desktop widget with the Xcode command line
 # tools only (no Xcode project needed).
 #
-#   macos/build.sh              build into macos/build/PyNIDS.app
+#   macos/build.sh              build into macos/build.noindex/PyNIDS.app
 #   macos/build.sh --install    also copy to ~/Applications, register the widget, and launch
 #
 # The bundle is ad-hoc signed ("Sign to Run Locally").  It runs on the Mac that
@@ -10,8 +10,9 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SRC="$HERE/PyNIDS"
-OUT="$HERE/build"
+SRC="$HERE/src"
+# ".noindex" keeps Spotlight / Launchpad from listing the build copy as a second app.
+OUT="$HERE/build.noindex"
 APP="$OUT/PyNIDS.app"
 APPEX="$APP/Contents/PlugIns/PyNIDSWidget.appex"
 INSTALL=0
@@ -21,7 +22,9 @@ SDK="$(xcrun --sdk macosx --show-sdk-path)"
 ARCH="$(uname -m)"
 TARGET="$ARCH-apple-macos14.0"
 VERSION="$(grep -m1 '^version' "$HERE/../pyproject.toml" | cut -d'"' -f2)"
-BUILD="$(date +%Y%m%d%H%M)"
+# Monotonic build number that fits in 32 bits (minutes since the Unix epoch);
+# WidgetKit compares it against LaunchServices' record of the installed app.
+BUILD="$(( $(date +%s) / 60 ))"
 SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
 SDK_BUILD="$(xcrun --sdk macosx --show-sdk-build-version 2>/dev/null || echo "")"
 SWIFTC=(xcrun --sdk macosx swiftc -sdk "$SDK" -target "$TARGET" -swift-version 5 -O -parse-as-library)
@@ -64,8 +67,16 @@ if [[ $INSTALL -eq 1 ]]; then
   pkill -x PyNIDS 2>/dev/null || true
   rm -rf "$DEST/PyNIDS.app"
   cp -R "$APP" "$DEST/"
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$DEST/PyNIDS.app" || true
+  LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+  # Only the installed copy may be registered: a second copy (the build
+  # folder) makes WidgetKit reject timelines with "Bundle version did not match".
+  "$LSREGISTER" -u "$APP" >/dev/null 2>&1 || true
+  "$LSREGISTER" -f "$DEST/PyNIDS.app" || true
   pluginkit -a "$DEST/PyNIDS.app/Contents/PlugIns/PyNIDSWidget.appex" || true
+  # A widget process from the previous build would keep serving stale
+  # timelines that WidgetKit discards — stop it so the new one launches.
+  pkill -x PyNIDSWidget 2>/dev/null || true
+  rm -rf "$APP"   # the installed copy is the only one that should exist
   open "$DEST/PyNIDS.app"
   echo
   echo "PyNIDS is in your menu bar."

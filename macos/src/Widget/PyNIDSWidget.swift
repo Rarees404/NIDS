@@ -71,7 +71,7 @@ struct Status {
             symbol = "checkmark.shield.fill"
             color = Palette.good
             title = "All clear"
-            detail = "Nothing notable in the last hour"
+            detail = "Nothing notable · last hour"
             count = nil
         } else {
             let level = Level(s.level)
@@ -79,7 +79,7 @@ struct Status {
             color = level == .ok ? Palette.warning : level.color
             title = (s.recentHigh ?? 0) > 0 ? "Needs attention" : "Worth a look"
             let high = s.recentHigh ?? 0
-            detail = high > 0 ? "\(high) high-severity in the last hour" : "alerts in the last hour"
+            detail = high > 0 ? "\(high) high · last hour" : "in the last hour"
             count = s.attention
         }
     }
@@ -109,7 +109,7 @@ struct Hero: View {
         VStack(alignment: .leading, spacing: 2) {
             if let count = status.count {
                 Text(Format.count(count))
-                    .font(.system(size: compact ? 34 : 38, weight: .semibold, design: .rounded))
+                    .font(.system(size: compact ? 32 : 38, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(status.color)
                     .contentTransition(.numericText())
@@ -117,7 +117,7 @@ struct Hero: View {
                     .font(.system(size: 12, weight: .semibold))
             } else {
                 Image(systemName: status.symbol)
-                    .font(.system(size: compact ? 30 : 34, weight: .medium))
+                    .font(.system(size: compact ? 26 : 34, weight: .medium))
                     .foregroundStyle(status.color)
                     .padding(.bottom, 2)
                 Text(status.title)
@@ -200,6 +200,10 @@ struct SectionTitle: View {
 }
 
 // MARK: - Sizes
+//
+// Real macOS widget sizes are 164×164, 344×164 and 344×344 points with ~16 pt
+// content margins, and WidgetKit does not allow scrolling — every layout
+// below is budgeted to fit 132×132, 312×132 and 312×312.
 
 struct SmallView: View {
     let s: WidgetSnapshot
@@ -209,18 +213,19 @@ struct SmallView: View {
         let status = Status(s)
         VStack(alignment: .leading, spacing: 0) {
             Header(status: status)
-            Spacer(minLength: 4)
+            Spacer(minLength: 2)
             Hero(status: status, compact: true)
-            Spacer(minLength: 6)
-            HStack(spacing: 10) {
+            Spacer(minLength: 4)
+            HStack(spacing: 9) {
                 Label(Format.count(s.trackers), systemImage: "eye")
                 Label(Format.count(s.leaks), systemImage: "network.badge.shield.half.filled")
                 Label(Format.count(s.encryptedDns), systemImage: "lock.shield")
             }
-            .font(.system(size: 10.5, weight: .medium))
+            .font(.system(size: 10, weight: .medium))
             .monospacedDigit()
             .foregroundStyle(.secondary)
             .labelStyle(TightLabel())
+            .lineLimit(1)
         }
     }
 }
@@ -231,29 +236,36 @@ struct TightLabel: LabelStyle {
     }
 }
 
-struct MediumView: View {
+/// Left column shared by the medium and large layouts.
+struct StatusColumn: View {
     let s: WidgetSnapshot
     let date: Date
 
     var body: some View {
         let status = Status(s)
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 0) {
-                Header(status: status)
-                Spacer(minLength: 4)
-                Hero(status: status)
-                Spacer(minLength: 4)
-                Updated(date: date)
-            }
-            .frame(width: 128, alignment: .leading)
+        VStack(alignment: .leading, spacing: 0) {
+            Header(status: status)
+            Spacer(minLength: 2)
+            Hero(status: status, compact: true)
+            Spacer(minLength: 2)
+            Updated(date: date)
+        }
+    }
+}
 
-            VStack(alignment: .leading, spacing: 5) {
-                SectionTitle(text: "This session")
+struct MediumView: View {
+    let s: WidgetSnapshot
+    let date: Date
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            StatusColumn(s: s, date: date)
+                .frame(width: 118, alignment: .leading)
+            VStack(alignment: .leading, spacing: 4) {
                 Metric(label: "Trackers", value: s.trackers, symbol: "eye")
                 Metric(label: "Leaks & probes", value: s.leaks, symbol: "network.badge.shield.half.filled")
                 Metric(label: "Encrypted DNS", value: s.encryptedDns, symbol: "lock.shield")
-                Metric(label: "Countries", value: s.countries, symbol: "globe")
-                Throughput(s: s).padding(.top, 2)
+                Throughput(s: s).padding(.top, 3)
             }
         }
     }
@@ -264,8 +276,21 @@ struct LargeView: View {
     let date: Date
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            MediumView(s: s, date: date).frame(height: 136)
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 14) {
+                StatusColumn(s: s, date: date)
+                    .frame(width: 118, alignment: .leading)
+                VStack(alignment: .leading, spacing: 4) {
+                    Metric(label: "Trackers", value: s.trackers, symbol: "eye")
+                    Metric(label: "Leaks & probes", value: s.leaks, symbol: "network.badge.shield.half.filled")
+                    Metric(label: "Encrypted DNS", value: s.encryptedDns, symbol: "lock.shield")
+                    Metric(label: "Countries", value: s.countries, symbol: "globe")
+                }
+            }
+            .frame(height: 104)
+
+            Throughput(s: s).frame(height: 40)
+
             Divider()
             attention
             apps
@@ -275,27 +300,16 @@ struct LargeView: View {
 
     @ViewBuilder
     private var attention: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 5) {
             SectionTitle(text: "Needs attention")
             let alerts = s.notableAlerts ?? []
             if alerts.isEmpty {
                 Label("Nothing notable in the last hour", systemImage: "checkmark.circle")
-                    .font(.system(size: 11.5))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(Array(alerts.enumerated()), id: \.offset) { _, a in
-                    HStack(alignment: .top, spacing: 7) {
-                        Image(systemName: Severity.symbol(a.severity ?? "LOW"))
-                            .font(.system(size: 11))
-                            .foregroundStyle(Severity.color(a.severity ?? "LOW"))
-                            .frame(width: 14)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(a.message ?? "").font(.system(size: 11.5)).lineLimit(2)
-                            Text([a.severity.map(Severity.label), a.app, Format.ago(a.timestamp)]
-                                .compactMap { $0 }.joined(separator: " · "))
-                                .font(.system(size: 10)).foregroundStyle(.secondary)
-                        }
-                    }
+                ForEach(Array(alerts.prefix(2).enumerated()), id: \.offset) { _, a in
+                    AlertLine(a: a)
                 }
             }
         }
@@ -303,22 +317,15 @@ struct LargeView: View {
 
     @ViewBuilder
     private var apps: some View {
-        if !s.topApps.isEmpty {
-            let total = max(s.totalBytes ?? s.topApps.reduce(0) { $0 + $1.bytes }, 1)
-            VStack(alignment: .leading, spacing: 6) {
+        let top = Array(s.topApps.prefix(2))
+        if !top.isEmpty {
+            let total = max(s.totalBytes ?? top.reduce(0) { $0 + $1.bytes }, 1)
+            VStack(alignment: .leading, spacing: 5) {
                 SectionTitle(text: "Busiest apps")
-                ForEach(s.topApps.prefix(4)) { app in
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack {
-                            Text(app.app).font(.system(size: 11.5, weight: .medium)).lineLimit(1)
-                            if app.alerts > 0 {
-                                Text("\(app.alerts) alert\(app.alerts == 1 ? "" : "s")")
-                                    .font(.system(size: 9.5)).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Text(Format.bytes(app.bytes)).font(.system(size: 11)).monospacedDigit()
-                                .foregroundStyle(.secondary)
-                        }
+                ForEach(top) { app in
+                    HStack(spacing: 8) {
+                        Text(app.app).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                            .frame(width: 96, alignment: .leading)
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
                                 Capsule().fill(Palette.series.opacity(0.14))
@@ -327,8 +334,43 @@ struct LargeView: View {
                             }
                         }
                         .frame(height: 4)
+                        Text(Format.bytes(app.bytes)).font(.system(size: 10)).monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 58, alignment: .trailing)
+                    }
+                    .frame(height: 14)
+                }
+            }
+        }
+    }
+}
+
+/// One alert in two short lines: "Encrypted DNS · mozilla.cloudflare-dns.com"
+/// then "Medium · Safari · 4 min ago".
+struct AlertLine: View {
+    let a: BriefAlert
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: Severity.symbol(a.severity ?? "LOW"))
+                .font(.system(size: 11))
+                .foregroundStyle(Severity.color(a.severity ?? "LOW"))
+                .frame(width: 14)
+            VStack(alignment: .leading, spacing: 1) {
+                Group {
+                    if let title = a.title {
+                        Text(title).fontWeight(.semibold)
+                            + Text(a.subject.map { " · \($0)" } ?? "")
+                    } else {
+                        Text(a.message ?? "")
                     }
                 }
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                Text([a.severity.map(Severity.label), a.app, Format.ago(a.timestamp)]
+                    .compactMap { $0 }.joined(separator: " · "))
+                    .font(.system(size: 9.5)).foregroundStyle(.secondary).lineLimit(1)
             }
         }
     }

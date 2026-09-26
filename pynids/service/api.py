@@ -305,10 +305,18 @@ class _Handler(BaseHTTPRequestHandler):
         cutoff = time.time() - 3600
         notable = [a for a in live.recent_alerts(limit=500)
                    if (a.get("timestamp") or 0) >= cutoff and _SEV_NUM.get(a.get("severity"), 0) >= 2]
+        # Most severe first, one row per (kind, subject) so repeats don't crowd the list.
+        rows, seen = [], set()
+        for a in sorted(notable, key=lambda a: (-_SEV_NUM.get(a.get("severity"), 0), -(a.get("timestamp") or 0))):
+            b = _brief(a)
+            key = (b["kind"], b["subject"])
+            if key not in seen:
+                seen.add(key)
+                rows.append(b)
         return {
             "recent_notable": len(notable),
             "recent_high": sum(1 for a in notable if _SEV_NUM.get(a.get("severity"), 0) >= 3),
-            "notable_alerts": [_brief(a) for a in notable[:3]],
+            "notable_alerts": rows[:3],
             "total_bytes": s["bytes"],
             "ok": True,
             "level": _threat_level(live),

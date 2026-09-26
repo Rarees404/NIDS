@@ -291,6 +291,8 @@ struct MenuContent: View {
                 .help(on ? "Pause notifications" : "Resume notifications")
             }
             Menu {
+                Button("Refresh widget") { WidgetCenter.shared.reloadAllTimelines() }
+                Divider()
                 Toggle("Launch at login", isOn: Binding(
                     get: { monitor.launchAtLogin },
                     set: { _ in monitor.toggleLaunchAtLogin() }))

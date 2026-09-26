@@ -1224,7 +1224,7 @@ front ends. Everything below runs only on live traffic from the local machine.
 | `service/recorder.py` | Rolling PCAP ring for the key-log decryption workflow |
 | `web/dashboard.html` | Single-file dashboard (vanilla JS + SVG charts, d3-geo map) |
 | `cli_service.py` | `daemon`, `status`, `open`, `intel`, `geoip`, `block`, `ai`, `keylog`, `decrypt`, `app` |
-| `macos/PyNIDS/` | SwiftUI menu bar app + WidgetKit extension, built by `macos/build.sh` with `swiftc` |
+| `macos/src/` | SwiftUI menu bar app + WidgetKit extension, built by `macos/build.sh` with `swiftc` |
 
 ### 17.2 Packet journey (v2)
 

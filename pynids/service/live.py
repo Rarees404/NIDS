@@ -266,11 +266,21 @@ class LiveState(BaseOutput):
 
 def _brief(alert: Dict[str, Any]) -> Dict[str, Any]:
     ctx = alert.get("context") or {}
+    ev = alert.get("evidence") or {}
+    # The one thing the alert is *about*, for compact UIs (widget, menu bar).
+    subject = (
+        ctx.get("remote_host") or ev.get("host") or ev.get("resolver") or ev.get("sni")
+        or ev.get("leaked_ip") or ev.get("query_name") or alert.get("dst_ip") or alert.get("src_ip")
+    )
+    if alert.get("kind") == "localhost" and alert.get("dst_port"):
+        subject = f"{alert.get('dst_ip')}:{alert.get('dst_port')}"
     return {
         "alert_id": alert.get("alert_id"),
         "timestamp": alert.get("timestamp"),
         "severity": alert.get("severity"),
         "kind": alert.get("kind"),
+        "title": KIND_LABELS.get(alert.get("kind") or "", "Alert"),
+        "subject": subject,
         "message": alert.get("message"),
         "app": ctx.get("app"),
     }
