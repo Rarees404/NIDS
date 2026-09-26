@@ -186,6 +186,8 @@ class XRayDashboard(BaseOutput):
                     "src_ip": alert.src_ip,
                     "dst_ip": alert.dst_ip,
                     "dst_port": alert.dst_port,
+                    "app": alert.context.get("app"),
+                    "host": alert.context.get("remote_host"),
                 }
             )
 
@@ -289,6 +291,8 @@ class XRayDashboard(BaseOutput):
             "version": ev.get("version"),
             "count": 0,
         }
+        if ev.get("sni"):
+            item["sni"] = ev["sni"]
         item["count"] += 1
         item["last_seen"] = alert.timestamp
         self._quic[key] = item
@@ -516,7 +520,7 @@ class XRayDashboard(BaseOutput):
 
         for it in items:
             ts = self._fmt_time(it.get("last_seen"))
-            target = f"{it.get('dst')}:{it.get('port') or '?'}"
+            target = it.get("sni") or f"{it.get('dst')}:{it.get('port') or '?'}"
             table.add_row(
                 ts,
                 f"{it.get('src')} → {target}",
@@ -638,10 +642,10 @@ class XRayDashboard(BaseOutput):
             kind_text = Text(kind.upper().center(8), style=_KIND_STYLES.get(kind, "white"))
             sev = ev["severity"]
             sev_text = Text(f" {sev.value:<8}", style=_SEV_STYLE.get(sev, "white"))
-            src = ev.get("src_ip") or "?"
-            dst = ev.get("dst_ip") or "-"
+            src = ev.get("app") or ev.get("src_ip") or "?"
+            dst = ev.get("host") or ev.get("dst_ip") or "-"
             port = ev.get("dst_port")
-            flow = f"{src} → {dst}" + (f":{port}" if port else "")
+            flow = f"{src} → {dst}" + (f":{port}" if port and not ev.get("host") else "")
             table.add_row(ts, kind_text, sev_text, flow, ev["message"][:200])
 
         return Panel(

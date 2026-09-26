@@ -70,6 +70,8 @@ class Alert:
         tags:            Free-form taxonomy tags (e.g. ['recon', 'portscan']).
         mitre_technique: MITRE ATT&CK technique ID (e.g. 'T1046').
         evidence:        Arbitrary key/value evidence payload for investigation.
+        context:         Enrichment added by the engine — owning app/process,
+                         remote hostname, country, ASN (see :mod:`pynids.enrich`).
         alert_id:        UUID4 unique identifier generated at creation time.
         timestamp:       Unix epoch float when the alert was raised.
     """
@@ -88,6 +90,7 @@ class Alert:
     tags: List[str] = field(default_factory=list)
     mitre_technique: Optional[str] = None
     evidence: Dict[str, Any] = field(default_factory=dict)
+    context: Dict[str, Any] = field(default_factory=dict)
     alert_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: float = field(default_factory=time.time)
 
@@ -114,6 +117,7 @@ class Alert:
                 k: v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v
                 for k, v in self.evidence.items()
             },
+            "context": dict(self.context),
         }
 
     @property

@@ -2,7 +2,7 @@
 Threat intelligence integration for PyNIDS.
 
 Loads local intelligence feeds (bad IPs and malicious domains) at startup
-and exposes fast O(1) / O(n) lookup methods used by the detection pipeline.
+and exposes hash-based lookup methods used by the detection pipeline.
 
 Feed formats
 ------------
@@ -34,10 +34,9 @@ from __future__ import annotations
 
 import ipaddress
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, Optional
 
 import yaml
 
@@ -58,8 +57,14 @@ class ThreatIntel:
     """
     In-memory threat intelligence store.
 
-    Loads IP/CIDR and domain feeds from YAML files.  Both lookup methods
-    are designed to be called on every packet (kept as fast as possible).
+    Loads IP/CIDR and domain feeds from YAML files, plus any feeds cached by
+    :mod:`pynids.intel.feeds`.  Both lookup methods run on every packet, so
+    they are hash-based rather than linear:
+
+    * IPs — one dict per (IP version, prefix length); a lookup masks the
+      address once per distinct prefix length, most specific first.
+    * Domains — exact and suffix dicts; a lookup walks the domain's label
+      suffixes (``a.b.example.com`` → ``b.example.com`` → ``example.com`` …).
 
     Args:
         bad_ips_path:         Path to the bad IPs YAML feed.
@@ -71,8 +76,11 @@ class ThreatIntel:
         bad_ips_path: Optional[str] = None,
         malicious_domains_path: Optional[str] = None,
     ) -> None:
-        self._ip_entries: List[Dict[str, Any]] = []  # [{network, category, severity, desc}]
-        self._domain_entries: List[Dict[str, Any]] = []  # [{pattern, is_suffix, category, …}]
+        # {ip_version: {prefix_len: {network_int: ThreatEntry}}}
+        self._ip_index: Dict[int, Dict[int, Dict[int, ThreatEntry]]] = {4: {}, 6: {}}
+        self._ip_count = 0
+        self._domain_exact: Dict[str, ThreatEntry] = {}
+        self._domain_suffix: Dict[str, ThreatEntry] = {}
 
         if bad_ips_path:
             self._load_ips(bad_ips_path)
@@ -81,8 +89,8 @@ class ThreatIntel:
 
         logger.info(
             "ThreatIntel loaded: %d IP networks, %d domain patterns",
-            len(self._ip_entries),
-            len(self._domain_entries),
+            self.ip_entry_count,
+            self.domain_entry_count,
         )
 
     # ------------------------------------------------------------------
@@ -91,7 +99,7 @@ class ThreatIntel:
 
     def check_ip(self, ip: str) -> Optional[ThreatEntry]:
         """
-        Return the first matching threat entry for *ip*, or None.
+        Return the most specific matching threat entry for *ip*, or None.
 
         Supports both exact host matches and CIDR range lookups.
         """
@@ -100,14 +108,16 @@ class ThreatIntel:
         except ValueError:
             return None
 
-        for entry in self._ip_entries:
-            if addr in entry["network"]:
-                return ThreatEntry(
-                    category=entry["category"],
-                    severity=entry["severity"],
-                    description=entry["description"],
-                    indicator=str(entry["network"]),
-                )
+        by_prefix = self._ip_index[addr.version]
+        if not by_prefix:
+            return None
+        value = int(addr)
+        bits = addr.max_prefixlen
+        for prefix in sorted(by_prefix, reverse=True):
+            masked = (value >> (bits - prefix)) << (bits - prefix) if prefix else 0
+            entry = by_prefix[prefix].get(masked)
+            if entry is not None:
+                return entry
         return None
 
     def check_domain(self, domain: str) -> Optional[ThreatEntry]:
@@ -119,33 +129,67 @@ class ThreatIntel:
         subdomain of that zone).
         """
         domain_lower = domain.lower().rstrip(".")
-        for entry in self._domain_entries:
-            pattern: str = entry["pattern"]
-            if entry["is_suffix"]:
-                if domain_lower == pattern.lstrip(".") or domain_lower.endswith(pattern):
-                    return ThreatEntry(
-                        category=entry["category"],
-                        severity=entry["severity"],
-                        description=entry["description"],
-                        indicator=pattern,
-                    )
-            else:
-                if domain_lower == pattern:
-                    return ThreatEntry(
-                        category=entry["category"],
-                        severity=entry["severity"],
-                        description=entry["description"],
-                        indicator=pattern,
-                    )
-        return None
+        if not domain_lower:
+            return None
+        entry = self._domain_exact.get(domain_lower)
+        if entry is not None:
+            return entry
+        candidate = domain_lower
+        while True:
+            entry = self._domain_suffix.get(candidate)
+            if entry is not None:
+                return entry
+            dot = candidate.find(".")
+            if dot < 0:
+                return None
+            candidate = candidate[dot + 1:]
 
     @property
     def ip_entry_count(self) -> int:
-        return len(self._ip_entries)
+        return self._ip_count
 
     @property
     def domain_entry_count(self) -> int:
-        return len(self._domain_entries)
+        return len(self._domain_exact) + len(self._domain_suffix)
+
+    # ------------------------------------------------------------------
+    # Mutation (used by the YAML loaders and the feed cache)
+    # ------------------------------------------------------------------
+
+    def add_network(
+        self, cidr: str, category: str, severity: str, description: str
+    ) -> bool:
+        """Index one IP or CIDR.  Returns False if *cidr* is invalid."""
+        try:
+            network = ipaddress.ip_network(cidr, strict=False)
+        except ValueError as exc:
+            logger.warning("ThreatIntel: invalid CIDR %r — %s", cidr, exc)
+            return False
+        bucket = self._ip_index[network.version].setdefault(network.prefixlen, {})
+        key = int(network.network_address)
+        if key not in bucket:
+            self._ip_count += 1
+        bucket[key] = ThreatEntry(
+            category=category, severity=severity,
+            description=description, indicator=str(network),
+        )
+        return True
+
+    def add_domain(
+        self, domain: str, category: str, severity: str, description: str
+    ) -> None:
+        """Index a domain.  A leading dot makes it a suffix (zone) pattern."""
+        domain = domain.lower().rstrip(".")
+        if not domain:
+            return
+        entry = ThreatEntry(
+            category=category, severity=severity,
+            description=description, indicator=domain,
+        )
+        if domain.startswith("."):
+            self._domain_suffix[domain.lstrip(".")] = entry
+        else:
+            self._domain_exact[domain] = entry
 
     # ------------------------------------------------------------------
     # Loaders
@@ -160,19 +204,12 @@ class ThreatIntel:
             with p.open(encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             for item in data.get("entries", []):
-                cidr = item.get("cidr", "")
-                try:
-                    network = ipaddress.ip_network(cidr, strict=False)
-                    self._ip_entries.append(
-                        {
-                            "network": network,
-                            "category": item.get("category", "unknown"),
-                            "severity": item.get("severity", "MEDIUM"),
-                            "description": item.get("description", ""),
-                        }
-                    )
-                except ValueError as exc:
-                    logger.warning("ThreatIntel: invalid CIDR %r — %s", cidr, exc)
+                self.add_network(
+                    item.get("cidr", ""),
+                    item.get("category", "unknown"),
+                    item.get("severity", "MEDIUM"),
+                    item.get("description", ""),
+                )
         except Exception as exc:
             logger.error("ThreatIntel: failed to load %s — %s", path, exc)
 
@@ -185,17 +222,11 @@ class ThreatIntel:
             with p.open(encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             for item in data.get("entries", []):
-                domain = item.get("domain", "").lower().rstrip(".")
-                if not domain:
-                    continue
-                self._domain_entries.append(
-                    {
-                        "pattern": domain,
-                        "is_suffix": domain.startswith("."),
-                        "category": item.get("category", "unknown"),
-                        "severity": item.get("severity", "MEDIUM"),
-                        "description": item.get("description", ""),
-                    }
+                self.add_domain(
+                    item.get("domain", ""),
+                    item.get("category", "unknown"),
+                    item.get("severity", "MEDIUM"),
+                    item.get("description", ""),
                 )
         except Exception as exc:
             logger.error("ThreatIntel: failed to load %s — %s", path, exc)

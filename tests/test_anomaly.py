@@ -19,7 +19,8 @@ class TestAnomalyDetector:
         assert len(alerts) == 0
 
     def test_spike_triggers_alert(self):
-        det = AnomalyDetector(ewma_alpha=0.3, sigma_threshold=2.0, window_seconds=10)
+        det = AnomalyDetector(ewma_alpha=0.3, sigma_threshold=2.0, window_seconds=10,
+                              min_rate_pps=0)
         src = "1.2.3.4"
 
         # Establish baseline: low rate across many windows

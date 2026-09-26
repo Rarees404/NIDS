@@ -2,15 +2,19 @@
 
 # 🛡️ PyNIDS
 
-### Enterprise-Grade Python Network Intrusion Detection System
+### Network intrusion detection and privacy X-Ray for your Mac
 
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-orange.svg)]()
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)]()
+[![Version](https://img.shields.io/badge/version-2.0.0-orange.svg)]()
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)]()
 
-A production-ready, pure-Python NIDS built on [Scapy](https://scapy.net/) with multi-layer detection —  
-signature, statistical anomaly, behavioral, and threat-intelligence — all in one unified pipeline.
+PyNIDS watches your real network traffic and tells you what is happening in it: attacks,
+connections to known-malicious hosts, and the things browsers and apps do quietly that never
+show up in DevTools, such as trackers, WebRTC IP leaks, webpages port-scanning your
+localhost, and DNS lookups hidden inside HTTPS. It shows **which app** made each connection
+and **where** it went. It runs as an always-on background service with a web dashboard, a
+menu bar app, a desktop widget, and native notifications.
 
 </div>
 
@@ -20,83 +24,166 @@ signature, statistical anomaly, behavioral, and threat-intelligence — all in o
 
 | Category | Capability |
 |---|---|
-| 📡 **Capture** | Live interface sniffing (`AsyncSniffer`) and PCAP/PCAPNG replay |
-| 🔬 **Dissection** | Pure-Python HTTP, DNS, TLS (JA3), SSH, SMTP parsers |
-| 🌊 **Flow Tracking** | Stateful 5-tuple connection table with TCP state machine |
-| 📝 **Signature Engine** | YAML declarative rules — bool combinators, 13 operators, per-rule thresholds, hot-reload |
-| 📈 **Anomaly Detection** | EWMA volumetric spikes, horizontal/vertical port scans, brute-force |
-| 🧠 **Behavioral Detection** | DNS tunneling (entropy), HTTP attacks (SQLi/XSS/traversal), data exfiltration, C2 beaconing |
-| 🌐 **Threat Intelligence** | Local CIDR-based bad-IP feeds + malicious domain suffix matching |
-| 🔔 **Alert Management** | Deduplication, IP/CIDR suppression allowlists, multi-vector correlation |
-| 💾 **Output Backends** | Console (Rich), rotating JSON file, SQLite, Syslog (UDP/TCP) |
-| 🩻 **X-Ray Mode** | Live terminal dashboard surfacing what browsers hide from DevTools — WebRTC IP leaks, QUIC/HTTP-3, WebSockets, localhost port-scans, trackers, beacons |
-| 🖥️ **CLI** | Seven commands: `live`, `pcap`, `xray`, `query`, `stats`, `validate`, `--version` |
+| 📡 **Capture** | Live sniffing of the active interface **and** loopback; follows Wi-Fi ↔ Ethernet ↔ VPN switches automatically |
+| 🔬 **Dissection** | HTTP, DNS (queries **and answers**), TLS (SNI, ALPN, ECH, JA3), SSH, SMTP, STUN, QUIC |
+| 🔓 **Encrypted-traffic visibility** | Decrypts **QUIC Initial packets** to read the hostname of every HTTP/3 connection; reassembles post-quantum TLS ClientHellos split across TCP segments |
+| 🧩 **App attribution** | Every packet and alert is tagged with the owning app (Chrome helper processes fold into "Google Chrome") |
+| 🌍 **Enrichment** | Hostnames learned passively from DNS/SNI, plus offline GeoIP + ASN (DB-IP Lite) |
+| 📝 **Signature engine** | YAML rules with boolean combinators, 13 operators, thresholds, hot-reload |
+| 📈 **Anomaly & behavioral** | Volumetric spikes, port scans, brute force, DNS tunnelling, SQLi/XSS, exfiltration, C2 beaconing |
+| 🩻 **X-Ray (privacy)** | WebRTC IP leaks, localhost/LAN port-scans by webpages, QUIC/HTTP-3, WebSockets, beacons, prefetch storms, trackers (4,000+ domains), **encrypted DNS (DoH/DoT/DoQ)** |
+| 🌐 **Live threat intel** | abuse.ch Feodo & URLhaus, Spamhaus DROP (v4+v6), Tor exits, Disconnect trackers, DoH resolver lists, all refreshed automatically |
+| 🛑 **Blocking** | One-click or automatic blocking through macOS's built-in `pf` firewall, with guard rails and expiry |
+| 🔔 **Notifications** | Native macOS banners for important alerts, rate-limited and coalesced |
+| 🤖 **Explain with Claude** | Plain-English verdict and next steps for any alert (optional, your API key) |
+| 🖥️ **Web dashboard** | Live throughput, events timeline, world map, per-app table, searchable event stream, block/unblock, feed status |
+| 📍 **Menu bar + widget** | Native SwiftUI menu bar app and a small/medium/large desktop widget |
+| 🔐 **Decryption workflow** | Launch a browser with TLS key logging, record traffic, and list decrypted HTTPS/HTTP-2/HTTP-3 requests |
 
 ---
 
-## 🚀 Quick Start
-
-### 1. Install
+## 🚀 Quick Start (macOS)
 
 ```bash
-pip install -e ".[dev]"    # Development install with test dependencies
+git clone <this repo> ~/NIDS && cd ~/NIDS
+python3 -m venv .venv && source .venv/bin/activate
+pip install --upgrade pip            # macOS ships an old pip that can't install this project
+pip install -e ".[all]"              # core + GeoIP + Claude
 
-# Or production install from the project root:
-pip install .
+# 1. Always-on protection: installs a LaunchDaemon that starts at boot
+sudo .venv/bin/pynids daemon install
+
+# 2. World map + country/ASN enrichment (free DB-IP Lite, ~70 MB)
+sudo .venv/bin/pynids geoip download && sudo .venv/bin/pynids daemon restart
+
+# 3. See it
+pynids open                          # web dashboard → http://127.0.0.1:8787
+pynids status                        # one-screen summary in the terminal
+pynids app                           # build + install the menu bar app and widget
 ```
 
-**Dependencies:** `scapy>=2.5`, `PyYAML>=6.0`, `click>=8.1`, `rich>=13.0`
-
-> **Note:** Live capture requires **root/administrator privileges** for raw socket access.
-
-### 2. Analyse a PCAP file
+Optional:
 
 ```bash
-pynids pcap --file capture.pcap --rules rules/enterprise_rules.yaml
+sudo pynids ai set-key               # enable "Explain with Claude"
+pynids intel update                  # feeds refresh every 6 h anyway
 ```
 
-### 3. Monitor live traffic
+> **Why sudo?** Reading raw packets (`/dev/bpf*`), seeing every process's sockets, and
+> managing `pf` all require root. The daemon runs as root under launchd; the dashboard,
+> CLI, menu bar app, and widget run as you and talk to it over `127.0.0.1`.
+
+To remove everything: `sudo pynids daemon uninstall` (lifts all blocks too), then delete
+`~/Applications/PyNIDS.app` and `/Library/Application Support/PyNIDS`.
+
+### Quick start without the daemon
 
 ```bash
+sudo pynids xray --iface en0         # live terminal X-Ray dashboard
 sudo pynids live --iface en0 --rules rules/enterprise_rules.yaml
-```
-
-### 4. Use the enterprise configuration
-
-```bash
-sudo pynids live --iface eth0 \
-     --config configs/enterprise.yaml \
-     --rules  rules/enterprise_rules.yaml \
-     --sqlite  alerts.db
+pynids pcap --file capture.pcap      # analyse a capture you recorded
 ```
 
 ---
 
-## 📦 Project Structure
+## 🖥️ The Always-On Service
 
+`pynids daemon install` writes `/Library/LaunchDaemons/com.pynids.daemon.plist` and starts it.
+The daemon:
+
+* captures the interface carrying your default route **plus** `lo0` (so it can see webpages
+  probing `127.0.0.1`), restarting capture when you change networks
+* runs every detector, tags events with app, hostname, country, and network owner
+* stores events in `/Library/Application Support/PyNIDS/events.db` (SQLite, full-text search)
+* serves the dashboard and API on `http://127.0.0.1:8787`
+* posts notifications for HIGH and CRITICAL alerts
+* refreshes threat-intel feeds every 6 hours
+* optionally auto-blocks confirmed-malicious IPs
+
+| Command | What it does |
+|---|---|
+| `sudo pynids daemon install [--rules FILE] [--record]` | Install and start at boot |
+| `sudo pynids daemon restart` | Apply config changes |
+| `sudo pynids daemon uninstall` | Stop, remove, and lift all blocks |
+| `pynids daemon logs -f` | Follow `/Library/Logs/PyNIDS/daemon.log` |
+| `pynids status` | Health, threat level, traffic, top apps, latest alert |
+| `pynids open` | Open the dashboard |
+
+Configuration lives in `/Library/Application Support/PyNIDS/config.yaml` (created on install,
+fully commented; the template is [`pynids/service/default_config.yaml`](pynids/service/default_config.yaml)).
+
+### Web dashboard
+
+`pynids open` shows:
+
+* **Overview**: hidden events, threats, trackers, leaks and probes, encrypted DNS, and countries reached; live throughput; events per minute
+* **Network**: world map of every remote endpoint, sized by bytes and marked when it raised an alert
+* **Apps**: which app talks to how many endpoints, how much it sends and receives, and to which hosts and countries
+* **Events**: live, filterable, full-text-searchable stream. Click an event for its evidence, app, location, **Explain with Claude**, and **Block IP**
+* **Protection**: blocked IPs (unblock with one click) and threat-intel feed status
+
+### Menu bar app & desktop widget
+
+```bash
+pynids app          # = macos/build.sh --install
 ```
-PyNIDS/
-├── pyproject.toml               # Build config & dependencies
-├── configs/
-│   ├── default.yaml             # Minimal defaults
-│   └── enterprise.yaml          # Full tunable config (annotated)
-├── rules/
-│   ├── sample_rules.yaml        # Minimal example
-│   └── enterprise_rules.yaml    # 20+ production rules (MITRE-tagged)
-├── intel/
-│   ├── known_bad_ips.yaml       # CIDR bad-IP feed
-│   └── malicious_domains.yaml   # Malicious domain/suffix blocklist
-├── tests/                       # pytest suite (8 test files)
-└── pynids/
-    ├── engine.py                # DetectionEngine orchestrator
-    ├── sniffer.py               # Packet capture + normalisation
-    ├── cli.py                   # Click CLI
-    ├── alerts/                  # Alert model, manager, output backends
-    ├── detection/               # Signature, anomaly, behavioral detectors
-    ├── flow/                    # FlowTracker
-    ├── intel/                   # ThreatIntel
-    └── protocols/               # HTTP/DNS/TLS/SSH/SMTP dissectors
+
+This builds a native SwiftUI app with only the Xcode Command Line Tools and installs it to
+`~/Applications`. The menu bar shield changes colour with the threat level and shows the
+threat count. Its popover has live stats, a throughput sparkline, recent alerts (hover to
+block), the busiest apps, a notification toggle, and launch-at-login. To add the widget,
+right-click the desktop → **Edit Widgets** → **PyNIDS** (small, medium, or large).
+
+Prefer [SwiftBar](https://github.com/swiftbar/SwiftBar)? Symlink
+[`macos/swiftbar/pynids.5s.py`](macos/swiftbar/pynids.5s.py) into its plugin folder.
+
+### Blocking with pf
+
+```bash
+pynids block add 203.0.113.50 --ttl 3600
+pynids block list
+pynids block remove 203.0.113.50
 ```
+
+Blocks live in the pf sub-anchor `com.apple/250.PyNIDS`, which the stock macOS `pf.conf`
+already evaluates, so no system file is edited. They expire automatically. Private,
+loopback, link-local, multicast, gateway, and DNS-server addresses are **never** blocked.
+Automatic blocking (`response.auto_block: true`) only acts on threat-intel matches and
+correlated multi-vector attacks, never on privacy events. It also has a `dry_run` mode.
+
+### Explain with Claude
+
+`sudo pynids ai set-key` stores an Anthropic API key (mode 0600) for the daemon. After that,
+**Explain with Claude** in the dashboard (or `pynids ai explain <alert-id>`) sends that
+single alert, with its evidence and enrichment, to Claude Opus 5. You get back a verdict
+(Benign / Privacy concern / Suspicious / Malicious), what happened, why it matters, and what
+to do. Explanations are cached per alert. Nothing is sent unless you click.
+
+### Seeing inside HTTPS: key logging + decryption
+
+```bash
+pynids keylog --browser chrome              # separate Chrome profile that logs TLS keys
+sudo pynids daemon install --record         # keep a rolling 500 MB window of raw traffic
+pynids decrypt                              # list decrypted HTTPS / HTTP-2 / HTTP-3 requests
+pynids decrypt --wireshark                  # open the latest capture in Wireshark, keys loaded
+```
+
+Chrome, Brave, Edge, and Firefox honour `SSLKEYLOGFILE`; Safari does not. The key log
+decrypts that browser's traffic, so it is created readable only by you. Delete it when
+you are done. `decrypt` needs `tshark` (`brew install --cask wireshark`).
+
+---
+
+## 🔐 Privacy & Security Model
+
+* All capture, storage, and analysis happens **on your Mac**. The only outbound requests are
+  feed/GeoIP downloads and, if you click it, **Explain with Claude**.
+* The API binds to `127.0.0.1` only and enforces a **Host-header allowlist** (defeats DNS
+  rebinding), a **random token** for every data route, an **Origin check** on state-changing
+  requests, and sends **no CORS headers**. A malicious webpage therefore cannot read your
+  events or block IPs through it.
+* `/api/widget` is the one unauthenticated data route. The sandboxed widget can't read the
+  token, so it returns only counts and the latest alert headline.
 
 ---
 
@@ -232,8 +319,11 @@ layer7.http.uri              layer7.http.user_agent
 layer7.http.sqli_suspect     layer7.http.xss_suspect
 layer7.http.scanner_ua       layer7.http.path_traversal_suspect
 layer7.dns.query_name        layer7.dns.query_type
-layer7.dns.name_entropy      layer7.tls.sni
-layer7.tls.ja3               layer7.ssh.software
+layer7.dns.name_entropy      layer7.dns.answers
+layer7.tls.sni               layer7.tls.alpn
+layer7.tls.ja3               layer7.tls.ech
+layer7.quic.sni              layer7.quic.alpn
+layer7.ssh.software
 ```
 
 ---
@@ -277,6 +367,21 @@ alert_manager:
 ---
 
 ## 🗂️ Threat Intelligence Feeds
+
+**Live feeds** (recommended) are downloaded by `pynids intel update` and refreshed by the
+daemon every 6 hours. They're cached in the data directory and checked against every IP, DNS
+name, and TLS/QUIC SNI:
+
+| Feed | Source | Used for |
+|---|---|---|
+| `feodo` | abuse.ch Feodo Tracker | botnet C2 IPs (CRITICAL) |
+| `spamhaus_drop_v4` / `_v6` | Spamhaus DROP | hijacked / criminal netblocks (HIGH) |
+| `tor_exits` | Tor Project | Tor exit relays (LOW) |
+| `urlhaus` | abuse.ch URLhaus | malware-distribution hosts (HIGH) |
+| `disconnect` | Disconnect.me | 4,000+ tracker domains |
+| `doh_domains` / `doh_ipv4` | dibdot DoH lists | encrypted-DNS resolvers |
+
+`pynids intel status` shows what's cached. The YAML files below add your own indicators on top.
 
 ### Bad IP feed (`intel/known_bad_ips.yaml`)
 
@@ -358,7 +463,8 @@ alert.
 | `STEALTH-WEBSOCKET` | HTTP `Upgrade: websocket` handshake |
 | `STEALTH-BEACON` | `navigator.sendBeacon` POST or 1×1 tracking pixel |
 | `STEALTH-DNS-PREFETCH` | Burst of unique third-party DNS lookups (`<link rel="dns-prefetch">`) |
-| `STEALTH-TRACKER` | Connection to a known analytics/tracker domain |
+| `STEALTH-TRACKER` | Connection to a known analytics/tracker domain (TLS/QUIC SNI, HTTP Host, or DNS) |
+| `STEALTH-ENCRYPTED-DNS` | DNS-over-HTTPS / TLS / QUIC session: lookups that bypass the system resolver |
 
 ---
 
@@ -452,8 +558,15 @@ mgr.close()
 | [PyYAML](https://pyyaml.org/) | ≥ 6.0.0 | Config and rule file loading |
 | [click](https://click.palletsprojects.com/) | ≥ 8.1.0 | CLI framework |
 | [rich](https://github.com/Textualize/rich) | ≥ 13.0.0 | Terminal output formatting |
+| [psutil](https://github.com/giampaolo/psutil) | ≥ 5.9.0 | Per-connection app attribution |
+| [cryptography](https://cryptography.io/) | ≥ 41.0.0 | QUIC Initial decryption |
+| [maxminddb](https://github.com/maxmind/MaxMind-DB-Reader-python) | ≥ 2.4.0 | GeoIP / ASN (`[geo]` extra) |
+| [anthropic](https://github.com/anthropics/anthropic-sdk-python) | ≥ 0.75.0 | Explain with Claude (`[ai]` extra) |
 
-**Dev only:** `pytest>=7.4`, `pytest-cov>=4.1`
+**Dev only:** `pytest>=7.4`, `pytest-cov>=4.1`. **Menu bar app:** Xcode Command Line Tools (`xcode-select --install`).
+
+IP geolocation by [DB-IP](https://db-ip.com) (CC BY 4.0). Tracker list by
+[Disconnect](https://disconnect.me/trackerprotection) (CC BY-NC-SA 4.0).
 
 ---
 

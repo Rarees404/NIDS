@@ -30,6 +30,7 @@
 14. [Data Flow — End-to-End Packet Journey](#14-data-flow--end-to-end-packet-journey)
 15. [Test Suite](#15-test-suite)
 16. [Design Decisions & Trade-offs](#16-design-decisions--trade-offs)
+17. [Version 2: Always-On Service, Enrichment & Response](#17-version-2-always-on-service-enrichment--response)
 
 ---
 
@@ -1189,3 +1190,96 @@ Total: **139 tests** (105 pre-existing + 34 stealth).
 | **Stealth detectors emit `BEHAVIORAL` alerts with `STEALTH-…` rule IDs** | Reuses the entire alert-management, persistence, and querying ecosystem instead of inventing a parallel pipeline. The X-Ray dashboard is just another `BaseOutput`. |
 | **X-Ray dashboard runs on a daemon render thread** | Decouples render rate from packet rate. The engine's hot path remains dedup-free and deterministic; the dashboard re-renders at a fixed Hz no matter how busy the wire is. |
 | **Dual sniffer (main NIC + loopback) in `pynids xray`** | Loopback packets never traverse the primary interface, so a second `sniff_live` thread on `lo`/`lo0` is required to detect browser-side localhost probes. |
+| **Hash-indexed threat intel** | Live feeds bring thousands of indicators. IPs are indexed per (version, prefix length) and domains by exact name and label suffix, so a lookup costs ~4 µs whatever the feed size. |
+| **Passive hostname learning instead of reverse DNS** | DNS answers, SNI, and Host headers name the service the machine *meant* to reach; PTR records return opaque CDN node names and cost a network round trip. |
+| **Process attribution by (transport, local port)** | Ports are unique per transport on a host, including `0.0.0.0` UDP binds used by QUIC; the socket table is snapshotted off-thread so packet lookup is a dict access. |
+
+---
+
+## 17. Version 2: Always-On Service, Enrichment & Response
+
+Version 2 turns PyNIDS from a foreground CLI into a background service with native macOS
+front ends. Everything below runs only on live traffic from the local machine.
+
+### 17.1 New modules
+
+| Module | Responsibility |
+|---|---|
+| `protocols/quic_crypto.py` | RFC 9001/9369 Initial key derivation, header-protection removal, AES-GCM decryption, CRYPTO-frame parsing, multi-packet ClientHello reassembly |
+| `protocols/dissector.py` (`_TlsRecordAssembler`) | Buffers a TLS ClientHello record split across TCP segments (post-quantum key shares exceed one MSS) |
+| `enrich/process.py` | `ProcessResolver`: background psutil socket snapshots → `(proto, local_port) → {pid, process, app, exe, user}`; mappings survive 5 min after socket close |
+| `enrich/hostnames.py` | `HostnameCache`: bounded LRU IP → hostname from DNS answers, TLS/QUIC SNI, HTTP Host |
+| `enrich/geo.py` | `GeoResolver` over DB-IP City/ASN Lite `.mmdb`; `download_databases()` |
+| `enrich/__init__.py` | `Enricher.packet_context()` → `{direction, remote_ip, app, process, pid, remote_host, country, city, lat, lon, asn, org}` |
+| `intel/feeds.py` | Feed registry, parsers, atomic JSON cache, `load_into()`, `load_trackers()`, `load_doh()` |
+| `detection/stealth.py` (`DohDetector`) | Encrypted-DNS sessions by SNI, port 853, or HTTPS to known resolver IPs |
+| `alerts/classify.py` | Maps alerts to UI "kinds" (threat, attack, webrtc, localhost, doh, tracker, beacon, websocket, quic, prefetch) |
+| `response/pf.py` | `PfBlocker` (pf anchor `com.apple/250.PyNIDS`, table `<pynids_block>`, JSON ledger, expiry, guard rails) and `AutoBlockPolicy` output |
+| `response/notify.py` | `NotificationOutput`: coalesced macOS banners posted into the console user's session via `launchctl asuser` |
+| `ai/explain.py` | Claude Opus 5 alert explanations (official `anthropic` SDK, server-side refusal fallback, untrusted-data framing) |
+| `service/live.py` | `LiveState`: packet observer + alert output; per-app and per-endpoint accounting, rate history, 60-minute timeline, SSE fan-out |
+| `service/api.py` | Stdlib `ThreadingHTTPServer` API + dashboard; Host allowlist, token, Origin check |
+| `service/daemon.py` | Assembles engine, enrichment, outputs, API, capture threads, feed refresh, interface watchdog |
+| `service/launchd.py` | LaunchDaemon plist install / uninstall / restart |
+| `service/recorder.py` | Rolling PCAP ring for the key-log decryption workflow |
+| `web/dashboard.html` | Single-file dashboard (vanilla JS + SVG charts, d3-geo map) |
+| `cli_service.py` | `daemon`, `status`, `open`, `intel`, `geoip`, `block`, `ai`, `keylog`, `decrypt`, `app` |
+| `macos/PyNIDS/` | SwiftUI menu bar app + WidgetKit extension, built by `macos/build.sh` with `swiftc` |
+
+### 17.2 Packet journey (v2)
+
+```
+sniff_live(en0) ─┐
+sniff_live(lo0) ─┴─► DetectionEngine.process_packet(meta)
+                      1  dissect()            ← TLS reassembly, QUIC decryption, DNS answers
+                      1b Enricher.packet_context() → context
+                      2  FlowTracker.update()
+                      3  threat intel         ← IP, DNS name, TLS/QUIC SNI
+                      4  detectors            ← 16 including DohDetector
+                         alert.context = context
+                         LiveState.observe_packet(meta, layer7, context)
+                      5  AlertManager.add() → LiveState · SQLiteOutput · NotificationOutput · AutoBlockPolicy
+```
+
+### 17.3 Local API
+
+| Route | Auth | Purpose |
+|---|---|---|
+| `GET /` | — | Dashboard (token injected) |
+| `GET /api/health` | — | Liveness |
+| `GET /api/widget` | — | Counts + latest alert headline for the sandboxed widget |
+| `GET /api/summary` | token | Counts by kind/severity, rates, top apps, status, threat level |
+| `GET /api/alerts?limit&min_severity&kind&q&app&since&until` | token | History from SQLite (FTS5 search) |
+| `GET /api/alerts/{id}` | token | One alert |
+| `GET /api/apps`, `/api/remotes`, `/api/timeline` | token | Live traffic views |
+| `GET /api/stream` | token (query) | Server-Sent Events: `alert`, `tick`, `block`, `unblock`, `intel` |
+| `GET/POST /api/blocks`, `DELETE /api/blocks/{ip}` | token + Origin | pf blocks |
+| `POST /api/explain/{id}` | token + Origin | Claude explanation (cached in `explanations` table) |
+| `GET /api/intel`, `POST /api/intel/update` | token (+ Origin) | Feed status / refresh and hot-reload |
+| `POST /api/notifications` | token + Origin | Pause / resume banners |
+
+### 17.4 Files on disk
+
+| Path | Contents |
+|---|---|
+| `/Library/LaunchDaemons/com.pynids.daemon.plist` | launchd job |
+| `/Library/Application Support/PyNIDS/config.yaml` | Daemon config |
+| `…/events.db` | Alerts (+ `explanations` table), WAL mode |
+| `…/intel/*.json` | Cached feeds |
+| `…/geoip/*.mmdb` | DB-IP databases |
+| `…/api-token` | API token (0644) |
+| `…/anthropic-key` | Claude API key (0600) |
+| `…/blocklist.json` | Block ledger |
+| `…/captures/*.pcap` | Rolling capture window (only with `--record`) |
+| `/Library/Logs/PyNIDS/daemon.log` | Daemon log |
+
+### 17.5 Known limits
+
+* The very first packet of a brand-new connection can be unattributed if the socket opened
+  and closed between two socket-table snapshots (1.5 s apart).
+* SNI cannot be read when Encrypted Client Hello is used; the alert then carries the outer
+  public name and `ech: true`.
+* The desktop widget refreshes on WidgetKit's schedule (the menu bar app nudges it when
+  events arrive); the menu bar and dashboard are the live views.
+* The menu bar app is ad-hoc signed. It runs on the Mac that built it; distributing it
+  needs a Developer ID signature and notarization.

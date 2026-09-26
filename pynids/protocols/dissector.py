@@ -9,8 +9,9 @@ fields for rich, protocol-aware matching.
 Supported protocols
 -------------------
 HTTP/1.x  — request line, headers, SQLi/XSS heuristics
-DNS       — query/response, entropy of the query name (tunneling hint)
-TLS       — ClientHello SNI extraction and JA3 fingerprint
+DNS       — query/response, answer records, entropy of the query name
+TLS       — ClientHello SNI / ALPN / ECH and JA3, reassembled across TCP segments
+QUIC      — Initial-packet decryption to recover the ClientHello SNI
 SSH       — banner / version string
 SMTP      — EHLO, MAIL FROM, RCPT TO commands
 """
@@ -19,8 +20,11 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
+from .quic_crypto import QuicClientHelloAssembler, decrypt_client_initial
 from .stealth import (
     is_quic,
     is_stun,
@@ -29,6 +33,61 @@ from .stealth import (
     parse_quic,
     parse_stun,
 )
+
+
+# ---------------------------------------------------------------------------
+# Handshake reassembly state
+# ---------------------------------------------------------------------------
+
+class _TlsRecordAssembler:
+    """
+    Buffer a TLS ClientHello record that spans several TCP segments.
+
+    Post-quantum key shares push modern ClientHellos past one MSS, and
+    Chrome randomises extension order, so the SNI is often in the second
+    segment.  Segments are assumed to arrive in order (true for the
+    client→server first flight in practice).
+    """
+
+    def __init__(self, max_entries: int = 4096, ttl: float = 10.0) -> None:
+        self._max = max_entries
+        self._ttl = ttl
+        self._buffers: "OrderedDict[tuple, Tuple[float, int, bytearray]]" = OrderedDict()
+
+    def feed(self, key: tuple, payload: bytes) -> Optional[bytes]:
+        """Return a complete ClientHello record, or None while still buffering."""
+        now = time.monotonic()
+        while self._buffers:
+            k, (ts, _, _) = next(iter(self._buffers.items()))
+            if now - ts <= self._ttl:
+                break
+            self._buffers.popitem(last=False)
+
+        if key in self._buffers:
+            _, needed, buf = self._buffers.pop(key)
+            buf += payload
+            if len(buf) >= needed:
+                return bytes(buf[:needed])
+            self._buffers[key] = (now, needed, buf)
+            return None
+
+        if len(payload) >= 6 and payload[0] == 0x16 and payload[5] == 0x01:
+            needed = 5 + int.from_bytes(payload[3:5], "big")
+            if len(payload) >= needed:
+                return payload
+            if needed <= 16389:
+                self._buffers[key] = (now, needed, bytearray(payload))
+                while len(self._buffers) > self._max:
+                    self._buffers.popitem(last=False)
+            return None
+        return payload
+
+    def pending(self, key: tuple) -> bool:
+        return key in self._buffers
+
+
+_TLS_ASSEMBLER = _TlsRecordAssembler()
+_QUIC_ASSEMBLER = QuicClientHelloAssembler()
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +130,8 @@ def dissect(meta: Dict[str, Any]) -> Dict[str, Any]:
         if is_quic(payload):
             quic = parse_quic(payload)
             if quic:
+                if quic.get("packet_type") == "Initial":
+                    _decrypt_quic_sni(meta, payload, quic)
                 layer7["app_proto"] = "quic"
                 layer7["quic"] = quic
                 return layer7
@@ -88,9 +149,11 @@ def dissect(meta: Dict[str, Any]) -> Dict[str, Any]:
         if is_beacon_request(http_info):
             http_info["beacon_suspect"] = True
 
-    elif dst_port in (443, 8443) or src_port in (443, 8443):
+    elif dst_port in (443, 8443, 853) or src_port in (443, 8443, 853):
         layer7["app_proto"] = "tls"
-        layer7["tls"] = _parse_tls_client_hello(payload)
+        key = (meta.get("src_ip"), src_port, meta.get("dst_ip"), dst_port)
+        record = _TLS_ASSEMBLER.feed(key, payload) if proto == "tcp" else payload
+        layer7["tls"] = _parse_tls_client_hello(record) if record else {"partial": True}
 
     elif dst_port == 22 or src_port == 22:
         layer7["app_proto"] = "ssh"
@@ -101,6 +164,24 @@ def dissect(meta: Dict[str, Any]) -> Dict[str, Any]:
         layer7["smtp"] = _parse_smtp(payload)
 
     return layer7
+
+
+def _decrypt_quic_sni(meta: Dict[str, Any], payload: bytes, quic: Dict[str, Any]) -> None:
+    """Decrypt a client Initial and, once the ClientHello is whole, add SNI/ALPN."""
+    initial = decrypt_client_initial(payload)
+    if initial is None:
+        return
+    quic["decrypted"] = True
+    key = (meta.get("src_ip"), meta.get("src_port"), initial.dcid)
+    hello = _QUIC_ASSEMBLER.add(repr(key).encode(), initial.crypto_frames)
+    if hello is None:
+        return
+    record = b"\x16\x03\x01" + len(hello).to_bytes(2, "big") + hello
+    tls = _parse_tls_client_hello(record)
+    for field in ("sni", "alpn", "ech", "ja3", "tls_version"):
+        if tls.get(field) is not None:
+            quic[field] = tls[field]
+    quic["client_hello_complete"] = True
 
 
 # ---------------------------------------------------------------------------
@@ -215,10 +296,46 @@ def _parse_dns(payload: bytes, proto: str) -> Dict[str, Any]:
                 info["name_entropy"] = _entropy(name.lower().encode())
                 # Subdomain depth hints at tunneling
                 info["subdomain_depth"] = name.count(".")
+                pos += 4
+                if info["is_response"] and ancount:
+                    info["answers"] = _dns_answers(data, pos, ancount)
 
     except Exception:
         pass
     return info
+
+
+def _dns_answers(data: bytes, pos: int, count: int) -> List[Dict[str, Any]]:
+    """Decode A / AAAA / CNAME answer records (used to map IPs back to names)."""
+    answers: List[Dict[str, Any]] = []
+    for _ in range(min(count, 32)):
+        name, pos = _dns_decode_name(data, pos)
+        if pos + 10 > len(data):
+            break
+        rtype = int.from_bytes(data[pos:pos + 2], "big")
+        ttl = int.from_bytes(data[pos + 4:pos + 8], "big")
+        rdlen = int.from_bytes(data[pos + 8:pos + 10], "big")
+        pos += 10
+        rdata = data[pos:pos + rdlen]
+        if len(rdata) != rdlen:
+            break
+        value: Optional[str] = None
+        if rtype == 1 and rdlen == 4:
+            value = ".".join(str(b) for b in rdata)
+        elif rtype == 28 and rdlen == 16:
+            import ipaddress
+            value = str(ipaddress.IPv6Address(rdata))
+        elif rtype == 5:
+            value, _ = _dns_decode_name(data, pos)
+        if value is not None:
+            answers.append({
+                "name": name,
+                "type": _DNS_QTYPES.get(rtype, str(rtype)),
+                "data": value,
+                "ttl": ttl,
+            })
+        pos += rdlen
+    return answers
 
 
 _DNS_QTYPES: Dict[int, str] = {
@@ -311,7 +428,7 @@ def _parse_tls_client_hello(payload: bytes) -> Dict[str, Any]:
             o = pos + i * 2
             if o + 2 <= len(payload):
                 cs = int.from_bytes(payload[o : o + 2], "big")
-                if cs != 0x0000:  # skip GREASE
+                if not _is_grease(cs):
                     cipher_suites.append(cs)
         pos += cs_len
 
@@ -337,8 +454,23 @@ def _parse_tls_client_hello(payload: bytes) -> Dict[str, Any]:
             ext_len = int.from_bytes(payload[pos + 2 : pos + 4], "big")
             data_start = pos + 4
 
-            if ext_type != 0x0A0A:  # skip GREASE extensions
+            if not _is_grease(ext_type):
                 extensions.append(ext_type)
+
+            # ALPN (type 16) — e.g. ["h2", "http/1.1"] or ["h3"]
+            if ext_type == 0x0010 and data_start + 2 <= len(payload):
+                alpn: List[str] = []
+                apos = data_start + 2
+                aend = min(data_start + ext_len, len(payload))
+                while apos < aend:
+                    alen = payload[apos]
+                    alpn.append(payload[apos + 1:apos + 1 + alen].decode("ascii", errors="replace"))
+                    apos += 1 + alen
+                info["alpn"] = alpn
+
+            # Encrypted Client Hello — the visible SNI is only the outer, public name
+            if ext_type == 0xFE0D:
+                info["ech"] = True
 
             # SNI (type 0)
             if ext_type == 0x0000 and data_start + 5 <= len(payload):
@@ -358,7 +490,7 @@ def _parse_tls_client_hello(payload: bytes) -> Dict[str, Any]:
                     go = data_start + 2 + gi * 2
                     if go + 2 <= len(payload):
                         g = int.from_bytes(payload[go : go + 2], "big")
-                        if g != 0x0A0A:
+                        if not _is_grease(g):
                             elliptic_curves.append(g)
 
             # EC point formats (type 11)
@@ -387,6 +519,11 @@ def _parse_tls_client_hello(payload: bytes) -> Dict[str, Any]:
     except Exception:
         pass
     return info
+
+
+def _is_grease(value: int) -> bool:
+    """RFC 8701 GREASE values: 0x0A0A, 0x1A1A, … 0xFAFA."""
+    return (value & 0x0F0F) == 0x0A0A and (value >> 8) == (value & 0xFF)
 
 
 def _tls_version_name(version: int) -> str:

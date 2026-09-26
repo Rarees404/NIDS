@@ -58,6 +58,7 @@ class Flow:
     last_seen: float = field(default_factory=time.time)
     packet_count: int = 0
     byte_count: int = 0
+    bytes_from_src: int = 0  # payload bytes sent by the initiator (outbound for local clients)
     tcp_flags_seen: int = 0
 
     @property
@@ -135,7 +136,10 @@ class FlowTracker:
 
         flow.last_seen = meta.get("timestamp", time.time())
         flow.packet_count += 1
-        flow.byte_count += len(meta.get("payload_bytes", b""))
+        payload_len = len(meta.get("payload_bytes", b""))
+        flow.byte_count += payload_len
+        if src_ip == flow.src_ip and meta.get("src_port") == flow.src_port:
+            flow.bytes_from_src += payload_len
 
         # Advance TCP state machine
         tcp_flags = meta.get("tcp_flags", 0)

@@ -163,8 +163,11 @@ class AlertManager:
         self._dedup[key] = (now, 1)
         self._emit(alert)
 
-        # Correlation bookkeeping
-        if alert.src_ip:
+        # Correlation bookkeeping.  X-Ray privacy telemetry (STEALTH-*) is
+        # excluded: it describes this machine's own browsing (trackers, QUIC,
+        # DoH …) and would otherwise brand the local host a "multi-vector
+        # attacker" several times an hour.
+        if alert.src_ip and not (alert.rule_id or "").startswith("STEALTH-"):
             self._update_correlation(alert)
 
         return True

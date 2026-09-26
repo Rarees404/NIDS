@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -42,7 +44,13 @@ CREATE TABLE IF NOT EXISTS alerts (
     confidence      REAL,
     tags            TEXT,
     mitre_technique TEXT,
-    evidence        TEXT
+    evidence        TEXT,
+    app             TEXT,
+    process_name    TEXT,
+    pid             INTEGER,
+    remote_host     TEXT,
+    country         TEXT,
+    context         TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_alerts_timestamp   ON alerts (timestamp);
@@ -68,13 +76,28 @@ CREATE TRIGGER IF NOT EXISTS alerts_ai AFTER INSERT ON alerts BEGIN
 END;
 """
 
+# Columns added after the first release — added in place to older databases.
+_MIGRATIONS = (
+    ("app", "TEXT"),
+    ("process_name", "TEXT"),
+    ("pid", "INTEGER"),
+    ("remote_host", "TEXT"),
+    ("country", "TEXT"),
+    ("context", "TEXT"),
+)
+
+_POST_MIGRATION_DDL = """
+CREATE INDEX IF NOT EXISTS idx_alerts_app ON alerts (app);
+"""
+
 _INSERT = """
 INSERT OR IGNORE INTO alerts
   (alert_id, timestamp, alert_type, severity, severity_numeric, message,
    src_ip, dst_ip, src_port, dst_port, protocol, rule_id, flow_id,
-   confidence, tags, mitre_technique, evidence)
+   confidence, tags, mitre_technique, evidence,
+   app, process_name, pid, remote_host, country, context)
 VALUES
-  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -93,20 +116,35 @@ class SQLiteOutput(BaseOutput):
         path: str,
         min_severity: Severity = Severity.LOW,
         batch_size: int = 50,
+        flush_interval: float = 2.0,
     ) -> None:
         self.path = path
         self.min_severity = min_severity
         self.batch_size = batch_size
+        self.flush_interval = flush_interval
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
+        # WAL lets the API server read while the capture thread writes.
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_DDL)
+        self._migrate()
         self._conn.commit()
         self._pending: List[tuple] = []
+        self._lock = threading.Lock()
+        self._last_flush = time.monotonic()
+
+    def _migrate(self) -> None:
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(alerts)")}
+        for column, sql_type in _MIGRATIONS:
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE alerts ADD COLUMN {column} {sql_type}")
+        self._conn.executescript(_POST_MIGRATION_DDL)
 
     def emit(self, alert: Alert) -> None:
         if alert.severity < self.min_severity:
             return
         d = alert.to_dict()
+        ctx = d.get("context") or {}
         row = (
             d["alert_id"],
             d["timestamp"],
@@ -124,14 +162,31 @@ class SQLiteOutput(BaseOutput):
             d["confidence"],
             json.dumps(d["tags"]),
             d["mitre_technique"],
-            json.dumps(d["evidence"]),
+            json.dumps(d["evidence"], default=str),
+            ctx.get("app"),
+            ctx.get("process"),
+            ctx.get("pid"),
+            ctx.get("remote_host"),
+            ctx.get("country"),
+            json.dumps(ctx, default=str),
         )
-        self._pending.append(row)
-        if self.batch_size == 0 or len(self._pending) >= self.batch_size:
+        with self._lock:
+            self._pending.append(row)
+            due = (
+                self.batch_size == 0
+                or len(self._pending) >= self.batch_size
+                or time.monotonic() - self._last_flush >= self.flush_interval
+            )
+            if due:
+                self._flush()
+
+    def flush(self) -> None:
+        """Commit any buffered alerts now (called periodically by the daemon)."""
+        with self._lock:
             self._flush()
 
     def close(self) -> None:
-        self._flush()
+        self.flush()
         try:
             self._conn.close()
         except Exception:
@@ -167,6 +222,7 @@ class SQLiteOutput(BaseOutput):
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def _flush(self) -> None:
+        self._last_flush = time.monotonic()
         if not self._pending:
             return
         try:

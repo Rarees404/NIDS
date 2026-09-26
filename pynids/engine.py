@@ -29,7 +29,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from .alerts.manager import AlertManager
 from .alerts.model import Alert, AlertType, Severity
@@ -43,6 +43,7 @@ from .detection.behavioral import (
 from .detection.signature import SignatureDetector, load_rules
 from .detection.stealth import (
     BeaconDetector,
+    DohDetector,
     DnsPrefetchDetector,
     LocalhostProbeDetector,
     QuicHttp3Detector,
@@ -53,6 +54,9 @@ from .detection.stealth import (
 from .flow.tracker import FlowTracker
 from .intel.threat_intel import ThreatIntel
 from .protocols.dissector import dissect
+
+if TYPE_CHECKING:
+    from .enrich import Enricher
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +70,10 @@ class DetectionEngine:
         rules_path:     Path to the signature rules YAML file (optional).
         intel:          Pre-configured :class:`~pynids.intel.ThreatIntel` instance.
         alert_manager:  Pre-configured :class:`~pynids.alerts.AlertManager` instance.
+        enricher:       Optional :class:`~pynids.enrich.Enricher` that adds app,
+                        hostname, and GeoIP context to packets and alerts.
+        packet_observers: Callables invoked with ``(meta, layer7, context)`` for
+                        every packet (live traffic statistics).
     """
 
     def __init__(
@@ -74,6 +82,8 @@ class DetectionEngine:
         rules_path: Optional[str] = None,
         intel: Optional[ThreatIntel] = None,
         alert_manager: Optional[AlertManager] = None,
+        enricher: Optional["Enricher"] = None,
+        packet_observers: Optional[List[Callable[[dict, dict, dict], None]]] = None,
     ) -> None:
         self._config = config
         self._rules_path = rules_path
@@ -91,6 +101,10 @@ class DetectionEngine:
 
         # --- Alert manager ---
         self._alert_manager = alert_manager or AlertManager()
+
+        # --- Enrichment + per-packet observers ---
+        self._enricher = enricher
+        self._observers: List[Callable[[dict, dict, dict], None]] = list(packet_observers or [])
 
         # --- Detectors (ordered: cheapest / most likely to fire first) ---
         self._detectors: list = []
@@ -126,6 +140,17 @@ class DetectionEngine:
             # 1. Protocol dissection
             layer7 = dissect(meta)
 
+            # 1b. Enrichment — owning app, hostname, GeoIP
+            context: Dict[str, Any] = {}
+            if self._enricher is not None:
+                try:
+                    context = self._enricher.packet_context(meta, layer7)
+                except Exception as exc:
+                    logger.debug("Enrichment failed: %s", exc)
+
+            if context:
+                layer7["context"] = context  # lets detectors see the owning app
+
             # 2. Flow tracking
             flow = self._flow_tracker.update(meta)
 
@@ -140,6 +165,16 @@ class DetectionEngine:
                         alerts.append(alert)
                 except Exception as exc:
                     logger.error("Detector %s raised: %s", detector.name, exc)
+
+            if context:
+                for alert in alerts:
+                    alert.context = {**context, **alert.context}
+
+            for observer in self._observers:
+                try:
+                    observer(meta, layer7, context)
+                except Exception as exc:
+                    logger.debug("Packet observer failed: %s", exc)
 
         # 5. Feed through alert manager (dedup / suppress / correlate)
         for alert in alerts:
@@ -194,6 +229,32 @@ class DetectionEngine:
     def alert_manager(self) -> AlertManager:
         return self._alert_manager
 
+    def reload_intel(
+        self,
+        intel: Optional[ThreatIntel],
+        tracker_domains: Optional[Dict[str, str]] = None,
+        doh_hosts: Optional[set] = None,
+        doh_ips: Optional[set] = None,
+    ) -> None:
+        """Swap in freshly downloaded threat-intel and privacy feeds."""
+        with self._lock:
+            self._intel = intel
+            for detector in self._detectors:
+                if isinstance(detector, TrackerDetector) and tracker_domains:
+                    merged = dict(tracker_domains)
+                    merged.update(detector.domains)
+                    detector.domains = merged
+                elif isinstance(detector, DohDetector):
+                    detector.hosts |= set(doh_hosts or ())
+                    detector.ips |= set(doh_ips or ())
+
+    @property
+    def enricher(self) -> Optional["Enricher"]:
+        return self._enricher
+
+    def add_packet_observer(self, observer: Callable[[dict, dict, dict], None]) -> None:
+        self._observers.append(observer)
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -218,6 +279,7 @@ class DetectionEngine:
                 ewma_alpha=float(anom_cfg.get("ewma_alpha", 0.3)),
                 sigma_threshold=float(anom_cfg.get("sigma_threshold", 4.0)),
                 window_seconds=int(anom_cfg.get("window_seconds", 10)),
+                min_rate_pps=float(anom_cfg.get("min_rate_pps", 100)),
             )
         )
 
@@ -252,7 +314,7 @@ class DetectionEngine:
         self._detectors.append(HttpAttackDetector())
         self._detectors.append(
             DataExfiltrationDetector(
-                threshold_bytes=int(beh_cfg.get("exfil_threshold_bytes", 10 * 1024 * 1024))
+                threshold_bytes=int(beh_cfg.get("exfil_threshold_bytes", 100 * 1024 * 1024))
             )
         )
         self._detectors.append(
@@ -284,8 +346,20 @@ class DetectionEngine:
                     window_seconds=float(stealth_cfg.get("dns_prefetch_window", 5.0)),
                 )
             )
+            # Cached live feeds (``pynids intel update``) extend the built-in
+            # tracker and DoH lists when a feed directory is configured.
+            feeds_dir = (config.get("intel") or {}).get("feeds_dir")
+            tracker_extra: Dict[str, str] = {}
+            doh_hosts: set = set()
+            doh_ips: set = set()
+            if feeds_dir:
+                from .intel.feeds import load_doh, load_trackers
+                tracker_extra = load_trackers(Path(feeds_dir))
+                doh_hosts, doh_ips = load_doh(Path(feeds_dir))
             if stealth_cfg.get("trackers_enabled", True):
-                self._detectors.append(TrackerDetector())
+                self._detectors.append(TrackerDetector(extra_domains=tracker_extra))
+            if stealth_cfg.get("doh_enabled", True):
+                self._detectors.append(DohDetector(hosts=doh_hosts, ips=doh_ips))
 
         logger.info("Initialised %d detectors", len(self._detectors))
 
@@ -373,6 +447,34 @@ class DetectionEngine:
                         confidence=1.0,
                         evidence={
                             "query_name": dns_name,
+                            "matched_indicator": entry.indicator,
+                            "category": entry.category,
+                        },
+                    )
+                )
+
+        # Check TLS / QUIC server names — still visible when DNS is encrypted
+        sni = (layer7.get("tls") or {}).get("sni") or (layer7.get("quic") or {}).get("sni")
+        if sni and sni != dns_name:
+            entry = self._intel.check_domain(sni)
+            if entry:
+                alerts.append(
+                    Alert(
+                        alert_type=AlertType.THREAT_INTEL,
+                        severity=Severity(entry.severity),
+                        message=(
+                            f"Encrypted connection to known malicious host '{sni}' "
+                            f"({entry.category}): {entry.description}"
+                        ),
+                        src_ip=src_ip,
+                        dst_ip=dst_ip,
+                        dst_port=meta.get("dst_port"),
+                        protocol=meta.get("protocol"),
+                        mitre_technique="T1071.001",
+                        tags=["threat_intel", "sni", entry.category],
+                        confidence=1.0,
+                        evidence={
+                            "sni": sni,
                             "matched_indicator": entry.indicator,
                             "category": entry.category,
                         },

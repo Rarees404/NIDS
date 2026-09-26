@@ -1,0 +1,45 @@
+# PyNIDS daemon configuration.
+#
+# `sudo pynids daemon install` copies this file to
+#   /Library/Application Support/PyNIDS/config.yaml
+# Edit that copy, then apply it with: sudo pynids daemon restart
+
+daemon:
+  interface: auto          # "auto" follows the default route (Wi-Fi/Ethernet/VPN changes)
+  loopback: true           # also watch lo0 — needed to catch webpages port-scanning localhost
+  bpf: ""                  # optional capture filter, e.g. "not port 22"
+  api_port: 8787           # dashboard: http://127.0.0.1:8787
+  process_attribution: true
+  geoip: true              # needs: pynids geoip download
+  feed_refresh_hours: 6
+  record_pcap: false       # keep a rolling window of raw traffic (for `pynids decrypt`)
+  record_max_mb: 50
+  record_files: 10
+
+notifications:
+  enabled: true
+  min_severity: HIGH       # LOW | MEDIUM | HIGH | CRITICAL
+  min_interval: 15         # seconds; bursts are coalesced into one banner
+
+response:
+  # Automatically block the remote IP of confirmed-malicious alerts with pf.
+  # Only threat-intel matches and correlated multi-vector attacks qualify;
+  # private, loopback, gateway and DNS-server addresses are never blocked.
+  auto_block: false
+  dry_run: false
+  min_severity: CRITICAL
+  alert_types: [threat_intel, correlation]
+  ttl: 3600                # seconds before a block lifts automatically
+  never_block: []          # extra IPs / CIDRs to protect, e.g. ["203.0.113.10/32"]
+
+alert_manager:
+  dedup_window: 60
+  correlation_window: 120
+  correlation_threshold: 3
+  suppression: []          # e.g. [{rule_id: STEALTH-QUIC-INITIAL, src_cidr: 0.0.0.0/0}]
+
+stealth:
+  trackers_enabled: true
+  doh_enabled: true
+  scan_threshold: 5
+  dns_prefetch_threshold: 8

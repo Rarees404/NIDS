@@ -126,6 +126,7 @@ def _make_flow(byte_count: int, flow_id: str = "abc123") -> Flow:
         dst_port=443,
     )
     f.byte_count = byte_count
+    f.bytes_from_src = byte_count  # all of it uploaded by the initiator
     f.packet_count = 100
     return f
 

@@ -45,6 +45,31 @@ from .base import BaseDetector
 from ..alerts.model import Alert, AlertType, Severity
 from ..flow.tracker import Flow
 
+
+# Destinations that are never interesting for scan / beacon heuristics:
+# multicast service discovery (mDNS, SSDP, vendor discovery) and broadcasts.
+def _is_multicast_or_broadcast(ip: Optional[str]) -> bool:
+    if not ip:
+        return False
+    if ip == "255.255.255.255" or ip.endswith(".255"):
+        return True
+    try:
+        import ipaddress
+        return ipaddress.ip_address(ip).is_multicast
+    except ValueError:
+        return False
+
+
+def _is_loopback(ip: Optional[str]) -> bool:
+    return bool(ip) and (ip.startswith("127.") or ip == "::1")
+
+
+# Real-time media relays (WebRTC STUN/TURN): calls legitimately push
+# hundreds of MB upstream.
+_MEDIA_PORTS = frozenset({3478, 3479, 5349, 5350, 19302, 19303, 19304, 19305, 19306, 19307, 19308, 19309})
+# Periodic OS housekeeping that is regular by design.
+_SYSTEM_SERVICE_PORTS = frozenset({53, 67, 68, 123, 137, 138, 1900, 5353, 5355})
+
 logger = logging.getLogger(__name__)
 
 
@@ -246,14 +271,14 @@ class DataExfiltrationDetector(BaseDetector):
     """
     Flag flows that transfer an unusually large volume of data outbound.
 
-    Uses the :class:`~pynids.flow.tracker.Flow` byte counter to identify
-    flows that have already transferred more than *threshold_bytes*.
+    Counts only bytes sent *by the connection's initiator* (uploads from
+    this machine), never downloads, and ignores WebRTC call media relays.
 
     Args:
-        threshold_bytes: Outbound byte count that triggers an alert (default 10 MiB).
+        threshold_bytes: Outbound byte count that triggers an alert (default 100 MiB).
     """
 
-    _DEFAULT_THRESHOLD = 10 * 1024 * 1024  # 10 MiB
+    _DEFAULT_THRESHOLD = 100 * 1024 * 1024  # 100 MiB
 
     def __init__(self, threshold_bytes: int = _DEFAULT_THRESHOLD) -> None:
         self.threshold_bytes = threshold_bytes
@@ -272,19 +297,21 @@ class DataExfiltrationDetector(BaseDetector):
         if flow is None:
             return
 
-        if flow.byte_count < self.threshold_bytes:
+        if flow.bytes_from_src < self.threshold_bytes:
             return
         if flow.flow_id in self._alerted_flows:
             return
+        if flow.dst_port in _MEDIA_PORTS or flow.src_port in _MEDIA_PORTS:
+            return
 
         self._alerted_flows.add(flow.flow_id)
-        mb = flow.byte_count / (1024 * 1024)
+        mb = flow.bytes_from_src / (1024 * 1024)
 
         yield Alert(
             alert_type=AlertType.BEHAVIORAL,
-            severity=Severity.HIGH,
+            severity=Severity.MEDIUM,
             message=(
-                f"Possible data exfiltration: {flow.src_ip} → {flow.dst_ip}:{flow.dst_port} "
+                f"Large upload: {flow.src_ip} → {flow.dst_ip}:{flow.dst_port} "
                 f"transferred {mb:.1f} MiB"
             ),
             src_ip=flow.src_ip,
@@ -356,6 +383,14 @@ class BeaconingDetector(BaseDetector):
         if not (src_ip and dst_ip and dst_port is not None):
             return
 
+        # Beacons are repeated *connections*; only count the first packet of
+        # each flow, otherwise every packet of a bulk download looks periodic.
+        if flow is not None and flow.packet_count > 1:
+            return
+        # Service discovery / time sync / DNS are periodic by design.
+        if _is_multicast_or_broadcast(dst_ip) or dst_port in _SYSTEM_SERVICE_PORTS:
+            return
+
         ts = meta.get("timestamp", time.time())
         key: Tuple[str, str, int] = (src_ip, dst_ip, dst_port)
         hist = self._history[key]
@@ -375,7 +410,8 @@ class BeaconingDetector(BaseDetector):
             return
 
         mean = sum(intervals) / len(intervals)
-        if mean == 0:
+        # Sub-second regularity is streaming/bulk traffic, not C2 check-ins.
+        if mean < 1.0:
             return
         variance = sum((x - mean) ** 2 for x in intervals) / len(intervals)
         stddev = math.sqrt(variance)

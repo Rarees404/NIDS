@@ -40,7 +40,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "behavioral": {
         "dns_entropy_threshold": 3.5,
         "dns_length_threshold": 50,
-        "exfil_threshold_bytes": 10 * 1024 * 1024,
+        "exfil_threshold_bytes": 100 * 1024 * 1024,
         "beacon_min_connections": 6,
         "beacon_cv_threshold": 0.20,
     },

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key><string>en</string>
+	<key>CFBundleExecutable</key><string>PyNIDS</string>
+	<key>CFBundleIdentifier</key><string>com.pynids.app</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleName</key><string>PyNIDS</string>
+	<key>CFBundleDisplayName</key><string>PyNIDS</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleShortVersionString</key><string>__VERSION__</string>
+	<key>CFBundleVersion</key><string>__BUILD__</string>
+	<key>LSMinimumSystemVersion</key><string>14.0</string>
+	<key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array>
+	<key>DTPlatformName</key><string>macosx</string>
+	<key>DTPlatformVersion</key><string>__SDK_VERSION__</string>
+	<key>DTSDKName</key><string>macosx__SDK_VERSION__</string>
+	<key>DTSDKBuild</key><string>__SDK_BUILD__</string>
+	<key>DTPlatformBuild</key><string>__SDK_BUILD__</string>
+	<key>DTCompiler</key><string>com.apple.compilers.llvm.clang.1_0</string>
+	<key>LSUIElement</key><true/>
+	<key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+	<key>NSHumanReadableCopyright</key><string>PyNIDS — MIT License</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key><string>com.pynids.app</string>
+			<key>CFBundleURLSchemes</key><array><string>pynids</string></array>
+		</dict>
+	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict><key>NSAllowsLocalNetworking</key><true/></dict>
+</dict>
+</plist>

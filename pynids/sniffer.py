@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import queue
 import logging
+import threading
 from typing import Any, Callable, Dict, Generator, Optional
 
 from scapy.all import (
@@ -115,6 +116,8 @@ def sniff_live(
     engine_callback: Callable[[Dict[str, Any]], None],
     bpf_filter: Optional[str] = None,
     packet_queue_size: int = 10_000,
+    raw_callback: Optional[Callable[[Any], None]] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> None:
     """
     Capture packets from *iface* and call *engine_callback* for each.
@@ -128,12 +131,20 @@ def sniff_live(
         engine_callback:  Function called with each packet's meta dict.
         bpf_filter:       Optional BPF capture filter string.
         packet_queue_size: Capacity of the internal packet queue.
+        raw_callback:     Optional function called with each raw Scapy packet
+                          (used to record PCAPs for later decryption).
+        stop_event:       Optional event that ends the capture when set.
     """
     pkt_queue: queue.Queue = queue.Queue(maxsize=packet_queue_size)
     dropped = 0
 
     def _on_packet(pkt) -> None:
         nonlocal dropped
+        if raw_callback is not None:
+            try:
+                raw_callback(pkt)
+            except Exception as exc:  # noqa: BLE001 — recording must never stop capture
+                logger.debug("raw_callback failed: %s", exc)
         meta = packet_to_meta(pkt)
         try:
             pkt_queue.put_nowait(meta)
@@ -152,7 +163,11 @@ def sniff_live(
     logger.info("Live capture started on %s (filter: %r)", iface, bpf_filter or "none")
 
     try:
-        while True:
+        while stop_event is None or not stop_event.is_set():
+            thread = getattr(sniffer, "thread", None)
+            if thread is not None and not thread.is_alive() and pkt_queue.empty():
+                # The sniffer thread died (interface went away).
+                raise OSError(f"capture on {iface} stopped unexpectedly")
             try:
                 meta = pkt_queue.get(timeout=0.2)
                 engine_callback(meta)

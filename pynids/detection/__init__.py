@@ -16,6 +16,7 @@ from .stealth import (
     BeaconDetector,
     DnsPrefetchDetector,
     TrackerDetector,
+    DohDetector,
 )
 
 __all__ = [
@@ -33,4 +34,5 @@ __all__ = [
     "BeaconDetector",
     "DnsPrefetchDetector",
     "TrackerDetector",
+    "DohDetector",
 ]

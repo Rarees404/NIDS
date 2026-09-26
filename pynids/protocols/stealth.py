@@ -33,6 +33,8 @@ import socket
 import struct
 from typing import Any, Dict, List, Optional
 
+from .quic_crypto import long_packet_type_name
+
 # ---------------------------------------------------------------------------
 # STUN / TURN — RFC 5389 / RFC 8489
 # ---------------------------------------------------------------------------
@@ -253,9 +255,7 @@ def parse_quic(payload: bytes) -> Dict[str, Any]:
         info["version"] = _KNOWN_QUIC_VERSIONS.get(
             version, f"Unknown 0x{version:08X}"
         )
-        info["packet_type"] = _QUIC_LONG_PACKET_TYPES.get(
-            packet_type_code, f"Unknown(0x{packet_type_code:02X})"
-        )
+        info["packet_type"] = long_packet_type_name(version, packet_type_code)
 
         pos = 5
         if pos >= len(payload):

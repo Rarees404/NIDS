@@ -36,6 +36,35 @@ from .base import BaseDetector
 from ..alerts.model import Alert, AlertType, Severity
 from ..flow.tracker import Flow
 
+
+# Destinations that are never interesting for scan / beacon heuristics:
+# multicast service discovery (mDNS, SSDP, vendor discovery) and broadcasts.
+def _is_multicast_or_broadcast(ip: Optional[str]) -> bool:
+    if not ip:
+        return False
+    if ip == "255.255.255.255" or ip.endswith(".255"):
+        return True
+    try:
+        import ipaddress
+        return ipaddress.ip_address(ip).is_multicast
+    except ValueError:
+        return False
+
+
+def _is_loopback(ip: Optional[str]) -> bool:
+    return bool(ip) and (ip.startswith("127.") or ip == "::1")
+
+
+_CLIENT_WEB_PORTS = frozenset({80, 443, 853, 8080, 8443})
+
+
+def _is_public(ip: Optional[str]) -> bool:
+    try:
+        import ipaddress
+        return ipaddress.ip_address(ip).is_global
+    except (ValueError, TypeError):
+        return False
+
 logger = logging.getLogger(__name__)
 
 
@@ -61,6 +90,12 @@ class AnomalyDetector(BaseDetector):
         ewma_alpha:       Smoothing factor α ∈ (0, 1].  Higher = faster adaptation.
         sigma_threshold:  How many standard deviations above the mean triggers an alert.
         window_seconds:   Width of each counting window in seconds.
+        min_rate_pps:     Never alert below this absolute rate — a jump from 0.3 to
+                          1.4 pkt/s is statistically large but operationally nothing.
+
+    Only *unsolicited* traffic counts: packets flowing back on a connection
+    this host opened (a video download, a sync) are the user's own traffic,
+    not a flood.
     """
 
     def __init__(
@@ -68,10 +103,12 @@ class AnomalyDetector(BaseDetector):
         ewma_alpha: float = 0.3,
         sigma_threshold: float = 4.0,
         window_seconds: int = 10,
+        min_rate_pps: float = 100.0,
     ) -> None:
         self.ewma_alpha = ewma_alpha
         self.sigma_threshold = sigma_threshold
         self.window_seconds = window_seconds
+        self.min_rate_pps = min_rate_pps
         self._per_source: Dict[str, _RateStats] = defaultdict(_RateStats)
 
     @property
@@ -86,6 +123,9 @@ class AnomalyDetector(BaseDetector):
     ) -> Iterable[Alert]:
         src_ip = meta.get("src_ip")
         if not src_ip:
+            return
+        # Response traffic on a flow the other side initiated — i.e. we asked for it.
+        if flow is not None and flow.src_ip != src_ip:
             return
         ts = meta.get("timestamp", time.time())
         yield from self._observe(src_ip, ts)
@@ -120,7 +160,8 @@ class AnomalyDetector(BaseDetector):
 
         threshold = stats.ewma_rate + self.sigma_threshold * stddev
 
-        if stddev > 0 and current_rate > threshold and current_count > 5:
+        if (stddev > 0 and current_rate > threshold and current_count > 5
+                and current_rate >= self.min_rate_pps):
             yield Alert(
                 alert_type=AlertType.ANOMALY,
                 severity=Severity.HIGH,
@@ -200,10 +241,23 @@ class PortScanDetector(BaseDetector):
         if not (src_ip and dst_ip and dst_port is not None):
             return
 
+        # Scans are connection *attempts*: only the first packet of a flow
+        # counts.  Replies (e.g. the router's DNS answers landing on many
+        # client ports) belong to flows we opened and are skipped.
+        if flow is not None and flow.packet_count > 1:
+            return
+        if _is_loopback(src_ip) and _is_loopback(dst_ip):
+            return  # local IPC; browser-driven localhost probing has its own detector
+        if _is_multicast_or_broadcast(dst_ip):
+            return
+
         ts = meta.get("timestamp", time.time())
         state = self._state[src_ip]
 
-        yield from self._check_horizontal(src_ip, dst_ip, dst_port, ts, state)
+        # Visiting many websites = many hosts on 443.  Only sweeps of other
+        # ports, or of private address space, look like reconnaissance.
+        if not (dst_port in _CLIENT_WEB_PORTS and _is_public(dst_ip)):
+            yield from self._check_horizontal(src_ip, dst_ip, dst_port, ts, state)
         yield from self._check_vertical(src_ip, dst_ip, dst_port, ts, state)
 
     def _check_horizontal(

@@ -11,3 +11,18 @@ build/
 
 
 
+macos/build/
+
+# Secrets and local data — never commit
+.env
+.env.*
+*anthropic-key*
+api-token
+sslkeys*.log
+*keylog*.log
+*.pcap
+*.pcapng
+*.db
+*.db-wal
+*.db-shm
+*.mmdb

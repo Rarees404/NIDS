@@ -1,0 +1,1081 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>PyNIDS Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3z' fill='%232a78d6'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f3f2ee;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11,11,11,0.10);
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --land: #e8e7e1;
+  --good: #0ca30c;
+  --good-text: #006300;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --accent: #2a78d6;
+  --shadow: 0 1px 2px rgba(11,11,11,0.04), 0 8px 24px rgba(11,11,11,0.06);
+  --radius: 12px;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --land: #2a2a28;
+    --good-text: #0ca30c;
+    --accent: #3987e5;
+    --shadow: 0 1px 2px rgba(0,0,0,0.4);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255,255,255,0.10);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --land: #2a2a28;
+  --good-text: #0ca30c;
+  --accent: #3987e5;
+  --shadow: 0 1px 2px rgba(0,0,0,0.4);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.45 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); }
+button, input, select { font: inherit; color: inherit; }
+
+/* ---------- header ---------- */
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: saturate(1.4) blur(12px);
+  -webkit-backdrop-filter: saturate(1.4) blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.topbar-inner {
+  max-width: 1440px; margin: 0 auto; padding: 12px 24px;
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 16px; letter-spacing: -0.01em; }
+.brand svg { width: 26px; height: 26px; }
+.status-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 4px 10px 4px 8px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--border);
+  font-size: 12.5px; color: var(--ink-2); white-space: nowrap;
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.live { background: var(--good); box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 60%, transparent); animation: pulse 2s infinite; }
+.dot.warn { background: var(--warning); }
+.dot.bad { background: var(--critical); }
+@keyframes pulse { 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+@media (prefers-reduced-motion: reduce) { .dot.live { animation: none; } }
+.nav { display: flex; gap: 2px; margin-left: 8px; flex-wrap: wrap; }
+.nav a {
+  color: var(--ink-2); text-decoration: none; padding: 6px 10px; border-radius: 8px; font-size: 13px;
+}
+.nav a:hover { background: var(--surface-2); color: var(--ink); }
+.spacer { flex: 1; }
+.live-rate { font-size: 12.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.live-rate b { color: var(--ink); font-weight: 600; }
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 32px; min-width: 32px; padding: 0 10px; border-radius: 8px;
+  background: var(--surface); border: 1px solid var(--border); cursor: pointer; font-size: 13px;
+}
+.icon-btn:hover { background: var(--surface-2); }
+.icon-btn svg { width: 16px; height: 16px; }
+.icon-btn[aria-pressed="false"] { color: var(--muted); }
+
+/* ---------- layout ---------- */
+main { max-width: 1440px; margin: 0 auto; padding: 20px 24px 64px; }
+.banner {
+  display: none; align-items: flex-start; gap: 12px;
+  padding: 12px 16px; margin-bottom: 16px; border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warning) 14%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+}
+.banner.show { display: flex; }
+.banner code { font-family: var(--mono); font-size: 12.5px; background: var(--surface); padding: 1px 6px; border-radius: 6px; border: 1px solid var(--border); }
+.grid { display: grid; gap: 16px; }
+.kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.row-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); margin-top: 16px; }
+.row-map { grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr); margin-top: 16px; }
+.row-1 { grid-template-columns: minmax(0, 1fr); margin-top: 16px; }
+@media (max-width: 1180px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } .row-map { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 820px) { .row-2 { grid-template-columns: minmax(0, 1fr); } .nav { display: none; } }
+@media (max-width: 560px) {
+  main { padding: 16px 16px 48px; }
+  .topbar-inner { padding: 10px 16px; }
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .live-rate { display: none; }
+}
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow); min-width: 0;
+}
+.card-head { display: flex; align-items: baseline; gap: 10px; padding: 16px 18px 4px; flex-wrap: wrap; }
+.card-head h2 { margin: 0; font-size: 14px; font-weight: 620; letter-spacing: -0.005em; }
+.card-head .sub { color: var(--muted); font-size: 12.5px; }
+.card-head .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.card-body { padding: 8px 18px 18px; }
+section { scroll-margin-top: 72px; }
+
+/* ---------- stat tiles ---------- */
+.tile { padding: 14px 16px 14px; display: flex; flex-direction: column; gap: 4px; position: relative; overflow: hidden; }
+.tile .label { color: var(--ink-2); font-size: 12.5px; display: flex; align-items: center; gap: 6px; }
+.tile .key { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.tile .value { font-size: 28px; font-weight: 640; letter-spacing: -0.02em; line-height: 1.1; }
+.tile .hint { color: var(--muted); font-size: 12px; min-height: 17px; }
+.tile.hero .value { font-size: 34px; }
+
+/* ---------- charts ---------- */
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.axis-text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.gridline { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }
+.baseline { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.legend i.dotkey { border-radius: 50%; }
+.tooltip {
+  position: fixed; pointer-events: none; z-index: 50; opacity: 0; transition: opacity .08s;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.18); padding: 8px 10px; font-size: 12px; max-width: 300px;
+}
+.tooltip.show { opacity: 1; }
+.tooltip .tt-title { color: var(--muted); margin-bottom: 4px; }
+.tooltip .tt-row { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.tooltip .tt-row b { font-weight: 640; font-variant-numeric: tabular-nums; }
+.tooltip .tt-row .k { width: 12px; height: 2px; border-radius: 1px; flex: none; }
+.tooltip .tt-row .lbl { color: var(--ink-2); }
+.tooltip .tt-note { color: var(--ink-2); white-space: normal; margin-top: 2px; }
+details.datatable { margin-top: 10px; font-size: 12.5px; color: var(--ink-2); }
+details.datatable summary { cursor: pointer; color: var(--muted); }
+details.datatable table { margin-top: 8px; }
+
+/* ---------- map ---------- */
+#map { aspect-ratio: 2 / 1; min-height: 220px; }
+#map .land { fill: var(--land); stroke: var(--surface); stroke-width: 0.6; }
+#map .sphere { fill: none; }
+#map .pt { stroke: var(--surface); stroke-width: 2; cursor: pointer; }
+#map .pt:hover, #map .pt:focus { stroke: var(--ink); outline: none; }
+.map-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; text-align: center; padding: 24px; }
+
+/* ---------- tables ---------- */
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-weight: 560; color: var(--muted); font-size: 12px; padding: 8px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+td { padding: 9px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.table-wrap { overflow-x: auto; }
+.app-name { font-weight: 560; }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.chip {
+  display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11.5px;
+  background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--border);
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle;
+}
+.share { display: flex; align-items: center; gap: 8px; min-width: 150px; }
+.share .bar { height: 6px; border-radius: 3px; background: var(--series-1); flex: none; }
+.share .track { flex: 1; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--series-1) 14%, transparent); position: relative; overflow: hidden; }
+.share .track .bar { position: absolute; inset: 0 auto 0 0; }
+.muted { color: var(--muted); }
+.mono { font-family: var(--mono); font-size: 12.5px; }
+.empty { color: var(--muted); padding: 24px 4px; text-align: center; font-size: 13px; }
+
+/* ---------- severity badges (status palette: icon + label, never color alone) ---------- */
+.sev { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; padding: 2px 8px 2px 6px; border-radius: 999px; white-space: nowrap; border: 1px solid transparent; }
+.sev svg { width: 12px; height: 12px; flex: none; }
+.sev.LOW { background: var(--surface-2); color: var(--ink-2); border-color: var(--border); }
+.sev.MEDIUM { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--ink); }
+.sev.MEDIUM svg { color: #b07800; }
+.sev.HIGH { background: color-mix(in srgb, var(--serious) 22%, transparent); color: var(--ink); }
+.sev.HIGH svg { color: var(--serious); }
+.sev.CRITICAL { background: var(--critical); color: #fff; }
+
+/* ---------- event stream ---------- */
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 4px 18px 10px; }
+.toolbar input[type=search], .toolbar select {
+  height: 32px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); padding: 0 10px;
+}
+.toolbar input[type=search] { min-width: 220px; flex: 1; max-width: 360px; }
+.filter-chip {
+  height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--ink-2); cursor: pointer; font-size: 12.5px; white-space: nowrap;
+}
+.filter-chip[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.filter-chip .n { opacity: .7; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.events { max-height: 620px; overflow: auto; border-top: 1px solid var(--grid); }
+.event {
+  display: grid; grid-template-columns: 76px 96px minmax(0, 1fr) auto; gap: 12px; align-items: start;
+  padding: 10px 18px; border-bottom: 1px solid var(--grid); cursor: pointer;
+}
+.event:hover, .event:focus-visible { background: var(--surface-2); outline: none; }
+.event.new { animation: flash 1.4s ease-out; }
+@keyframes flash { from { background: color-mix(in srgb, var(--accent) 16%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .event.new { animation: none; } }
+.event time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; padding-top: 2px; }
+.event .msg { overflow-wrap: anywhere; }
+.event .meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.event .kind { color: var(--muted); font-size: 12px; white-space: nowrap; padding-top: 2px; }
+@media (max-width: 700px) { .event { grid-template-columns: 64px minmax(0, 1fr); } .event .kind, .event .sevcol { display: none; } }
+
+/* ---------- drawer ---------- */
+.scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.32); opacity: 0; pointer-events: none; transition: opacity .15s; z-index: 60; }
+.scrim.show { opacity: 1; pointer-events: auto; }
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); z-index: 61;
+  background: var(--surface); border-left: 1px solid var(--border); box-shadow: -12px 0 40px rgba(0,0,0,0.18);
+  transform: translateX(100%); transition: transform .2s ease; display: flex; flex-direction: column;
+}
+.drawer.show { transform: none; }
+@media (prefers-reduced-motion: reduce) { .drawer, .scrim { transition: none; } }
+.drawer-head { display: flex; gap: 10px; align-items: flex-start; padding: 18px 20px 12px; border-bottom: 1px solid var(--grid); }
+.drawer-head h3 { margin: 0; font-size: 15px; font-weight: 620; overflow-wrap: anywhere; }
+.drawer-body { overflow: auto; padding: 16px 20px 32px; flex: 1; }
+.kv { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 6px 12px; font-size: 13px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.drawer h4 { margin: 20px 0 8px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+pre.json { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font: 12px/1.5 var(--mono); overflow: auto; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+.btn {
+  height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface); cursor: pointer; font-weight: 560; font-size: 13px; display: inline-flex; align-items: center; gap: 7px;
+}
+.btn:hover { background: var(--surface-2); }
+.btn.primary { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.btn.primary:hover { opacity: .9; }
+.btn.danger { color: var(--critical); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn svg { width: 15px; height: 15px; }
+.ai-box { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; background: var(--surface-2); display: none; }
+.ai-box.show { display: block; }
+.ai-box p { margin: 0 0 8px; }
+.ai-box .verdict { display: inline-flex; align-items: center; gap: 6px; font-weight: 640; margin-bottom: 8px; }
+.ai-box .foot { color: var(--muted); font-size: 11.5px; margin-top: 8px; }
+.spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--ink); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.toast {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(20px); z-index: 80;
+  background: var(--ink); color: var(--surface); padding: 10px 16px; border-radius: 10px; font-size: 13px;
+  opacity: 0; transition: all .2s; pointer-events: none; max-width: calc(100vw - 32px);
+}
+.toast.show { opacity: 1; transform: translateX(-50%); }
+footer { color: var(--muted); font-size: 12px; margin-top: 28px; text-align: center; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3z" fill="currentColor"/></symbol>
+    <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 7v4.5M8 4.6v.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 1.8 15 14H1L8 1.8z" fill="currentColor"/><path d="M8 6.2v3.6M8 11.7v.1" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7.2" fill="currentColor"/><path d="M8 4.2v4.6M8 11.3v.1" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-octagon" viewBox="0 0 16 16"><path d="M5.2 1h5.6L15 5.2v5.6L10.8 15H5.2L1 10.8V5.2z" fill="#fff"/><path d="M8 4.2v4.6M8 11.3v.1" stroke="#d03b3b" stroke-width="1.9" stroke-linecap="round"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 1 1 12 0v5l2 2H4l2-2zM10 20a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 2l2.2 6.3L20.5 10l-6.3 2.2L12 18.5l-2.2-6.3L3.5 10l6.3-1.7z" fill="currentColor"/></symbol>
+    <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5.7 5.7l12.6 12.6" stroke="currentColor" stroke-width="2"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  </defs>
+</svg>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand"><svg style="color:var(--accent)"><use href="#i-shield"/></svg>PyNIDS</div>
+    <span class="status-pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusText">Connecting…</span></span>
+    <nav class="nav" aria-label="Sections">
+      <a href="#overview">Overview</a><a href="#network">Network</a><a href="#apps">Apps</a><a href="#events">Events</a><a href="#protection">Protection</a>
+    </nav>
+    <div class="spacer"></div>
+    <span class="live-rate" id="liveRate">— pkt/s · —</span>
+    <button class="icon-btn" id="notifyBtn" aria-pressed="true" title="Notifications"><svg><use href="#i-bell"/></svg></button>
+    <button class="icon-btn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme"><svg><use href="#i-sun"/></svg></button>
+  </div>
+</header>
+
+<main>
+  <div class="banner" id="banner" role="status"></div>
+
+  <section id="overview">
+    <div class="grid kpis" id="kpis"></div>
+
+    <div class="grid row-2">
+      <div class="card">
+        <div class="card-head"><h2>Throughput</h2><span class="sub">last 60 seconds, all interfaces</span></div>
+        <div class="card-body"><div class="chart" id="rateChart"></div></div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>Events per minute</h2><span class="sub">last hour</span>
+          <div class="right legend"><span><i style="background:var(--series-1)"></i>Privacy &amp; network</span><span><i style="background:var(--series-2)"></i>Threats &amp; high severity</span></div>
+        </div>
+        <div class="card-body">
+          <div class="chart" id="timelineChart"></div>
+          <details class="datatable"><summary>Data table</summary><div class="table-wrap" id="timelineTable"></div></details>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="network">
+    <div class="grid row-map">
+      <div class="card">
+        <div class="card-head">
+          <h2>Where your traffic goes</h2><span class="sub" id="mapSub">remote endpoints, sized by bytes</span>
+          <div class="right legend"><span><i class="dotkey" style="background:var(--series-1)"></i>Endpoint</span><span><i class="dotkey" style="background:var(--series-2)"></i>Raised an alert</span></div>
+        </div>
+        <div class="card-body"><div class="chart" id="map"></div></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>What was found</h2><span class="sub">events by kind, this session</span></div>
+        <div class="card-body"><div class="chart" id="kindChart"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="apps">
+    <div class="grid row-1">
+      <div class="card">
+        <div class="card-head"><h2>Apps on the network</h2><span class="sub">which process owns each connection</span></div>
+        <div class="card-body table-wrap" id="appsTable"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="events">
+    <div class="grid row-1">
+      <div class="card">
+        <div class="card-head"><h2>Event stream</h2><span class="sub" id="eventsSub">live</span></div>
+        <div class="toolbar" id="kindFilters" role="group" aria-label="Filter by kind"></div>
+        <div class="toolbar">
+          <input type="search" id="search" placeholder="Search messages, IPs, hosts…" aria-label="Search events">
+          <select id="sevFilter" aria-label="Minimum severity">
+            <option value="LOW">All severities</option>
+            <option value="MEDIUM">Medium and above</option>
+            <option value="HIGH">High and above</option>
+            <option value="CRITICAL">Critical only</option>
+          </select>
+          <select id="rangeFilter" aria-label="Time range">
+            <option value="live">Live (this session)</option>
+            <option value="3600">Last hour</option>
+            <option value="86400">Last 24 hours</option>
+            <option value="604800">Last 7 days</option>
+          </select>
+        </div>
+        <div class="events" id="eventList" aria-live="polite"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="protection">
+    <div class="grid row-2">
+      <div class="card">
+        <div class="card-head">
+          <h2>Blocked IPs</h2><span class="sub" id="blockSub">pf firewall</span>
+          <div class="right"><button class="btn" id="blockAddBtn"><svg><use href="#i-ban"/></svg>Block an IP</button></div>
+        </div>
+        <div class="card-body table-wrap" id="blocksTable"></div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>Threat intelligence</h2><span class="sub">live feeds, refreshed automatically</span>
+          <div class="right"><button class="btn" id="intelBtn"><svg><use href="#i-refresh"/></svg>Update now</button></div>
+        </div>
+        <div class="card-body table-wrap" id="intelTable"></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    PyNIDS <span id="ver"></span> · data stays on this Mac · IP geolocation by <a href="https://db-ip.com" rel="noreferrer">DB-IP</a>
+  </footer>
+</main>
+
+<div class="tooltip" id="tooltip" role="tooltip"></div>
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="drawerTitle" role="dialog">
+  <div class="drawer-head">
+    <div style="flex:1;min-width:0">
+      <div id="drawerSev" style="margin-bottom:6px"></div>
+      <h3 id="drawerTitle"></h3>
+    </div>
+    <button class="icon-btn" id="drawerClose" aria-label="Close"><svg><use href="#i-close"/></svg></button>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+<div class="toast" id="toast" role="status"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+<script>
+"use strict";
+const TOKEN = "__PYNIDS_TOKEN__";
+const $ = (id) => document.getElementById(id);
+const SEV_ORDER = { LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
+const KIND_LABELS = {
+  threat: "Threat intel", attack: "Attacks & anomalies", webrtc: "WebRTC / IP leaks",
+  localhost: "Localhost probes", doh: "Encrypted DNS", tracker: "Trackers", beacon: "Beacons & pixels",
+  websocket: "WebSockets", quic: "QUIC / HTTP-3", prefetch: "DNS prefetch", other: "Other",
+};
+const state = {
+  summary: null, alerts: [], kind: null, sev: "LOW", q: "", range: "live",
+  remotes: [], timeline: [], rates: null, world: null, openAlert: null,
+};
+
+// ---------------------------------------------------------------- utilities
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") node.className = v;
+    else if (k === "text") node.textContent = v;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat()) {
+    if (c == null || c === false) continue;
+    node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return node;
+}
+function svgEl(tag, attrs) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs || {})) if (v != null) node.setAttribute(k, v);
+  return node;
+}
+function icon(id) { const s = svgEl("svg", {"aria-hidden": "true"}); s.append(svgEl("use", {href: "#" + id})); return s; }
+const fmtNum = (n) => n == null ? "—" : n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M" : n >= 1e4 ? (n / 1e3).toFixed(1).replace(/\.0$/, "") + "K" : Math.round(n).toLocaleString();
+function fmtBytes(b) {
+  if (b == null) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (b >= 1000 && i < u.length - 1) { b /= 1000; i++; }
+  return (i === 0 ? Math.round(b) : b.toFixed(b < 10 ? 1 : 0)) + " " + u[i];
+}
+function fmtBits(b) {
+  if (b == null) return "—";
+  const u = ["bps", "Kbps", "Mbps", "Gbps"]; let i = 0;
+  while (b >= 1000 && i < u.length - 1) { b /= 1000; i++; }
+  return (i === 0 ? Math.round(b) : b.toFixed(b < 10 ? 1 : 0)) + " " + u[i];
+}
+function fmtTime(ts) { return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+function fmtAgo(ts) {
+  if (!ts) return "never";
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " d ago";
+}
+function fmtDuration(s) {
+  if (s < 60) return s + "s"; if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+  return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
+}
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v))), f = v / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+}
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), 3200); }
+function sevBadge(sev) {
+  const ids = { LOW: "i-info", MEDIUM: "i-warn", HIGH: "i-alert", CRITICAL: "i-octagon" };
+  const names = { LOW: "Low", MEDIUM: "Medium", HIGH: "High", CRITICAL: "Critical" };
+  return el("span", { class: "sev " + sev }, icon(ids[sev] || "i-info"), names[sev] || sev);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: { "X-PyNIDS-Token": TOKEN, "Content-Type": "application/json", ...(opts.headers || {}) } });
+  let data = null;
+  try { data = await res.json(); } catch (_) { /* empty body */ }
+  if (!res.ok) throw new Error((data && data.error) || res.statusText);
+  return data;
+}
+
+// ---------------------------------------------------------------- tooltip
+const tip = $("tooltip");
+function showTip(evt, build) {
+  tip.replaceChildren(...build());
+  tip.classList.add("show");
+  const pad = 14, r = tip.getBoundingClientRect();
+  let x = evt.clientX + pad, y = evt.clientY + pad;
+  if (x + r.width > innerWidth - 8) x = evt.clientX - r.width - pad;
+  if (y + r.height > innerHeight - 8) y = evt.clientY - r.height - pad;
+  tip.style.left = Math.max(8, x) + "px"; tip.style.top = Math.max(8, y) + "px";
+}
+function hideTip() { tip.classList.remove("show"); }
+function ttRow(color, value, label) {
+  return el("div", { class: "tt-row" }, color ? el("span", { class: "k", style: "background:" + color }) : null, el("b", { text: value }), el("span", { class: "lbl", text: label }));
+}
+
+// ---------------------------------------------------------------- theme + header
+(function initTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem("pynids-theme"); } catch (_) {}
+  if (saved) document.documentElement.dataset.theme = saved;
+  $("themeBtn").addEventListener("click", () => {
+    const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const next = cur === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem("pynids-theme", next); } catch (_) {}
+    renderAllCharts();
+  });
+})();
+
+$("notifyBtn").addEventListener("click", async () => {
+  const btn = $("notifyBtn"), next = btn.getAttribute("aria-pressed") !== "true";
+  try {
+    const r = await api("/api/notifications", { method: "POST", body: JSON.stringify({ enabled: next }) });
+    btn.setAttribute("aria-pressed", String(r.enabled));
+    toast(r.enabled ? "Notifications on" : "Notifications paused");
+  } catch (e) { toast(e.message); }
+});
+
+function renderStatus(s) {
+  const st = s.status || {};
+  const dot = $("statusDot"), txt = $("statusText");
+  const ifaces = (st.interfaces || []).join(" + ") || "—";
+  const map = {
+    running: ["live", "Monitoring " + ifaces],
+    "needs-root": ["bad", "Capture needs root"], starting: ["warn", "Starting…"], idle: ["warn", "Idle (no capture)"], stopping: ["warn", "Stopping…"],
+  };
+  const [cls, label] = map[st.state] || ["warn", st.state || "Unknown"];
+  dot.className = "dot " + cls;
+  txt.textContent = label + (st.uptime != null ? " · up " + fmtDuration(st.uptime) : "");
+  $("ver").textContent = st.version ? "v" + st.version : "";
+  $("notifyBtn").setAttribute("aria-pressed", String(!!st.notifications));
+
+  const banner = $("banner");
+  banner.replaceChildren();
+  if (st.state === "needs-root") {
+    banner.append(icon("i-warn"), el("div", {},
+      el("b", { text: "Packet capture needs root. " }),
+      "Install the background service with ", el("code", { text: "sudo pynids daemon install" }),
+      " or run ", el("code", { text: "sudo pynids daemon run" }), "."));
+    banner.classList.add("show");
+  } else if (st.capture_errors && st.capture_errors.length && st.state !== "running") {
+    banner.append(icon("i-warn"), el("div", { text: st.capture_errors[st.capture_errors.length - 1] }));
+    banner.classList.add("show");
+  } else banner.classList.remove("show");
+}
+
+// ---------------------------------------------------------------- KPIs
+function renderKpis(s) {
+  const k = s.kinds || {};
+  const tiles = [
+    { label: "Hidden events", value: s.events_total, hint: fmtNum(s.packets) + " packets inspected", hero: true },
+    { label: "Threats & attacks", value: (k.threat || 0) + (k.attack || 0), hint: s.level === "critical" ? "critical activity in the last 10 min" : s.level === "warning" ? "high-severity activity recently" : "nothing urgent", status: s.level },
+    { label: "Trackers & beacons", value: (k.tracker || 0) + (k.beacon || 0), hint: "third-party analytics and ads" },
+    { label: "IP leaks & probes", value: (k.webrtc || 0) + (k.localhost || 0), hint: "WebRTC and localhost scans" },
+    { label: "Encrypted DNS", value: k.doh || 0, hint: "DoH / DoT sessions seen" },
+    { label: "Countries reached", value: s.country_count, hint: fmtNum(s.remote_count) + " remote endpoints" },
+  ];
+  const wrap = $("kpis");
+  wrap.replaceChildren(...tiles.map((t) => {
+    const lbl = el("div", { class: "label" });
+    if (t.status && t.status !== "ok") {
+      const sev = t.status === "critical" ? "CRITICAL" : t.status === "warning" ? "HIGH" : "MEDIUM";
+      lbl.append(t.label, " ", sevBadge(sev));
+    } else lbl.append(t.label);
+    return el("div", { class: "card tile" + (t.hero ? " hero" : "") }, lbl, el("div", { class: "value", text: fmtNum(t.value || 0) }), el("div", { class: "hint", text: t.hint }));
+  }));
+}
+
+// ---------------------------------------------------------------- throughput (line + wash, crosshair)
+function renderRate() {
+  const host = $("rateChart"), r = state.rates;
+  if (!r) return;
+  const data = r.series_bps || [];
+  const W = host.clientWidth || 500, H = 190, m = { t: 10, r: 8, b: 22, l: 52 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const max = niceMax(Math.max(...data, 1) * 1.1);
+  const x = (i) => m.l + (data.length <= 1 ? 0 : (i / (data.length - 1)) * iw);
+  const y = (v) => m.t + ih - (v / max) * ih;
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Throughput over the last 60 seconds" });
+  for (let i = 0; i <= 4; i++) {
+    const v = (max / 4) * i, yy = Math.round(y(v)) + 0.5;
+    svg.append(svgEl("line", { x1: m.l, x2: W - m.r, y1: yy, y2: yy, class: i === 0 ? "baseline" : "gridline" }));
+    const t = svgEl("text", { x: m.l - 8, y: yy + 3.5, "text-anchor": "end", class: "axis-text" }); t.textContent = fmtBits(v); svg.append(t);
+  }
+  [["60s ago", 0, "start"], ["30s", Math.floor(data.length / 2), "middle"], ["now", data.length - 1, "end"]].forEach(([lab, i, a]) => {
+    const t = svgEl("text", { x: x(i), y: H - 6, "text-anchor": a, class: "axis-text" }); t.textContent = lab; svg.append(t);
+  });
+  if (data.length > 1) {
+    const line = data.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+    const color = getComputedStyle(document.documentElement).getPropertyValue("--series-1").trim();
+    svg.append(svgEl("path", { d: `${line}L${x(data.length - 1)},${y(0)}L${x(0)},${y(0)}Z`, fill: color, "fill-opacity": 0.1 }));
+    svg.append(svgEl("path", { d: line, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    const last = data.length - 1;
+    svg.append(svgEl("circle", { cx: x(last), cy: y(data[last]), r: 4, fill: color, stroke: "var(--surface)", "stroke-width": 2 }));
+    const cross = svgEl("line", { y1: m.t, y2: m.t + ih, stroke: "var(--axis)", "stroke-width": 1, visibility: "hidden" });
+    const cdot = svgEl("circle", { r: 4, fill: color, stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden" });
+    svg.append(cross, cdot);
+    const hit = svgEl("rect", { x: m.l, y: m.t, width: iw, height: ih, fill: "transparent" });
+    hit.addEventListener("pointermove", (e) => {
+      const pt = svg.getBoundingClientRect(), px = ((e.clientX - pt.left) / pt.width) * W;
+      const i = Math.max(0, Math.min(last, Math.round(((px - m.l) / iw) * last)));
+      cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible");
+      cdot.setAttribute("cx", x(i)); cdot.setAttribute("cy", y(data[i])); cdot.setAttribute("visibility", "visible");
+      const ago = last - i;
+      showTip(e, () => [el("div", { class: "tt-title", text: ago === 0 ? "now" : ago + "s ago" }), ttRow(color, fmtBits(data[i]), "throughput"), ttRow(null, fmtNum((r.series_pps || [])[i] || 0) + " pkt/s", "")]);
+    });
+    hit.addEventListener("pointerleave", () => { hideTip(); cross.setAttribute("visibility", "hidden"); cdot.setAttribute("visibility", "hidden"); });
+    svg.append(hit);
+  }
+  host.replaceChildren(svg);
+}
+
+// ---------------------------------------------------------------- events per minute (stacked columns)
+function roundedTopRect(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h);
+  if (h <= 0) return "";
+  return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+}
+function renderTimeline() {
+  const host = $("timelineChart"), data = state.timeline;
+  if (!data.length) return;
+  const W = host.clientWidth || 500, H = 190, m = { t: 10, r: 8, b: 22, l: 36 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const max = niceMax(Math.max(...data.map((d) => d.events), 1));
+  const slot = iw / data.length, bw = Math.max(2, Math.min(24, slot - 2));
+  const y = (v) => (v / max) * ih;
+  const cs = getComputedStyle(document.documentElement);
+  const c1 = cs.getPropertyValue("--series-1").trim(), c2 = cs.getPropertyValue("--series-2").trim();
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Events per minute over the last hour" });
+  for (let i = 0; i <= 4; i++) {
+    const v = (max / 4) * i, yy = Math.round(m.t + ih - y(v)) + 0.5;
+    svg.append(svgEl("line", { x1: m.l, x2: W - m.r, y1: yy, y2: yy, class: i === 0 ? "baseline" : "gridline" }));
+    const t = svgEl("text", { x: m.l - 8, y: yy + 3.5, "text-anchor": "end", class: "axis-text" }); t.textContent = fmtNum(v); svg.append(t);
+  }
+  data.forEach((d, i) => {
+    const x0 = m.l + i * slot + (slot - bw) / 2, base = m.t + ih;
+    const threats = Math.min(d.threats, d.events), other = d.events - threats;
+    const hOther = y(other), hThreat = y(threats);
+    const g = svgEl("g", { tabindex: d.events ? 0 : null });
+    // Threat segment sits on the baseline; the other segment stacks above with a 2px surface gap.
+    if (hThreat > 0) g.append(svgEl("path", { d: other > 0 ? `M${x0},${base}V${base - hThreat}H${x0 + bw}V${base}Z` : roundedTopRect(x0, base - hThreat, bw, hThreat, 4), fill: c2 }));
+    if (hOther > 0) {
+      const top = base - hThreat - hOther, gap = hThreat > 0 ? 2 : 0;
+      g.append(svgEl("path", { d: roundedTopRect(x0, top, bw, Math.max(0, hOther - gap), 4), fill: c1 }));
+    }
+    const hit = svgEl("rect", { x: m.l + i * slot, y: m.t, width: slot, height: ih, fill: "transparent" });
+    const show = (e) => {
+      g.style.opacity = 0.8;
+      const t = new Date(d.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      showTip(e, () => [el("div", { class: "tt-title", text: t }), ttRow(c2, fmtNum(threats), "threats & high severity"), ttRow(c1, fmtNum(other), "privacy & network"), ttRow(null, fmtBytes(d.bytes), "transferred")]);
+    };
+    hit.addEventListener("pointermove", show);
+    hit.addEventListener("pointerleave", () => { g.style.opacity = 1; hideTip(); });
+    g.addEventListener("focus", (e) => { const b = g.getBoundingClientRect(); show({ clientX: b.right, clientY: b.top }); });
+    g.addEventListener("blur", () => { g.style.opacity = 1; hideTip(); });
+    svg.append(g, hit);
+  });
+  [["60 min ago", 0, "start"], ["30 min", 30, "middle"], ["now", data.length - 1, "end"]].forEach(([lab, i, a]) => {
+    const t = svgEl("text", { x: m.l + i * slot + slot / 2, y: H - 6, "text-anchor": a, class: "axis-text" }); t.textContent = lab; svg.append(t);
+  });
+  host.replaceChildren(svg);
+
+  const rows = data.filter((d) => d.events || d.bytes).slice(-20).reverse();
+  $("timelineTable").replaceChildren(rows.length ? el("table", {},
+    el("thead", {}, el("tr", {}, el("th", { text: "Minute" }), el("th", { class: "num", text: "Events" }), el("th", { class: "num", text: "Threats" }), el("th", { class: "num", text: "Bytes" }))),
+    el("tbody", {}, rows.map((d) => el("tr", {}, el("td", { text: new Date(d.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) }), el("td", { class: "num", text: fmtNum(d.events) }), el("td", { class: "num", text: fmtNum(d.threats) }), el("td", { class: "num", text: fmtBytes(d.bytes) })))))
+    : el("div", { class: "empty", text: "No activity yet." }));
+}
+
+// ---------------------------------------------------------------- kinds (horizontal bars, one hue)
+function renderKinds() {
+  const s = state.summary; if (!s) return;
+  const host = $("kindChart");
+  const rows = Object.keys(KIND_LABELS).map((k) => ({ k, label: KIND_LABELS[k], v: (s.kinds || {})[k] || 0 })).filter((r) => r.v > 0).sort((a, b) => b.v - a.v);
+  if (!rows.length) { host.replaceChildren(el("div", { class: "empty", text: "No events yet — browse the web and they will appear here." })); return; }
+  const W = host.clientWidth || 360, rowH = 32, labelW = Math.min(150, W * 0.42), valW = 48;
+  const H = rows.length * rowH + 4, iw = W - labelW - valW - 8;
+  const max = Math.max(...rows.map((r) => r.v));
+  const color = getComputedStyle(document.documentElement).getPropertyValue("--series-1").trim();
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Events by kind" });
+  svg.append(svgEl("line", { x1: labelW + 0.5, x2: labelW + 0.5, y1: 0, y2: H, class: "baseline" }));
+  rows.forEach((r, i) => {
+    const y = i * rowH + 6, bh = 18, w = Math.max(3, (r.v / max) * iw);
+    const lab = svgEl("text", { x: labelW - 10, y: y + 13, "text-anchor": "end", fill: "var(--ink-2)", "font-size": 12.5 }); lab.textContent = r.label;
+    const bar = svgEl("path", { d: `M${labelW + 1},${y}H${labelW + 1 + w - 4}Q${labelW + 1 + w},${y} ${labelW + 1 + w},${y + 4}V${y + bh - 4}Q${labelW + 1 + w},${y + bh} ${labelW + 1 + w - 4},${y + bh}H${labelW + 1}Z`, fill: color, style: "cursor:pointer" });
+    const val = svgEl("text", { x: labelW + 1 + w + 8, y: y + 13, fill: "var(--ink)", "font-size": 12.5, "font-weight": 600, class: "axis-text" }); val.textContent = fmtNum(r.v);
+    val.setAttribute("style", "fill:var(--ink)");
+    const hit = svgEl("rect", { x: 0, y: i * rowH, width: W, height: rowH, fill: "transparent", style: "cursor:pointer", tabindex: 0, role: "button", "aria-label": `Filter events: ${r.label}` });
+    hit.addEventListener("pointermove", (e) => { bar.style.opacity = 0.8; showTip(e, () => [ttRow(color, fmtNum(r.v), r.label), el("div", { class: "tt-note", text: "Click to filter the event stream" })]); });
+    hit.addEventListener("pointerleave", () => { bar.style.opacity = 1; hideTip(); });
+    const pick = () => { setKind(r.k); location.hash = "#events"; };
+    hit.addEventListener("click", pick);
+    hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+    svg.append(lab, bar, val, hit);
+  });
+  host.replaceChildren(svg);
+}
+
+// ---------------------------------------------------------------- world map
+async function loadWorld() {
+  if (state.world || !window.topojson) return;
+  try {
+    const topo = await (await fetch("https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json")).json();
+    state.world = topojson.feature(topo, topo.objects.countries);
+    renderMap();
+  } catch (_) { /* offline — the empty state explains */ }
+}
+function renderMap() {
+  const host = $("map");
+  const pts = state.remotes.filter((r) => r.lat != null && r.lon != null);
+  $("mapSub").textContent = pts.length ? `${pts.length} located endpoints, sized by bytes` : "remote endpoints, sized by bytes";
+  if (!window.d3 || !state.world) {
+    host.replaceChildren(el("div", { class: "map-empty", text: window.d3 ? "Loading map…" : "The world map needs internet access to load its outline." }));
+    return;
+  }
+  const W = host.clientWidth || 800, H = Math.max(220, Math.round(W / 2));
+  const proj = d3.geoNaturalEarth1().fitSize([W, H], { type: "Sphere" });
+  const path = d3.geoPath(proj);
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Map of remote endpoints" });
+  const g = svgEl("g");
+  for (const f of state.world.features) g.append(svgEl("path", { d: path(f), class: "land" }));
+  svg.append(g);
+  const cs = getComputedStyle(document.documentElement);
+  const c1 = cs.getPropertyValue("--series-1").trim(), c2 = cs.getPropertyValue("--series-2").trim();
+  const maxB = Math.max(...pts.map((p) => p.bytes), 1);
+  // Merge endpoints that share a city so dots don't pile up.
+  const groups = new Map();
+  for (const p of pts) {
+    const key = p.lat.toFixed(1) + "," + p.lon.toFixed(1);
+    const gp = groups.get(key) || { lat: p.lat, lon: p.lon, bytes: 0, alerts: 0, items: [] };
+    gp.bytes += p.bytes; gp.alerts += p.alerts || 0; gp.items.push(p); groups.set(key, gp);
+  }
+  const sorted = [...groups.values()].sort((a, b) => b.bytes - a.bytes);
+  for (const gp of sorted) {
+    const [x, y] = proj([gp.lon, gp.lat]);
+    const r = 4 + Math.sqrt(gp.bytes / maxB) * 10;
+    const c = svgEl("circle", { cx: x, cy: y, r, fill: gp.alerts ? c2 : c1, "fill-opacity": 0.85, class: "pt", tabindex: 0 });
+    const top = gp.items.sort((a, b) => b.bytes - a.bytes);
+    const first = top[0];
+    const build = () => [
+      el("div", { class: "tt-title", text: [first.city, first.country_name || first.country].filter(Boolean).join(", ") || "Unknown location" }),
+      ttRow(gp.alerts ? c2 : c1, fmtBytes(gp.bytes), `${top.length} endpoint${top.length > 1 ? "s" : ""}`),
+      ...top.slice(0, 4).map((p) => el("div", { class: "tt-note", text: `${p.remote_host || p.ip}${p.org ? " · " + p.org : ""}${p.apps && p.apps.length ? " · " + p.apps.slice(0, 2).join(", ") : ""}` })),
+      gp.alerts ? el("div", { class: "tt-note", text: `${gp.alerts} alert${gp.alerts > 1 ? "s" : ""} raised` }) : null,
+    ].filter(Boolean);
+    c.addEventListener("pointermove", (e) => showTip(e, build));
+    c.addEventListener("pointerleave", hideTip);
+    c.addEventListener("focus", () => { const b = c.getBoundingClientRect(); showTip({ clientX: b.right, clientY: b.bottom }, build); });
+    c.addEventListener("blur", hideTip);
+    c.addEventListener("click", () => { $("search").value = first.ip; state.q = first.ip; state.range = "86400"; $("rangeFilter").value = "86400"; loadAlerts(); location.hash = "#events"; });
+    svg.append(c);
+  }
+  host.replaceChildren(svg);
+  if (!pts.length) host.append(el("div", { class: "map-empty", text: state.summary && state.summary.status && !state.summary.status.geoip ? "Download the free GeoIP database to see locations:  pynids geoip download" : "Waiting for traffic…" }));
+}
+
+// ---------------------------------------------------------------- apps
+async function loadApps() {
+  const apps = await api("/api/apps?limit=60");
+  const host = $("appsTable");
+  if (!apps.length) { host.replaceChildren(el("div", { class: "empty", text: "No attributed traffic yet." })); return; }
+  const total = apps.reduce((a, r) => a + r.bytes_in + r.bytes_out, 0) || 1;
+  host.replaceChildren(el("table", {},
+    el("thead", {}, el("tr", {}, el("th", { text: "App" }), el("th", { text: "Share of traffic" }), el("th", { class: "num", text: "Sent" }), el("th", { class: "num", text: "Received" }), el("th", { class: "num", text: "Endpoints" }), el("th", { class: "num", text: "Alerts" }), el("th", { text: "Talks to" }))),
+    el("tbody", {}, apps.map((a) => {
+      const share = (a.bytes_in + a.bytes_out) / total;
+      return el("tr", {},
+        el("td", {}, el("div", { class: "app-name", text: a.app }), a.process && a.process !== a.app ? el("div", { class: "muted", style: "font-size:12px", text: a.process }) : null),
+        el("td", {}, el("div", { class: "share" }, el("div", { class: "track" }, el("div", { class: "bar", style: `width:${Math.max(2, share * 100).toFixed(1)}%` })), el("span", { class: "muted", style: "font-size:12px;min-width:38px;text-align:right", text: (share * 100).toFixed(share < 0.1 ? 1 : 0) + "%" }))),
+        el("td", { class: "num", text: fmtBytes(a.bytes_out) }),
+        el("td", { class: "num", text: fmtBytes(a.bytes_in) }),
+        el("td", { class: "num", text: fmtNum(a.remotes) }),
+        el("td", { class: "num" }, a.alerts ? el("a", { href: "#events", text: fmtNum(a.alerts), onclick: () => { state.app = a.app; $("search").value = ""; state.q = ""; loadAlerts(); } }) : el("span", { class: "muted", text: "0" })),
+        el("td", {}, el("div", { class: "chips" }, (a.top_hosts || []).slice(0, 4).map((h) => el("span", { class: "chip", title: h, text: h })), (a.countries || []).slice(0, 3).map((c) => el("span", { class: "chip", text: c })))),
+      );
+    }))));
+}
+
+// ---------------------------------------------------------------- events
+function kindCounts() { return (state.summary && state.summary.kinds) || {}; }
+function renderKindFilters() {
+  const counts = kindCounts(), wrap = $("kindFilters");
+  const btn = (k, label, n) => el("button", { class: "filter-chip", "aria-pressed": String(state.kind === k), onclick: () => setKind(state.kind === k ? null : k) }, label, n != null ? el("span", { class: "n", text: fmtNum(n) }) : null);
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  wrap.replaceChildren(btn(null, "All", total), ...Object.keys(KIND_LABELS).filter((k) => counts[k]).map((k) => btn(k, KIND_LABELS[k], counts[k])));
+  if (state.app) wrap.append(el("button", { class: "filter-chip", "aria-pressed": "true", onclick: () => { state.app = null; loadAlerts(); } }, "App: " + state.app + " ✕"));
+}
+function setKind(k) { state.kind = k; renderKindFilters(); loadAlerts(); }
+function alertMatches(a) {
+  if (state.kind && a.kind !== state.kind) return false;
+  if (SEV_ORDER[a.severity] < SEV_ORDER[state.sev]) return false;
+  if (state.app && (a.context || {}).app !== state.app) return false;
+  if (state.q) {
+    const hay = [a.message, a.src_ip, a.dst_ip, (a.context || {}).app, (a.context || {}).remote_host, a.rule_id].join(" ").toLowerCase();
+    if (!state.q.toLowerCase().split(/\s+/).every((w) => hay.includes(w))) return false;
+  }
+  return true;
+}
+async function loadAlerts() {
+  const params = new URLSearchParams({ limit: "300", min_severity: state.sev });
+  if (state.kind) params.set("kind", state.kind);
+  if (state.q) params.set("q", state.q);
+  if (state.app) params.set("app", state.app);
+  if (state.range !== "live") params.set("since", String(Date.now() / 1000 - Number(state.range)));
+  else if (state.summary) params.set("since", String(Date.now() / 1000 - state.summary.uptime - 5));
+  $("eventList").style.opacity = 0.6;
+  try { state.alerts = await api("/api/alerts?" + params); } catch (e) { toast(e.message); }
+  $("eventList").style.opacity = 1;
+  renderKindFilters();
+  renderEvents();
+}
+function eventRow(a, isNew) {
+  const ctx = a.context || {};
+  const meta = el("div", { class: "meta" });
+  if (ctx.app) meta.append(el("span", { class: "chip", text: ctx.app }));
+  if (ctx.remote_host) meta.append(el("span", { class: "chip", title: ctx.remote_host, text: ctx.remote_host }));
+  if (ctx.country) meta.append(el("span", { class: "chip", text: ctx.country }));
+  if (a.mitre_technique) meta.append(el("span", { class: "chip", text: a.mitre_technique }));
+  const row = el("div", { class: "event" + (isNew ? " new" : ""), tabindex: 0, role: "button" },
+    el("time", { text: fmtTime(a.timestamp) }),
+    el("div", { class: "sevcol" }, sevBadge(a.severity)),
+    el("div", {}, el("div", { class: "msg", text: a.message }), meta.childNodes.length ? meta : null),
+    el("div", { class: "kind", text: KIND_LABELS[a.kind] || a.kind }));
+  row.addEventListener("click", () => openDrawer(a));
+  row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDrawer(a); } });
+  return row;
+}
+function renderEvents() {
+  const list = $("eventList");
+  const rows = state.alerts.filter(alertMatches);
+  $("eventsSub").textContent = state.range === "live" ? `${rows.length} shown · live` : `${rows.length} shown`;
+  list.replaceChildren(...(rows.length ? rows.map((a) => eventRow(a)) : [el("div", { class: "empty", text: "No events match these filters yet." })]));
+}
+function onLiveAlert(a) {
+  state.alerts.unshift(a);
+  if (state.alerts.length > 1000) state.alerts.length = 1000;
+  if (state.range === "live" && alertMatches(a)) {
+    const list = $("eventList");
+    if (list.firstChild && list.firstChild.classList && list.firstChild.classList.contains("empty")) list.replaceChildren();
+    list.prepend(eventRow(a, true));
+    while (list.childNodes.length > 400) list.lastChild.remove();
+  }
+  if (state.openAlert == null) { /* keep drawer untouched */ }
+}
+let searchTimer;
+$("search").addEventListener("input", (e) => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.q = e.target.value.trim(); loadAlerts(); }, 250); });
+$("sevFilter").addEventListener("change", (e) => { state.sev = e.target.value; loadAlerts(); });
+$("rangeFilter").addEventListener("change", (e) => { state.range = e.target.value; loadAlerts(); });
+
+// ---------------------------------------------------------------- drawer
+function renderMarkdown(text) {
+  // Minimal, safe rendering: paragraphs, **bold**, and "- " lists. All text via textContent.
+  const out = [];
+  const blocks = text.split(/\n{2,}/);
+  for (const block of blocks) {
+    const lines = block.split("\n");
+    if (lines.every((l) => /^\s*([-*]|\d+\.)\s+/.test(l))) {
+      const ul = el("ul", { style: "margin:0 0 8px;padding-left:20px" });
+      lines.forEach((l) => ul.append(inlineMd(el("li"), l.replace(/^\s*([-*]|\d+\.)\s+/, ""))));
+      out.push(ul);
+    } else out.push(inlineMd(el("p"), lines.join(" ")));
+  }
+  return out;
+}
+function inlineMd(node, text) {
+  text.split(/(\*\*[^*]+\*\*)/).forEach((part) => {
+    if (/^\*\*[^*]+\*\*$/.test(part)) node.append(el("strong", { text: part.slice(2, -2) }));
+    else if (part) node.append(document.createTextNode(part));
+  });
+  return node;
+}
+function blockableIp(a) {
+  const ctx = a.context || {};
+  return ctx.remote_ip || (ctx.direction === "inbound" ? a.src_ip : a.dst_ip) || a.src_ip;
+}
+function openDrawer(a) {
+  state.openAlert = a;
+  const ctx = a.context || {};
+  $("drawerSev").replaceChildren(sevBadge(a.severity), " ", el("span", { class: "muted", style: "font-size:12px", text: (KIND_LABELS[a.kind] || a.kind) + " · " + new Date(a.timestamp * 1000).toLocaleString() }));
+  $("drawerTitle").textContent = a.message;
+  const kv = el("dl", { class: "kv" });
+  const add = (k, v) => { if (v != null && v !== "") kv.append(el("dt", { text: k }), el("dd", { text: String(v) })); };
+  add("App", ctx.app ? ctx.app + (ctx.process && ctx.process !== ctx.app ? ` (${ctx.process}, pid ${ctx.pid})` : ctx.pid ? ` (pid ${ctx.pid})` : "") : null);
+  add("Remote host", ctx.remote_host);
+  add("Remote IP", ctx.remote_ip);
+  add("Location", [ctx.city, ctx.country_name || ctx.country].filter(Boolean).join(", "));
+  add("Network", ctx.org ? `${ctx.org}${ctx.asn ? " (AS" + ctx.asn + ")" : ""}` : null);
+  add("Flow", `${a.src_ip || "?"}${a.src_port ? ":" + a.src_port : ""} → ${a.dst_ip || "?"}${a.dst_port ? ":" + a.dst_port : ""} ${a.protocol ? "(" + a.protocol.toUpperCase() + ")" : ""}`);
+  add("Direction", ctx.direction);
+  add("Rule", a.rule_id);
+  add("MITRE ATT&CK", a.mitre_technique);
+  add("Confidence", a.confidence != null ? Math.round(a.confidence * 100) + "%" : null);
+  add("Tags", (a.tags || []).join(", "));
+
+  const aiBox = el("div", { class: "ai-box", id: "aiBox" });
+  const explainBtn = el("button", { class: "btn primary" }, icon("i-spark"), "Explain with Claude");
+  explainBtn.addEventListener("click", async () => {
+    explainBtn.disabled = true;
+    aiBox.classList.add("show");
+    aiBox.replaceChildren(el("div", { style: "display:flex;gap:8px;align-items:center;color:var(--ink-2)" }, el("span", { class: "spinner" }), "Claude is analysing this alert…"));
+    try {
+      const r = await api("/api/explain/" + encodeURIComponent(a.alert_id), { method: "POST" });
+      const body = r.text.replace(/^\s*\**\s*Verdict:.*$/im, "").trim();
+      aiBox.replaceChildren(
+        r.verdict ? el("div", { class: "verdict" }, sevBadge({ Benign: "LOW", "Privacy concern": "MEDIUM", Suspicious: "HIGH", Malicious: "CRITICAL" }[r.verdict] || "LOW"), r.verdict) : null,
+        ...renderMarkdown(body),
+        el("div", { class: "foot", text: `${r.model}${r.cached ? " · cached" : ""} · AI analysis can be wrong — check the evidence.` }));
+    } catch (e) {
+      aiBox.replaceChildren(el("div", { text: e.message }));
+      explainBtn.disabled = false;
+    }
+  });
+  const ip = blockableIp(a);
+  const blockBtn = el("button", { class: "btn danger" }, icon("i-ban"), "Block " + (ip || "IP"));
+  blockBtn.disabled = !ip;
+  blockBtn.addEventListener("click", async () => {
+    if (!confirm(`Block all traffic to and from ${ip} for 1 hour?`)) return;
+    try { await api("/api/blocks", { method: "POST", body: JSON.stringify({ ip, reason: a.message, ttl: 3600, alert_id: a.alert_id }) }); toast("Blocked " + ip); loadBlocks(); }
+    catch (e) { toast(e.message); }
+  });
+
+  $("drawerBody").replaceChildren(
+    kv,
+    el("div", { class: "actions" }, explainBtn, blockBtn),
+    aiBox,
+    el("h4", { text: "Evidence" }),
+    el("pre", { class: "json", text: JSON.stringify(a.evidence || {}, null, 2) }),
+  );
+  $("drawer").classList.add("show"); $("drawer").setAttribute("aria-hidden", "false"); $("scrim").classList.add("show");
+  $("drawerClose").focus();
+}
+function closeDrawer() { state.openAlert = null; $("drawer").classList.remove("show"); $("drawer").setAttribute("aria-hidden", "true"); $("scrim").classList.remove("show"); }
+$("drawerClose").addEventListener("click", closeDrawer);
+$("scrim").addEventListener("click", closeDrawer);
+addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+
+// ---------------------------------------------------------------- protection
+async function loadBlocks() {
+  const host = $("blocksTable");
+  let blocks;
+  try { blocks = await api("/api/blocks"); }
+  catch (e) { host.replaceChildren(el("div", { class: "empty", text: e.message })); $("blockAddBtn").disabled = true; return; }
+  $("blockSub").textContent = state.summary && state.summary.status && state.summary.status.auto_block ? "pf firewall · auto-block on" : "pf firewall · auto-block off";
+  if (!blocks.length) { host.replaceChildren(el("div", { class: "empty", text: "No IPs are blocked." })); return; }
+  host.replaceChildren(el("table", {},
+    el("thead", {}, el("tr", {}, el("th", { text: "IP" }), el("th", { text: "Reason" }), el("th", { text: "Expires" }), el("th", {}))),
+    el("tbody", {}, blocks.map((b) => el("tr", {},
+      el("td", { class: "mono", text: b.ip }),
+      el("td", {}, el("div", { text: b.reason }), el("div", { class: "muted", style: "font-size:12px", text: (b.source === "auto" ? "Auto-blocked " : "Blocked ") + fmtAgo(b.created) })),
+      el("td", { class: "muted", style: "white-space:nowrap", text: b.expires ? new Date(b.expires * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "never" }),
+      el("td", { class: "num" }, el("button", { class: "btn", onclick: async () => { try { await api("/api/blocks/" + encodeURIComponent(b.ip), { method: "DELETE" }); toast("Unblocked " + b.ip); loadBlocks(); } catch (e) { toast(e.message); } } }, "Unblock")))))));
+}
+$("blockAddBtn").addEventListener("click", async () => {
+  const ip = (prompt("IP address to block for 1 hour:") || "").trim();
+  if (!ip) return;
+  try { await api("/api/blocks", { method: "POST", body: JSON.stringify({ ip, reason: "Blocked manually from the dashboard", ttl: 3600 }) }); toast("Blocked " + ip); loadBlocks(); }
+  catch (e) { toast(e.message); }
+});
+async function loadIntel() {
+  const feeds = await api("/api/intel");
+  $("intelTable").replaceChildren(el("table", {},
+    el("thead", {}, el("tr", {}, el("th", { text: "Feed" }), el("th", { class: "num", text: "Entries" }), el("th", { text: "Updated" }))),
+    el("tbody", {}, feeds.map((f) => el("tr", {},
+      el("td", {}, el("div", { class: "app-name", text: f.name }), el("div", { class: "muted", style: "font-size:12px", text: f.description })),
+      el("td", { class: "num", text: f.entries ? fmtNum(f.entries) : "—" }),
+      el("td", { class: "muted", style: "white-space:nowrap", text: fmtAgo(f.fetched) }))))));
+}
+$("intelBtn").addEventListener("click", async () => {
+  const b = $("intelBtn"); b.disabled = true; toast("Downloading feeds…");
+  try { const r = await api("/api/intel/update", { method: "POST" }); const ok = r.filter((x) => x.ok).length; toast(`${ok} of ${r.length} feeds updated`); loadIntel(); }
+  catch (e) { toast(e.message); }
+  b.disabled = false;
+});
+
+// ---------------------------------------------------------------- refresh loop + live stream
+function renderAllCharts() { renderRate(); renderTimeline(); renderKinds(); renderMap(); }
+async function refreshSummary() {
+  try {
+    const s = await api("/api/summary");
+    state.summary = s; state.rates = s.rates;
+    renderStatus(s); renderKpis(s); renderKinds(); renderRate(); renderKindFilters();
+    $("liveRate").replaceChildren(el("b", { text: fmtNum(s.rates.pps) }), " pkt/s · ", el("b", { text: fmtBits(s.rates.bps) }));
+  } catch (e) {
+    $("statusDot").className = "dot bad"; $("statusText").textContent = "Daemon unreachable";
+  }
+}
+async function refreshSlow() {
+  try {
+    const [timeline, remotes] = await Promise.all([api("/api/timeline"), api("/api/remotes?limit=600")]);
+    state.timeline = timeline; state.remotes = remotes;
+    renderTimeline(); renderMap();
+    loadApps();
+  } catch (_) { /* surfaced by summary */ }
+}
+function connectStream() {
+  const es = new EventSource("/api/stream?token=" + encodeURIComponent(TOKEN));
+  es.addEventListener("alert", (e) => { try { onLiveAlert(JSON.parse(e.data)); } catch (_) {} });
+  es.addEventListener("tick", (e) => {
+    try {
+      const t = JSON.parse(e.data); state.rates = t.rates; renderRate();
+      $("liveRate").replaceChildren(el("b", { text: fmtNum(t.rates.pps) }), " pkt/s · ", el("b", { text: fmtBits(t.rates.bps) }));
+    } catch (_) {}
+  });
+  es.addEventListener("block", loadBlocks);
+  es.addEventListener("unblock", loadBlocks);
+  es.addEventListener("intel", loadIntel);
+}
+let resizeTimer;
+addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderAllCharts, 120); });
+
+(async function boot() {
+  await refreshSummary();
+  await Promise.all([refreshSlow(), loadAlerts(), loadBlocks(), loadIntel().catch(() => {})]);
+  loadWorld();
+  connectStream();
+  setInterval(refreshSummary, 3000);
+  setInterval(refreshSlow, 6000);
+})();
+</script>
+</body>
+</html>

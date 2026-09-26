@@ -41,6 +41,10 @@ Detectors in this file
 :class:`TrackerDetector`
     SNI / DNS / HTTP Host strings matching a built-in list of well-known
     third-party trackers and analytics endpoints.
+
+:class:`DohDetector`
+    DNS-over-HTTPS / DNS-over-TLS / DNS-over-QUIC sessions — lookups that
+    bypass the system resolver and every DNS-based detector in this tool.
 """
 from __future__ import annotations
 
@@ -184,7 +188,23 @@ class WebRtcLeakDetector(BaseDetector):
 # Ports legitimately used by the OS or common apps — we don't want to
 # scream every time the system talks to mDNS, dhcp, etc.
 _LOCAL_QUIET_TCP_PORTS = frozenset({
-    22, 53, 80, 443, 445, 631, 5353, 5900, 8080, 8443,
+    22, 53, 80, 443, 445, 548, 554, 631, 3689, 5000, 5353, 5900, 7000, 7100,
+    8008, 8009, 8060, 8080, 8443, 9100,  # SSH, SMB/AFP, AirPlay, Chromecast, Roku, printers
+})
+
+_BROWSER_APPS = frozenset({
+    "Safari", "Safari Technology Preview", "Google Chrome", "Google Chrome Canary",
+    "Chromium", "Firefox", "Firefox Developer Edition", "Firefox Nightly", "Brave Browser",
+    "Microsoft Edge", "Arc", "Opera", "Opera GX", "Vivaldi", "Orion", "Zen", "Zen Browser",
+    "DuckDuckGo", "Tor Browser", "Dia", "Comet", "Yandex", "Waterfox", "LibreWolf",
+})
+
+
+def is_browser_app(app: str) -> bool:
+    """True for web browsers, including Safari's WebKit networking process."""
+    return app in _BROWSER_APPS or app.startswith("com.apple.WebKit") or app.startswith("Safari")
+_LOCAL_SERVICE_SRC_PORTS = frozenset({
+    53, 67, 68, 123, 137, 138, 443, 853, 1900, 3478, 5351, 5353, 5355, 19302,
 })
 _LOCAL_QUIET_UDP_PORTS = frozenset({
     53, 67, 68, 137, 138, 5353, 5355, 1900, 137, 5060,
@@ -213,10 +233,11 @@ class LocalhostProbeDetector(BaseDetector):
         self.scan_threshold = scan_threshold
         self.scan_window = scan_window
         # (src_ip, dst_ip) -> deque[(timestamp, dst_port)]
-        self._history: Dict[Tuple[str, str], Deque[Tuple[float, int]]] = defaultdict(
+        self._history: Dict[Tuple[str, str, Optional[str]], Deque[Tuple[float, int]]] = defaultdict(
             lambda: deque(maxlen=64)
         )
-        self._reported: Set[Tuple[str, str]] = set()
+        self._reported: Set[Tuple[str, str, Optional[str]]] = set()
+        self._udp_seen: Set[Tuple[str, str, int]] = set()
 
     @property
     def name(self) -> str:
@@ -240,6 +261,11 @@ class LocalhostProbeDetector(BaseDetector):
         dst_port = meta.get("dst_port") or 0
         src_ip = meta.get("src_ip")
 
+        # A probe originates on this machine (or the LAN).  Replies from the
+        # internet to our own private address are ordinary return traffic.
+        if classify_ip(src_ip) not in ("loopback", "private", "link_local"):
+            return
+
         # Only look at the start of a connection, not every keep-alive packet.
         if proto == "tcp":
             flags = meta.get("tcp_flags", 0)
@@ -251,39 +277,58 @@ class LocalhostProbeDetector(BaseDetector):
         elif proto == "udp":
             if dst_port in _LOCAL_QUIET_UDP_PORTS:
                 return
+            # Replies from local services (the router's DNS, NTP, SSDP …).
+            if (meta.get("src_port") or 0) in _LOCAL_SERVICE_SRC_PORTS:
+                return
+            # UDP has no handshake: report each (src, dst, port) only once.
+            udp_key = (src_ip, dst_ip, dst_port)
+            if udp_key in self._udp_seen:
+                return
+            self._udp_seen.add(udp_key)
+            if len(self._udp_seen) > 50_000:
+                self._udp_seen.clear()
         else:
             return
 
-        # First-class single event — every loopback connection is interesting.
+        # Who opened the connection (set by the engine's enricher, if any).
+        app = (layer7.get("context") or {}).get("app")
+        browser = app is None or is_browser_app(app)
+        who = f"{app} ({src_ip})" if app else src_ip
+
+        # Single-probe events are reported for browsers (and unknown owners):
+        # native apps talk to their own localhost helpers all the time.
         sev = Severity.HIGH if kind == "loopback" else Severity.MEDIUM
-        yield Alert(
+        if browser:
+            yield Alert(
             alert_type=AlertType.BEHAVIORAL,
             severity=sev,
-            message=(
-                f"{proto.upper()} probe to {kind} address {dst_ip}:{dst_port} "
-                f"from {src_ip} (browser/local-software fingerprinting?)"
-            ),
-            src_ip=src_ip,
-            dst_ip=dst_ip,
-            src_port=meta.get("src_port"),
-            dst_port=dst_port,
-            protocol=proto,
-            rule_id="STEALTH-LOCALHOST-PROBE",
-            mitre_technique="T1046",
-            tags=["localhost_probe", "stealth", "fingerprint", kind],
-            confidence=0.85 if kind == "loopback" else 0.65,
-            evidence={
-                "destination_class": kind,
-                "destination_port": dst_port,
-                "transport": proto,
-            },
-        )
+                message=(
+                    f"{proto.upper()} probe to {kind} address {dst_ip}:{dst_port} "
+                    f"from {who} (browser/local-software fingerprinting?)"
+                ),
+                src_ip=src_ip,
+                dst_ip=dst_ip,
+                src_port=meta.get("src_port"),
+                dst_port=dst_port,
+                protocol=proto,
+                rule_id="STEALTH-LOCALHOST-PROBE",
+                mitre_technique="T1046",
+                tags=["localhost_probe", "stealth", "fingerprint", kind],
+                confidence=0.85 if kind == "loopback" else 0.65,
+                evidence={
+                    "destination_class": kind,
+                    "destination_port": dst_port,
+                    "transport": proto,
+                },
+            )
 
-        # Track the per-pair port spread for a multi-port scan alert.
+        # Track the per-(source, target, app) port spread for a scan alert.
+        # Keying on the app matters on loopback, where every local program
+        # shares 127.0.0.1 as both source and destination.
         if not src_ip:
             return
         now = meta.get("timestamp", time.time())
-        key = (src_ip, dst_ip)
+        key = (src_ip, dst_ip, app)
         hist = self._history[key]
         # Expire stale samples.
         while hist and (now - hist[0][0]) > self.scan_window:
@@ -294,11 +339,12 @@ class LocalhostProbeDetector(BaseDetector):
             self._reported.add(key)
             yield Alert(
                 alert_type=AlertType.BEHAVIORAL,
-                severity=Severity.CRITICAL,
+                severity=Severity.CRITICAL if browser else Severity.HIGH,
                 message=(
-                    f"Localhost port scan: {src_ip} probed {len(unique_ports)} "
+                    f"Localhost port scan: {who} probed {len(unique_ports)} "
                     f"ports on {dst_ip} in {self.scan_window:.0f}s — "
-                    f"likely browser-side fingerprinting"
+                    + ("likely browser-side fingerprinting" if browser
+                       else "unusual for a local app")
                 ),
                 src_ip=src_ip,
                 dst_ip=dst_ip,
@@ -338,22 +384,35 @@ class QuicHttp3Detector(BaseDetector):
         quic = layer7.get("quic")
         if not quic or quic.get("packet_type") != "Initial":
             return
+        # A decrypted Initial whose ClientHello continues in the next packet:
+        # wait for the packet that completes it so the alert carries the SNI.
+        if quic.get("decrypted") and not quic.get("client_hello_complete"):
+            return
+        # Server → client Initials (the reply half of the handshake) can't be
+        # decrypted with client keys; they are not new connections.
+        if not quic.get("decrypted") and (meta.get("src_port") or 0) in (443, 8443):
+            return
 
         src = meta.get("src_ip")
         dst = meta.get("dst_ip")
         port = meta.get("dst_port") or 0
         if not src or not dst:
             return
-        key = (src, dst, port)
+        sni = quic.get("sni")
+        # One event per site, not per CDN edge IP (video sites rotate many).
+        key = (src, sni, 0) if sni else (src, dst, port)
         if key in self._seen:
             return
         self._seen.add(key)
+        if len(self._seen) > 100_000:
+            self._seen.clear()
 
+        target = f"{sni} ({dst}:{port})" if sni else f"{dst}:{port}"
         yield Alert(
             alert_type=AlertType.BEHAVIORAL,
             severity=Severity.LOW,
             message=(
-                f"QUIC/HTTP-3 connection {src} → {dst}:{port} ({quic.get('version')})"
+                f"QUIC/HTTP-3 connection {src} → {target} ({quic.get('version')})"
             ),
             src_ip=src,
             dst_ip=dst,
@@ -368,6 +427,9 @@ class QuicHttp3Detector(BaseDetector):
                 "version": quic.get("version"),
                 "dcid": quic.get("dcid"),
                 "scid": quic.get("scid"),
+                "sni": sni,
+                "alpn": quic.get("alpn"),
+                "ech": quic.get("ech", False),
             },
         )
 
@@ -639,8 +701,12 @@ class TrackerDetector(BaseDetector):
     def __init__(
         self,
         domains: Optional[Dict[str, str]] = None,
+        extra_domains: Optional[Dict[str, str]] = None,
     ) -> None:
-        self.domains = domains or _TRACKER_DOMAINS
+        # Built-in labels win over the (much larger) Disconnect feed because
+        # they are hand-curated product names.
+        self.domains: Dict[str, str] = dict(extra_domains or {})
+        self.domains.update(domains or _TRACKER_DOMAINS)
         self._reported: Set[Tuple[str, str]] = set()
 
     @property
@@ -659,6 +725,9 @@ class TrackerDetector(BaseDetector):
         if "tls" in layer7 and layer7["tls"].get("sni"):
             host = layer7["tls"]["sni"]
             source = "TLS SNI"
+        elif "quic" in layer7 and layer7["quic"].get("sni"):
+            host = layer7["quic"]["sni"]
+            source = "QUIC SNI"
         elif "http" in layer7 and layer7["http"].get("host"):
             host = layer7["http"]["host"]
             source = "HTTP Host"
@@ -680,9 +749,10 @@ class TrackerDetector(BaseDetector):
             return
         self._reported.add(key)
 
+        invasive = "Cryptomining" in category or "FingerprintingInvasive" in category
         yield Alert(
             alert_type=AlertType.BEHAVIORAL,
-            severity=Severity.LOW,
+            severity=Severity.MEDIUM if invasive else Severity.LOW,
             message=f"3rd-party tracker: {host_lower} ({category}) via {source}",
             src_ip=meta.get("src_ip"),
             dst_ip=meta.get("dst_ip"),
@@ -702,7 +772,136 @@ class TrackerDetector(BaseDetector):
         )
 
     def _match(self, host: str) -> Optional[Tuple[str, str]]:
-        for suffix, category in self.domains.items():
-            if host == suffix or host.endswith("." + suffix):
-                return category, suffix
-        return None
+        # Walk label suffixes, most specific first: a.b.example.com,
+        # b.example.com, example.com, com.
+        candidate = host
+        while True:
+            category = self.domains.get(candidate)
+            if category is not None:
+                return category, candidate
+            dot = candidate.find(".")
+            if dot < 0:
+                return None
+            candidate = candidate[dot + 1:]
+
+
+# ---------------------------------------------------------------------------
+# Encrypted DNS (DoH / DoT / DoQ)
+# ---------------------------------------------------------------------------
+
+# A small built-in set so detection works before any feed is downloaded.
+_DOH_HOSTS: Set[str] = {
+    "dns.google", "dns.google.com", "cloudflare-dns.com", "mozilla.cloudflare-dns.com",
+    "chrome.cloudflare-dns.com", "one.one.one.one", "1dot1dot1dot1.cloudflare-dns.com",
+    "security.cloudflare-dns.com", "family.cloudflare-dns.com", "dns.quad9.net",
+    "dns9.quad9.net", "dns10.quad9.net", "dns11.quad9.net", "doh.opendns.com",
+    "dns.nextdns.io", "doh.cleanbrowsing.org", "dns.adguard.com", "dns.adguard-dns.com",
+    "doh.dns.sb", "dns.alidns.com", "doh.pub", "doh.mullvad.net", "dns.mullvad.net",
+    "dns.controld.com", "freedns.controld.com", "dns0.eu", "zero.dns0.eu",
+    "ordns.he.net", "doh.libredns.gr", "doh.xfinity.com", "dns.twnic.tw",
+    "doh.applied-privacy.net", "doh.ffmuc.net", "dns.switch.ch",
+}
+_DOH_IPS: Set[str] = {
+    "1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2", "1.1.1.3", "1.0.0.3",
+    "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112", "9.9.9.11", "149.112.112.11",
+    "208.67.222.222", "208.67.220.220", "94.140.14.14", "94.140.15.15",
+    "45.90.28.0", "45.90.30.0", "185.228.168.9", "185.228.169.9", "76.76.2.0",
+    "2606:4700:4700::1111", "2606:4700:4700::1001", "2001:4860:4860::8888",
+    "2001:4860:4860::8844", "2620:fe::fe", "2620:fe::9",
+}
+
+
+class DohDetector(BaseDetector):
+    """
+    Surface encrypted DNS that bypasses the operating system's resolver.
+
+    Browsers increasingly ship their own DNS-over-HTTPS client ("Secure
+    DNS" in Chrome, "DNS over HTTPS" in Firefox).  Those lookups never
+    reach port 53, so the DNS tunnelling, prefetch, tracker-by-DNS, and
+    threat-intel domain checks cannot see them.  This detector reports
+    each new encrypted-DNS session so the blind spot is visible.
+
+    Signals:
+
+    * TLS / QUIC SNI or a plaintext DNS lookup naming a known DoH resolver
+    * TCP or UDP port 853 (DNS-over-TLS / DNS-over-QUIC)
+    * HTTPS (443) to a known public resolver IP
+    """
+
+    def __init__(
+        self,
+        hosts: Optional[Set[str]] = None,
+        ips: Optional[Set[str]] = None,
+    ) -> None:
+        self.hosts: Set[str] = set(_DOH_HOSTS) | set(hosts or ())
+        self.ips: Set[str] = set(_DOH_IPS) | set(ips or ())
+        self._reported: Set[Tuple[str, str, str]] = set()
+
+    @property
+    def name(self) -> str:
+        return "stealth_doh"
+
+    def analyze(
+        self,
+        meta: dict,
+        layer7: dict,
+        flow: Optional[Flow],
+    ) -> Iterable[Alert]:
+        src = meta.get("src_ip")
+        dst = meta.get("dst_ip")
+        dst_port = meta.get("dst_port") or 0
+        proto = meta.get("protocol")
+        if not src or not dst or proto not in ("tcp", "udp"):
+            return
+
+        sni = (layer7.get("tls") or {}).get("sni") or (layer7.get("quic") or {}).get("sni")
+        dns_name = None
+        dns = layer7.get("dns") or {}
+        if dns and not dns.get("is_response"):
+            dns_name = dns.get("query_name")
+
+        method = ""
+        resolver = ""
+        if sni and sni.lower().rstrip(".") in self.hosts:
+            method = "DoH (DNS-over-HTTPS)" if dst_port != 853 else "DoT (DNS-over-TLS)"
+            resolver = sni.lower()
+        elif dst_port == 853:
+            method = "DoT (DNS-over-TLS)" if proto == "tcp" else "DoQ (DNS-over-QUIC)"
+            resolver = dst
+        elif dst_port == 443 and dst in self.ips:
+            method = "DoH (DNS-over-HTTPS)"
+            resolver = dst
+        elif dns_name and dns_name.lower().rstrip(".") in self.hosts:
+            method = "DoH bootstrap lookup"
+            resolver = dns_name.lower().rstrip(".")
+        else:
+            return
+
+        key = (src, resolver, method)
+        if key in self._reported:
+            return
+        self._reported.add(key)
+
+        yield Alert(
+            alert_type=AlertType.BEHAVIORAL,
+            severity=Severity.MEDIUM if "bootstrap" not in method else Severity.LOW,
+            message=(
+                f"Encrypted DNS: {method} from {src} to {resolver} — "
+                f"these lookups bypass the system resolver and DNS monitoring"
+            ),
+            src_ip=src,
+            dst_ip=dst,
+            src_port=meta.get("src_port"),
+            dst_port=dst_port,
+            protocol=proto,
+            rule_id="STEALTH-ENCRYPTED-DNS",
+            mitre_technique="T1071.004",
+            tags=["doh", "encrypted_dns", "stealth", "evasion"],
+            confidence=0.9 if sni or dst_port == 853 else 0.7,
+            evidence={
+                "method": method,
+                "resolver": resolver,
+                "resolver_ip": dst,
+                "sni": sni,
+            },
+        )

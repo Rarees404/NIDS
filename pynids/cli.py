@@ -8,9 +8,13 @@ Commands
 --------
 live       Real-time capture from a network interface
 pcap       Replay and analyse a PCAP/PCAPNG file
+xray       Live dashboard of hidden browser activity
 query      Search persisted alerts in a SQLite database
 stats      Display live engine statistics
 validate   Validate a rules or configuration file
+
+Service commands (daemon, status, open, intel, geoip, block, ai, keylog,
+decrypt, app) live in :mod:`pynids.cli_service`.
 """
 from __future__ import annotations
 
@@ -106,6 +110,28 @@ def _resolve_config(config: Optional[str]) -> str:
     return "__default__"
 
 
+def _make_enricher(processes: bool = True):
+    """App attribution + passive hostnames + GeoIP (whatever is available)."""
+    from .enrich import Enricher, GeoResolver, HostnameCache, ProcessResolver
+    return Enricher(
+        processes=ProcessResolver().start() if processes else None,
+        geo=GeoResolver(),
+        hostnames=HostnameCache(),
+    )
+
+
+def _make_intel(intel_cfg: dict) -> ThreatIntel:
+    """Bundled/configured YAML feeds plus any cached live feeds."""
+    from .intel import feeds
+    from .paths import intel_dir
+    intel = ThreatIntel(
+        bad_ips_path=intel_cfg.get("bad_ips_file"),
+        malicious_domains_path=intel_cfg.get("malicious_domains_file"),
+    )
+    feeds.load_into(intel, intel_dir())
+    return intel
+
+
 class _JsonStdout(BaseOutput):
     """Write each alert as a JSON line to stdout."""
 
@@ -121,6 +147,7 @@ def _build_engine(
     show_evidence: bool,
     json_output: bool,
     sqlite_path: Optional[str] = None,
+    live_capture: bool = True,
 ) -> DetectionEngine:
     """Construct the full engine + alert manager from CLI options."""
     # Load config
@@ -188,20 +215,17 @@ def _build_engine(
             )
         )
 
-    # Threat intelligence
-    intel_cfg = cfg.get("intel", {})
-    intel = None
-    if intel_cfg.get("enabled"):
-        intel = ThreatIntel(
-            bad_ips_path=intel_cfg.get("bad_ips_file"),
-            malicious_domains_path=intel_cfg.get("malicious_domains_file"),
-        )
+    # Threat intelligence — configured YAML feeds plus cached live feeds
+    from .paths import intel_dir
+    cfg.setdefault("intel", {}).setdefault("feeds_dir", str(intel_dir()))
+    intel = _make_intel(cfg.get("intel", {}))
 
     return DetectionEngine(
         config=cfg,
         rules_path=rules_path,
         intel=intel,
         alert_manager=mgr,
+        enricher=_make_enricher(processes=live_capture),
     )
 
 
@@ -308,9 +332,11 @@ def pcap(
         sys.exit(1)
 
     config_path = _resolve_config(config)
+    # Process attribution describes *this machine now*, so it is meaningless
+    # for a recorded capture — enrich with hostnames/GeoIP only.
     engine = _build_engine(
         config_path, rules, min_severity, verbose,
-        json_output=(output == "json"), sqlite_path=sqlite
+        json_output=(output == "json"), sqlite_path=sqlite, live_capture=False,
     )
 
     start = time.time()
@@ -444,19 +470,16 @@ def xray(
     if sqlite:
         mgr.register_output(SQLiteOutput(path=sqlite))
 
-    intel_cfg = cfg.get("intel", {})
-    intel = None
-    if intel_cfg.get("enabled"):
-        intel = ThreatIntel(
-            bad_ips_path=intel_cfg.get("bad_ips_file"),
-            malicious_domains_path=intel_cfg.get("malicious_domains_file"),
-        )
+    from .paths import intel_dir
+    cfg.setdefault("intel", {}).setdefault("feeds_dir", str(intel_dir()))
+    intel = _make_intel(cfg.get("intel", {}))
 
     engine = DetectionEngine(
         config=cfg,
         rules_path=rules,
         intel=intel,
         alert_manager=mgr,
+        enricher=_make_enricher(processes=not pcap),
     )
 
     dashboard.start()
@@ -814,3 +837,7 @@ def _print_stats(engine: DetectionEngine) -> None:
     table.add_row("Deduplicated", str(am.get("total_deduplicated", 0)))
     table.add_row("Suppressed", str(am.get("total_suppressed", 0)))
     console.print(table)
+
+
+# Service / macOS companion commands register themselves on `main`.
+from . import cli_service  # noqa: E402,F401
