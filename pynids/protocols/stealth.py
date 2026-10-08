@@ -29,6 +29,9 @@ returns an empty dict and the caller treats that as "not a match".
 """
 from __future__ import annotations
 
+import functools
+import ipaddress
+
 import socket
 import struct
 from typing import Any, Dict, List, Optional
@@ -349,16 +352,19 @@ def is_beacon_request(http_info: Dict[str, Any]) -> bool:
 # Convenience: address classification
 # ---------------------------------------------------------------------------
 
+@functools.lru_cache(maxsize=65536)
 def classify_ip(ip: Optional[str]) -> str:
     """
     Classify an IP into a coarse category that the X-Ray UI uses to
     decide what to highlight: 'loopback', 'private', 'link_local',
     'multicast', 'public', or 'unknown'.
+
+    Memoised: it runs several times per packet, and a machine talks to a
+    few thousand distinct addresses at most.
     """
     if not ip:
         return "unknown"
     try:
-        import ipaddress
         addr = ipaddress.ip_address(ip)
         if addr.is_loopback:
             return "loopback"

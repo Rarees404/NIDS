@@ -19,6 +19,8 @@ struct BriefAlert: Codable, Hashable {
     let subject: String?
     let message: String?
     let app: String?
+    let summary: String?
+    let verdict: String?
 }
 
 /// `/api/widget` — unauthenticated, counts only (the sandboxed widget can't read the token).
@@ -57,6 +59,7 @@ struct Rates: Codable, Hashable {
 struct DaemonStatus: Codable, Hashable {
     let state: String?
     let interfaces: [String]?
+    let paused: Bool?
     let notifications: Bool?
     let autoBlock: Bool?
     let ai: Bool?
@@ -90,6 +93,14 @@ struct AlertContext: Codable, Hashable {
     let country: String?
 }
 
+/// Plain-English explanation the daemon attaches to every alert.
+struct AlertGuide: Codable, Hashable {
+    let summary: String
+    let meaning: String
+    let verdict: String
+    let nextSteps: [String]?
+}
+
 struct AlertItem: Codable, Hashable, Identifiable {
     let alertId: String
     let timestamp: Double
@@ -99,7 +110,10 @@ struct AlertItem: Codable, Hashable, Identifiable {
     let ruleId: String?
     let dstIp: String?
     let context: AlertContext?
+    let about: AlertGuide?
     var id: String { alertId }
+    /// What the UI shows as the alert's headline.
+    var headline: String { about?.summary ?? message }
 }
 
 // MARK: - Presentation helpers shared by the app and the widget

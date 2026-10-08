@@ -76,6 +76,11 @@ def token_path() -> Path:
     return data_dir() / "api-token"
 
 
+def paused_flag_path() -> Path:
+    """Present while detection is paused, so the pause survives restarts."""
+    return data_dir() / "paused"
+
+
 def blocklist_path() -> Path:
     return data_dir() / "blocklist.json"
 

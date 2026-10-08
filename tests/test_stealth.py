@@ -17,6 +17,7 @@ import time
 from pynids.alerts.model import AlertType, Severity
 from pynids.alerts.outputs.xray_dashboard import XRayDashboard
 from pynids.detection.stealth import (
+    DohDetector,
     BeaconDetector,
     DnsPrefetchDetector,
     LocalhostProbeDetector,
@@ -238,28 +239,67 @@ class TestWebRtcLeakDetector:
         assert alerts[0].rule_id == "STEALTH-WEBRTC-STUN"
 
 
+BROWSER = {"context": {"app": "Google Chrome"}}
+
+
+def _syn(dst_port, src_port=55000, ts=None):
+    return make_meta(src_ip="127.0.0.1", dst_ip="127.0.0.1", src_port=src_port,
+                     dst_port=dst_port, protocol="tcp", tcp_flags=0x02, timestamp=ts)
+
+
 class TestLocalhostProbeDetector:
-    def test_loopback_syn_emits_high(self):
+    def test_browser_loopback_syn_emits_high(self):
         det = LocalhostProbeDetector()
-        meta = make_meta(
-            src_ip="127.0.0.1", dst_ip="127.0.0.1", dst_port=12345,
-            protocol="tcp", tcp_flags=0x02,
-        )
-        alerts = list(det.analyze(meta, {}, None))
+        alerts = list(det.analyze(_syn(12345), BROWSER, None))
         assert any(a.severity == Severity.HIGH for a in alerts)
         assert any(a.rule_id == "STEALTH-LOCALHOST-PROBE" for a in alerts)
+        assert "Google Chrome" in alerts[0].message
+
+    def test_unidentified_owner_is_medium_not_high(self):
+        det = LocalhostProbeDetector()
+        alerts = list(det.analyze(_syn(1337, src_port=50336), {}, None))
+        assert [a.severity for a in alerts] == [Severity.MEDIUM]
+        assert "Unidentified" in alerts[0].message
+
+    def test_timer_driven_retries_are_rate_limited(self):
+        det = LocalhostProbeDetector(repeat_cooldown=3600)
+        alerts = []
+        for i in range(6):  # every 10 minutes for an hour
+            alerts += det.analyze(_syn(1337, src_port=50336, ts=1000.0 + i * 600), {}, None)
+        assert len(alerts) == 1
+        later = list(det.analyze(_syn(1337, src_port=50336, ts=1000.0 + 3700), {}, None))
+        assert later[0].evidence["repeats_since_last_alert"] == 5
+
+    def test_local_ipc_port_pairs_ignored(self):
+        det = LocalhostProbeDetector(scan_threshold=3)
+        alerts = []
+        for base in (52230, 52237, 52242, 52245, 52247):
+            alerts += det.analyze(_syn(base + 1, src_port=base), {}, None)
+        assert alerts == []
+
+    def test_own_dashboard_port_ignored(self):
+        det = LocalhostProbeDetector(ignore_ports=[8787])
+        safari = {"context": {"app": "Safari / WebKit"}}
+        assert list(det.analyze(_syn(8787), safari, None)) == []
+
+    def test_native_app_single_probe_is_silent(self):
+        det = LocalhostProbeDetector()
+        assert list(det.analyze(_syn(3000), {"context": {"app": "Razer Synapse"}}, None)) == []
 
     def test_repeated_ports_trigger_scan_alert(self):
         det = LocalhostProbeDetector(scan_threshold=3, scan_window=10.0)
         emitted = []
         for port in (12345, 23456, 34567, 45678):
-            meta = make_meta(
-                src_ip="127.0.0.1", dst_ip="127.0.0.1", dst_port=port,
-                protocol="tcp", tcp_flags=0x02, timestamp=time.time(),
-            )
-            emitted.extend(det.analyze(meta, {}, None))
+            emitted.extend(det.analyze(_syn(port, ts=time.time()), BROWSER, None))
         assert any(a.rule_id == "STEALTH-LOCALHOST-SCAN" for a in emitted)
         assert any(a.severity == Severity.CRITICAL for a in emitted)
+
+    def test_unidentified_scan_ignores_ephemeral_ports(self):
+        det = LocalhostProbeDetector(scan_threshold=3, scan_window=30.0)
+        emitted = []
+        for port in (52247, 52254, 52259, 52262, 52264):
+            emitted.extend(det.analyze(_syn(port, src_port=port - 1000, ts=1000.0), {}, None))
+        assert not any(a.rule_id == "STEALTH-LOCALHOST-SCAN" for a in emitted)
 
     def test_quiet_port_on_private_subnet_is_ignored(self):
         det = LocalhostProbeDetector()
@@ -430,3 +470,12 @@ class TestXRayDashboardIngest:
         layout = d._render()
         assert layout is not None
         assert d._counts["webrtc"] == 50
+
+
+def test_icloud_private_relay_is_labelled_not_doh():
+    det = DohDetector(hosts={"mask.icloud.com"})
+    layer7 = {"tls": {"sni": "mask.icloud.com"}}
+    alerts = list(det.analyze(make_meta(src_ip="10.0.0.5", dst_ip="172.224.0.1", dst_port=443), layer7, None))
+    assert len(alerts) == 1
+    assert alerts[0].severity == Severity.LOW
+    assert "Private Relay" in alerts[0].message

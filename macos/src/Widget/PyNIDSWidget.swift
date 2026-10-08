@@ -362,7 +362,7 @@ struct AlertLine: View {
                         Text(title).fontWeight(.semibold)
                             + Text(a.subject.map { " · \($0)" } ?? "")
                     } else {
-                        Text(a.message ?? "")
+                        Text(a.summary ?? a.message ?? "")
                     }
                 }
                 .font(.system(size: 11))

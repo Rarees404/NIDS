@@ -42,7 +42,7 @@ PyNIDS is an **enterprise-grade, pure-Python Network Intrusion Detection System*
 
 | Capability | Implementation |
 |---|---|
-| Live packet capture | Scapy `AsyncSniffer` + bounded thread-safe queue |
+| Live packet capture | Scapy's BPF / `AF_PACKET` listen socket, raw frames decoded with `struct`, bounded thread-safe queue |
 | PCAP/PCAPNG replay | Scapy `PcapReader` |
 | Protocol dissection | Pure-Python HTTP/DNS/TLS/SSH/SMTP parsers |
 | Stateful flow tracking | In-memory 5-tuple connection table with TCP state machine |
@@ -66,8 +66,8 @@ Network Interface / PCAP File
           ▼
   ┌───────────────────┐
   │   Sniffer Layer   │   sniffer.py
-  │  (AsyncSniffer /  │   • Captures raw packets
-  │   PcapReader)     │   • Normalises into meta dict
+  │  (BPF socket /    │   • Captures raw frames
+  │   PcapReader)     │   • Decodes into meta dict
   └────────┬──────────┘
            │ meta dict (src_ip, dst_ip, protocol, payload_bytes, …)
            ▼
@@ -97,7 +97,7 @@ Network Interface / PCAP File
   (Rich)   file    database    server     (Rich Live)
 ```
 
-The engine is **single-threaded and synchronous** by design — predictable, testable, and debuggable. The only concurrency is in the sniffer layer itself: Scapy's `AsyncSniffer` runs in a background thread and hands packets to the engine via a bounded `queue.Queue`, preventing the capture callback from blocking the sniffer thread.
+The engine is **single-threaded and synchronous** by design — predictable, testable, and debuggable. The only concurrency is in the sniffer layer itself: a reader thread drains the capture socket and hands raw frames to the engine thread via a bounded `queue.Queue`, so a busy engine never stalls the kernel buffer.
 
 ---
 
@@ -163,9 +163,16 @@ PyNIDS/
 
 ## 4. Packet Capture Layer — `sniffer.py`
 
-### 4.1 `packet_to_meta(pkt) → dict`
+### 4.1 `decode_frame(frame, link, ts) → dict` and `packet_to_meta(pkt) → dict`
 
-Converts a raw Scapy packet into a **normalised metadata dictionary** that all downstream components consume. This is the only place where Scapy's object model is touched; everywhere else in PyNIDS, a plain Python dict is passed around.
+`decode_frame` turns the raw bytes of one captured frame into a **normalised metadata dictionary** that all downstream components consume. It is a small `struct`-based parser for Ethernet (incl. 802.1Q/QinQ VLAN tags), BSD loopback/`utun` (`DLT_NULL`), Linux cooked capture and raw IP, then IPv4 / IPv6 (extension headers, fragments), TCP, UDP, ICMP and ICMPv6 echo. The IP total length is honoured, so Ethernet padding never leaks into `payload_bytes`.
+
+`packet_to_meta` does the same for a Scapy packet (PCAP replay, tests) by decoding `bytes(pkt)`, so replay and live capture see identical dicts.
+
+**Why not use Scapy's dissection?** Two reasons:
+
+1. **Correctness.** Scapy decodes the protocols it knows (DNS, mDNS, NTP, NetBIOS/SMB…) into its own layers and leaves no `Raw` payload, so the engine's DNS dissector, DNS tunnelling detector, malicious-domain intel, DNS-based tracker detection and hostname learning would never see a single live DNS packet.
+2. **Speed.** Building Scapy objects costs ~105 µs per packet and `len(pkt)` re-serialises the packet. The raw decoder costs ~3 µs; the whole live path (decode → engine → live stats) measures ~23 µs per packet, roughly 44 000 packets/s per core, versus ~5 500 before.
 
 | Key | Type | Description |
 |---|---|---|
@@ -183,19 +190,21 @@ Converts a raw Scapy packet into a **normalised metadata dictionary** that all d
 
 The function is intentionally **non-throwing**: non-IP packets (ARP, pure Ethernet) return a dict with most fields set to `None`. The engine handles `None` gracefully throughout.
 
-### 4.2 `sniff_live(iface, engine_callback, bpf_filter, packet_queue_size)`
+### 4.2 `sniff_live(iface, engine_callback, bpf_filter, packet_queue_size, raw_callback, stop_event)`
 
 ```
-AsyncSniffer thread               Main thread
-──────────────────────────────────────────────────────────
-for each raw packet                while True:
-  meta = packet_to_meta(pkt)         meta = queue.get(timeout=0.2)
-  queue.put_nowait(meta) ──────────► engine_callback(meta)
-  (drops silently if queue full)
+Reader thread ("bpf-en0")                  Calling thread
+──────────────────────────────────────────────────────────────────
+select(socket, 0.5 s)                      while not stopped:
+for each buffered frame:                     link, frame, ts = queue.get(0.2 s)
+  raw_callback(frame, ts, linktype)          engine_callback(decode_frame(…))
+  queue.put_nowait((link, frame, ts)) ────►
+  (counted + dropped if queue full)
 ```
 
-- The sniffer runs in a **dedicated background thread** (`AsyncSniffer`). Its only job is to call `packet_to_meta` and push the result into a bounded (`maxsize=10 000`) `queue.Queue`.
-- The main thread drains packets with a 0.2 s timeout so that `KeyboardInterrupt` is still responsive.
+- Opens Scapy's platform listen socket (`conf.L2listen`: BPF on macOS, `AF_PACKET` on Linux) and reads frames with `recv_raw()`, so no Scapy packet objects are created. One BPF read can return many frames; the reader drains them all before selecting again.
+- `raw_callback` receives each raw frame with its timestamp and pcap link type (the rolling PCAP recorder uses it).
+- The calling thread decodes and runs the engine; it raises `OSError` if the reader dies (interface removed), which the daemon turns into a retry.
 - **Back-pressure**: if the engine cannot keep up, packets are silently dropped (with a warning logged every 1000th drop). This prevents memory exhaustion under burst traffic.
 - On `KeyboardInterrupt` the sniffer is stopped cleanly and the final drop count is logged.
 
@@ -571,9 +580,11 @@ Per-port and per-target alert suppression (`horiz_alerted` / `vert_alerted` sets
 
 #### `BruteForceDetector` — Credential Service Attack
 
-Monitors connection attempts to authentication services. Maintains a `deque[float]` of timestamps per `(src_ip, dst_ip, dst_port)` key.
+Monitors connection **attempts** to authentication services: only the first packet of a flow counts, and for TCP only a SYN without ACK, so the packets inside one busy SSH session never add up. Maintains a `deque[float]` of timestamps per `(src_ip, dst_ip, dst_port)` key.
 
 Alert condition: `len(bucket_within_window) >= threshold`
+
+Severity depends on direction: attempts **against this machine** are **HIGH** ("Brute force on SSH"); many connections **from this Mac** to a remote service are **MEDIUM** ("Many SSH connections"), because that is usually tooling such as git over SSH.
 
 **Default watched ports:** 21 (FTP), 22 (SSH), 23 (Telnet), 25 (SMTP), 110 (POP3), 143 (IMAP), 389 (LDAP), 636 (LDAPS), 3389 (RDP), 5900 (VNC), 8080 (HTTP alt).
 
@@ -625,6 +636,10 @@ Maintains a deque (max 30 entries) of connection timestamps per `(src_ip, dst_ip
 
 Low CV = very consistent timing = machine, not human.
 
+Only **new connections to public internet addresses** count. Skipped by design: loopback, link-local and private-LAN destinations (AirPlay receivers, printers, DHCPv6 housekeeping), multicast/broadcast, DNS/NTP/mDNS ports, and macOS system daemons. A daemon is "system" when its executable lives under `/System/`, `/usr/libexec/`, `/usr/sbin/` or `/sbin/`, the SIP-protected system volume malware cannot write to. `/usr/bin` is deliberately excluded because `curl`, `python` and `nc` there can be driven by anything.
+
+Severity: **MEDIUM** when the server has a hostname learned from DNS/SNI (mail sync, update checks, telemetry); **HIGH** when the app polls a **bare IP it never looked up**, the more C2-like pattern.
+
 Confidence: `max(0, 1.0 - cv / cv_threshold)` — a CV of 0 gives confidence 1.0.
 
 **MITRE:** `T1071`
@@ -651,12 +666,22 @@ For every UDP datagram dissected as STUN, the detector inspects `XOR-MAPPED-ADDR
 
 Detects the well-documented technique of webpages probing `127.0.0.1` (and RFC1918 ranges) to fingerprint locally-running developer tools, password managers, malware-analysis sandboxes, etc.
 
-The detector is gated tightly to avoid false-positive storms:
+The detector is gated tightly to avoid false-positive storms. Severity depends on **who opened the connection** (from process attribution):
 
-- Only **TCP packets with the SYN flag set and ACK clear** (genuine connection initiations) are considered, plus all UDP datagrams.
-- Quiet ports that the OS legitimately uses are ignored unless the destination is loopback (e.g. `mDNS:5353`, `dhcp:67/68`, `netbios:137`, `http:80`, `https:443` to a private gateway are not interesting).
-- A single qualifying packet → **HIGH** severity `STEALTH-LOCALHOST-PROBE` for loopback, **MEDIUM** for private subnets.
-- Per `(src_ip, dst_ip)` pair, the detector tracks a 64-slot deque of `(timestamp, dst_port)` samples within a sliding `scan_window` (default 30 s). When `scan_threshold` (default 5) **distinct** ports appear in that window, an additional **CRITICAL** `STEALTH-LOCALHOST-SCAN` alert is emitted with the full list of probed ports.
+| Initiator | Single probe | Port sweep (`scan_threshold` distinct ports in `scan_window`) |
+|---|---|---|
+| Browser (confirmed) | **HIGH** loopback / **MEDIUM** LAN | **CRITICAL** |
+| Unidentified (closed before the socket table was sampled) | **MEDIUM** loopback / **LOW** LAN, rate-limited | **HIGH**, ephemeral destination ports not counted |
+| Native app | silent | **HIGH**, ephemeral destination ports not counted |
+
+Ignored entirely:
+
+- Anything but a **TCP SYN without ACK** (genuine connection initiations). UDP only counts when a browser sends it: web pages can't send raw UDP, and the LAN broadcasts/discovery chatter it would otherwise flag come from the OS.
+- **Local IPC pairs**: both ports ephemeral (≥ 49152) and within 4 of each other, i.e. a program connecting to a socket it opened a moment earlier.
+- PyNIDS's own API/dashboard port, broadcast/multicast destinations, and quiet OS ports on private subnets (`mDNS:5353`, `dhcp:67/68`, `https:443` to the gateway…).
+- Repeats of the same `(app, destination, port)` within `repeat_cooldown` (1 h). The next alert reports how many attempts were suppressed, so timer-driven health checks show up once rather than every few minutes.
+
+Evidence includes `initiator` and `target_app` (the program listening on the probed port, when known).
 
 **MITRE:** `T1046` (Network Service Discovery)
 
@@ -779,6 +804,20 @@ Every detection result is an `Alert` dataclass with these fields:
 `Severity` supports comparison operators (`>=`, `<=`, etc.) using an ordinal `numeric` property.
 
 `Alert.dedup_key` → `f"{rule_id or alert_type}|{src_ip}|{dst_ip}|{dst_port}"` — used for deduplication.
+
+#### Plain-English guide — `alerts/guide.py`
+
+`describe(alert_dict)` returns what a non-specialist needs to read an alert, written from the alert's own evidence and context (which app, which host, how often):
+
+| Key | Example |
+|---|---|
+| `summary` | "Microsoft Outlook contacts outlook.office365.com every 16 minutes, very regularly." |
+| `meaning` | What this kind of event is, its common benign causes, and when it would matter |
+| `verdict` | `Usually harmless` · `Privacy` · `Worth checking` · `Act now` |
+| `next_steps` | Concrete actions, e.g. "Run `sudo lsof -nP -iTCP:1337` when it happens" |
+| `details` | Readable evidence rows (`("Interval", "every 16 minutes")`, `("Listening app", "node")`) |
+
+The API attaches it as `about` to every alert (`/api/alerts`, `/api/alerts/<id>`, the live SSE stream), and the brief used by the widget carries `summary` and `verdict`. The dashboard drawer shows it above the connection details (raw evidence JSON is collapsed below), the event list shows the summary and verdict pill, the menu bar shows them with the full explanation on hover, and macOS notifications use the summary as the banner text and the verdict as the subtitle. It is local and instant; "Explain with Claude" remains the deeper, per-event analysis.
 
 ### 10.2 Alert Manager
 

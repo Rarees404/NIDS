@@ -21,6 +21,7 @@ import threading
 import time
 from typing import Callable, List, Optional, Sequence
 
+from ..alerts.guide import describe
 from ..alerts.manager import BaseOutput
 from ..alerts.model import Alert, Severity
 
@@ -115,6 +116,14 @@ class NotificationOutput(BaseOutput):
                 self._timer.daemon = True
                 self._timer.start()
 
+    def discard_pending(self) -> None:
+        """Drop coalesced alerts that have not been shown yet."""
+        with self._lock:
+            self._pending = []
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
     def _flush(self) -> None:
         with self._lock:
             self._timer = None
@@ -127,14 +136,17 @@ class NotificationOutput(BaseOutput):
         self._last_post = time.monotonic()
         worst = max(alerts, key=lambda a: a.severity.numeric)
         app = worst.context.get("app")
+        # The plain-English summary reads better in a banner than the
+        # detector's technical message; the verdict says how worried to be.
+        guide = describe(worst.to_dict())
+        message = guide["summary"]
         if len(alerts) == 1:
-            title = f"PyNIDS · {worst.severity.value}"
-            subtitle = app or (worst.rule_id or worst.alert_type.value)
-            message = worst.message
+            title = f"PyNIDS · {worst.severity.value.title()}"
+            subtitle = guide["verdict"] + (f" · {app}" if app else "")
         else:
             title = f"PyNIDS · {len(alerts)} new alerts"
-            subtitle = f"Most severe: {worst.severity.value}" + (f" · {app}" if app else "")
-            message = worst.message
+            subtitle = (f"Most severe: {worst.severity.value.title()}"
+                        + (f" · {app}" if app else f" · {guide['verdict']}"))
         threading.Thread(
             target=self._post,
             args=(title, message[:220]),

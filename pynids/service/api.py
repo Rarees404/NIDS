@@ -42,6 +42,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from .. import __version__
 from ..alerts.classify import classify
+from ..alerts.guide import describe
 from .live import LiveState, _brief
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ class ServiceContext:
         explain: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         update_feeds: Optional[Callable[[], List[Dict[str, Any]]]] = None,
         feed_status: Optional[Callable[[], List[Dict[str, Any]]]] = None,
+        set_detection: Optional[Callable[[bool], Dict[str, Any]]] = None,
     ) -> None:
         self.live = live
         self.token = token
@@ -73,6 +75,7 @@ class ServiceContext:
         self.explain = explain
         self.update_feeds = update_feeds
         self.feed_status = feed_status or (lambda: [])
+        self.set_detection = set_detection
         self._explain_lock = threading.Lock()
         if self.db_path:
             self._init_explanations()
@@ -127,6 +130,7 @@ def _row_to_alert(row: sqlite3.Row) -> Dict[str, Any]:
         except ValueError:
             d[key] = [] if key == "tags" else {}
     d["kind"] = classify(d)
+    d["about"] = describe(d)
     return d
 
 
@@ -277,6 +281,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             ctx.notifier.enabled = bool(self._body().get("enabled", True))
             self._send_json({"enabled": ctx.notifier.enabled})
+        elif method == "POST" and path == "/api/detection":
+            if not ctx.set_detection:
+                self._error(HTTPStatus.NOT_IMPLEMENTED, "pausing detection is unavailable")
+                return
+            self._send_json(ctx.set_detection(bool(self._body().get("enabled", True))))
         else:
             self._error(HTTPStatus.NOT_FOUND, "not found")
 

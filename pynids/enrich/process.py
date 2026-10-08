@@ -8,7 +8,10 @@ so attribution adds almost nothing to per-packet cost.
 
 Notes
 -----
-* The snapshot runs on a background thread (default every 1.5 s).
+* The snapshot runs on a background thread and adapts to traffic: when
+  packets arrive for local ports it hasn't seen it re-snapshots within
+  ``min_interval`` (0.5 s); when nothing new appears it backs off to
+  ``max_interval`` (10 s), so an idle Mac pays almost nothing.
   Mappings are remembered for a few minutes after the socket closes, so
   short connections that close between snapshots are still attributed
   when later packets or alerts refer to them.  The very first packet of a
@@ -73,19 +76,28 @@ class ProcessResolver:
     Map (protocol, local port) → process details.
 
     Args:
-        refresh_interval: Seconds between socket-table snapshots.
-        memory_seconds:   How long a mapping survives after its socket closes.
-        snapshot:         Injectable snapshot function (tests).
+        min_interval:   Fastest re-snapshot, used while unknown ports show up.
+        max_interval:   Slowest re-snapshot, when every packet is attributed.
+        memory_seconds: How long a mapping survives after its socket closes.
+        snapshot:       Injectable snapshot function (tests).
     """
 
     def __init__(
         self,
-        refresh_interval: float = 1.5,
+        min_interval: float = 0.5,
+        max_interval: float = 10.0,
         memory_seconds: float = 300.0,
         snapshot=None,
     ) -> None:
-        self.refresh_interval = refresh_interval
+        self.min_interval = min_interval
+        self.max_interval = max_interval
         self.memory_seconds = memory_seconds
+        # Ports looked up but not found since the last snapshot, and ports a
+        # snapshot already failed to resolve (so they don't keep us busy).
+        self._missed: set = set()
+        self._unresolvable: set = set()
+        self._unresolvable_since = time.time()
+        self._wake = threading.Event()
         self._snapshot = snapshot or self._psutil_snapshot
         self._table: Dict[Tuple[str, int], Tuple[float, ProcInfo]] = {}
         self._proc_cache: Dict[Tuple[int, float], ProcInfo] = {}
@@ -109,10 +121,21 @@ class ProcessResolver:
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
 
     def _run(self) -> None:
-        while not self._stop.wait(self.refresh_interval):
+        last = time.monotonic()
+        while not self._stop.is_set():
+            # Sleep until a new unknown port shows up or the idle ceiling passes.
+            self._wake.wait(max(0.0, self.max_interval - (time.monotonic() - last)))
+            if self._stop.is_set():
+                return
+            since = time.monotonic() - last
+            if since < self.min_interval:
+                self._stop.wait(self.min_interval - since)
+            self._wake.clear()
             self.refresh()
+            last = time.monotonic()
 
     # ------------------------------------------------------------------
     # Lookup
@@ -121,8 +144,12 @@ class ProcessResolver:
     def lookup(self, proto: Optional[str], port: Optional[int]) -> Optional[ProcInfo]:
         if not proto or not port:
             return None
+        key = (proto, int(port))
         with self._lock:
-            hit = self._table.get((proto, int(port)))
+            hit = self._table.get(key)
+            if hit is None and key not in self._unresolvable and key not in self._missed:
+                self._missed.add(key)
+                self._wake.set()
         return hit[1] if hit else None
 
     def lookup_packet(self, meta: Dict[str, Any], local_ips: frozenset) -> Optional[ProcInfo]:
@@ -134,7 +161,9 @@ class ProcessResolver:
         # Outbound (or loopback): the initiator is the source side.
         if src in local_ips or _is_loopback(src):
             info = self.lookup(proto, meta.get("src_port"))
-            if info or not (dst in local_ips or _is_loopback(dst)):
+            # Between two local endpoints the destination belongs to the
+            # *other* program (the listener) — never blame it for the packet.
+            if info or dst in local_ips or _is_loopback(dst):
                 return info
         return self.lookup(proto, meta.get("dst_port"))
 
@@ -154,6 +183,15 @@ class ProcessResolver:
         with self._lock:
             for proto, port, info in rows:
                 self._table[(proto, port)] = (now, info)
+            # Whatever is still unknown after a fresh snapshot (connections
+            # that already closed, remote-only ports) won't resolve by
+            # retrying; stop waking up for it.
+            self._unresolvable |= {k for k in self._missed if k not in self._table}
+            self._missed.clear()
+            # Ephemeral ports get reused by new connections: retry them now and then.
+            if len(self._unresolvable) > 20_000 or now - self._unresolvable_since > 60:
+                self._unresolvable.clear()
+                self._unresolvable_since = now
             cutoff = now - self.memory_seconds
             stale = [k for k, (ts, _) in self._table.items() if ts < cutoff]
             for k in stale:
@@ -280,6 +318,16 @@ def nettop_flows():
 
 def _is_loopback(ip: Optional[str]) -> bool:
     return bool(ip) and (ip.startswith("127.") or ip == "::1")
+
+
+# Daemons shipped with macOS live on the read-only, SIP-protected system
+# volume.  /usr/bin and /bin are left out on purpose: curl, python, nc and
+# ssh there are general-purpose tools that malware can drive too.
+_SYSTEM_DAEMON_PREFIXES = ("/System/", "/usr/libexec/", "/usr/sbin/", "/sbin/")
+
+
+def is_system_daemon(exe: Optional[str]) -> bool:
+    return bool(exe) and exe.startswith(_SYSTEM_DAEMON_PREFIXES)
 
 
 def local_addresses() -> frozenset:

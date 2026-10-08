@@ -42,7 +42,7 @@ from ..intel import feeds as feeds_mod
 from ..intel.threat_intel import ThreatIntel
 from ..paths import (
     DEFAULT_API_HOST, DEFAULT_API_PORT, daemon_config_path, data_dir, db_path,
-    intel_dir, is_root, token_path,
+    intel_dir, is_root, paused_flag_path, token_path,
 )
 from ..sniffer import sniff_live
 from .api import ServiceContext, make_server
@@ -174,6 +174,11 @@ class Daemon:
         self.interfaces: List[str] = []
         self.recorder: Any = None
         self._restart_requested = False
+        # Set to end the current capture threads without stopping the daemon
+        # (detection paused from the menu bar app or dashboard).
+        self.capture_stop = threading.Event()
+        self._capture_lock = threading.Lock()
+        self.paused = paused_flag_path().exists()
 
         dcfg = self.cfg["daemon"]
         self.live = LiveState()
@@ -248,6 +253,7 @@ class Daemon:
             explain=explain,
             update_feeds=self.refresh_feeds,
             feed_status=lambda: feeds_mod.feed_status(intel_dir()),
+            set_detection=self.set_detection,
         )
         self.server = make_server(self.api_ctx, dcfg["api_host"], int(dcfg["api_port"]))
 
@@ -269,6 +275,7 @@ class Daemon:
             "attributed_sockets": self.processes.size if self.processes else 0,
             "geoip": bool(self.geo and self.geo.available),
             "hostnames_learned": len(self.enricher.hostnames),
+            "paused": self.paused,
             "notifications": bool(self.notifier and self.notifier.enabled),
             "auto_block": bool(self.cfg["response"].get("auto_block")),
             "blocking_available": self.blocker is not None,
@@ -288,16 +295,16 @@ class Daemon:
 
     # ------------------------------------------------------------------
 
-    def _capture(self, iface: str, record: bool) -> None:
+    def _capture(self, iface: str, record: bool, stop: threading.Event) -> None:
         raw_cb = self.recorder.write if (record and self.recorder) else None
-        while not self.stop_event.is_set():
+        while not stop.is_set():
             try:
                 sniff_live(
                     iface=iface,
                     engine_callback=self.engine.process_packet,
                     bpf_filter=self.cfg["daemon"].get("bpf") or None,
                     raw_callback=raw_cb,
-                    stop_event=self.stop_event,
+                    stop_event=stop,
                 )
             except Exception as exc:  # noqa: BLE001
                 msg = f"{time.strftime('%H:%M:%S')} capture on {iface} failed: {exc}"
@@ -306,7 +313,7 @@ class Daemon:
                 if "Permission" in str(exc) or "permission" in str(exc):
                     self.state = "needs-root"
                     return
-                self.stop_event.wait(5)
+                stop.wait(5)
 
     def _periodic(self) -> None:
         refresh_s = float(self.cfg["daemon"].get("feed_refresh_hours", 6)) * 3600
@@ -323,10 +330,53 @@ class Daemon:
                     logger.warning("Default interface changed %s → %s; restarting capture",
                                    self.interfaces[0], current)
                     self._restart_requested = True
+                    self.capture_stop.set()
                     self.stop_event.set()
             if refresh_s > 0 and tick % 300 == 0:
                 if feeds_mod.oldest_fetch_age(intel_dir()) > refresh_s:
                     threading.Thread(target=self.refresh_feeds, daemon=True).start()
+
+    def _start_capture(self) -> None:
+        dcfg = self.cfg["daemon"]
+        iface = dcfg["interface"]
+        if iface == "auto":
+            iface = default_interface() or "en0"
+        self.capture_stop = threading.Event()
+        stop = self.capture_stop
+        self.interfaces = [iface]
+        threading.Thread(target=self._capture, args=(iface, True, stop),
+                         name=f"capture-{iface}", daemon=True).start()
+        lo = dcfg.get("loopback_interface", "lo0")
+        if dcfg.get("loopback", True) and lo != iface:
+            self.interfaces.append(lo)
+            threading.Thread(target=self._capture, args=(lo, False, stop),
+                             name=f"capture-{lo}", daemon=True).start()
+        self.state = "running"
+
+    def set_detection(self, enabled: bool) -> Dict[str, Any]:
+        """Pause or resume capture + detection.  The choice survives restarts."""
+        with self._capture_lock:
+            flag = paused_flag_path()
+            if not enabled and not self.paused:
+                self.paused = True
+                flag.parent.mkdir(parents=True, exist_ok=True)
+                flag.write_text(f"{time.time()}\n", encoding="utf-8")
+                self.capture_stop.set()
+                self.interfaces = []
+                if self.notifier:
+                    self.notifier.discard_pending()
+                if self.state == "running":
+                    self.state = "paused"
+                logger.warning("Detection paused")
+                self.live.broadcast("detection", {"enabled": False})
+            elif enabled and self.paused:
+                self.paused = False
+                flag.unlink(missing_ok=True)
+                if self.state == "paused":
+                    self._start_capture()
+                logger.warning("Detection resumed")
+                self.live.broadcast("detection", {"enabled": True})
+        return {"enabled": not self.paused, "state": self.state}
 
     def run(self) -> int:
         dcfg = self.cfg["daemon"]
@@ -352,10 +402,6 @@ class Daemon:
             self.state = "needs-root"
             logger.error("Packet capture needs root — run with sudo or install the daemon")
         elif not self.options.no_capture:
-            iface = dcfg["interface"]
-            if iface == "auto":
-                iface = default_interface() or "en0"
-            self.interfaces = [iface]
             if dcfg.get("record_pcap"):
                 from .recorder import PcapRing
                 self.recorder = PcapRing(
@@ -363,18 +409,16 @@ class Daemon:
                     max_mb=int(dcfg.get("record_max_mb", 50)),
                     max_files=int(dcfg.get("record_files", 10)),
                 )
-            threading.Thread(target=self._capture, args=(iface, True),
-                             name=f"capture-{iface}", daemon=True).start()
-            lo = dcfg.get("loopback_interface", "lo0")
-            if dcfg.get("loopback", True) and lo != iface:
-                self.interfaces.append(lo)
-                threading.Thread(target=self._capture, args=(lo, False),
-                                 name=f"capture-{lo}", daemon=True).start()
-            self.state = "running"
+            if self.paused:
+                self.state = "paused"
+                logger.info("Detection is paused — not capturing until resumed")
+            else:
+                self._start_capture()
         else:
             self.state = "idle"
 
         def _terminate(signum, frame):  # noqa: ARG001
+            self.capture_stop.set()
             self.stop_event.set()
 
         signal.signal(signal.SIGTERM, _terminate)

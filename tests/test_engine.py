@@ -69,7 +69,8 @@ class TestEngineAnomalyPipeline:
         engine, collector = _build_engine(config=config)
         for i in range(10):
             engine.process_packet(
-                make_meta(src_ip="attacker", dst_ip="server", dst_port=22, timestamp=float(i))
+                make_meta(src_ip="attacker", dst_ip="server", src_port=40000 + i, dst_port=22,
+                          tcp_flags=0x02, timestamp=float(i))
             )
         bf_alerts = [a for a in collector.alerts if "brute_force" in (a.tags or [])]
         assert len(bf_alerts) >= 1

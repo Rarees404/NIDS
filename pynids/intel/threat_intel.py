@@ -79,6 +79,8 @@ class ThreatIntel:
         # {ip_version: {prefix_len: {network_int: ThreatEntry}}}
         self._ip_index: Dict[int, Dict[int, Dict[int, ThreatEntry]]] = {4: {}, 6: {}}
         self._ip_count = 0
+        # ip string → lookup result; flushed whenever the index changes.
+        self._ip_cache: Dict[str, Optional[ThreatEntry]] = {}
         self._domain_exact: Dict[str, ThreatEntry] = {}
         self._domain_suffix: Dict[str, ThreatEntry] = {}
 
@@ -103,6 +105,16 @@ class ThreatIntel:
 
         Supports both exact host matches and CIDR range lookups.
         """
+        cache = self._ip_cache
+        if ip in cache:
+            return cache[ip]
+        entry = self._check_ip_uncached(ip)
+        if len(cache) >= 65536:
+            cache.clear()
+        cache[ip] = entry
+        return entry
+
+    def _check_ip_uncached(self, ip: str) -> Optional[ThreatEntry]:
         try:
             addr = ipaddress.ip_address(ip)
         except ValueError:
@@ -166,6 +178,7 @@ class ThreatIntel:
             logger.warning("ThreatIntel: invalid CIDR %r — %s", cidr, exc)
             return False
         bucket = self._ip_index[network.version].setdefault(network.prefixlen, {})
+        self._ip_cache.clear()
         key = int(network.network_address)
         if key not in bucket:
             self._ip_count += 1

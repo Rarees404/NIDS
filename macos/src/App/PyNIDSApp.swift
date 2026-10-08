@@ -40,6 +40,7 @@ final class Monitor: ObservableObject {
     @Published var alerts: [AlertItem] = []
     @Published var error: String?
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
+    @Published var busy = false
 
     private var timer: Timer?
     private var lastEventTotal = -1
@@ -56,6 +57,8 @@ final class Monitor: ObservableObject {
     /// High-severity alerts in the last hour — what the menu bar badge shows.
     var threats: Int { snapshot?.recentHigh ?? 0 }
     var needsRoot: Bool { summary?.status.state == "needs-root" }
+    var paused: Bool { summary?.status.paused ?? false }
+    var daemonInstalled: Bool { FileManager.default.fileExists(atPath: Daemon.plist) }
 
     func refresh() {
         Task {
@@ -95,6 +98,77 @@ final class Monitor: ObservableObject {
         }
     }
 
+    /// Stop: the daemon keeps running but stops capturing, so nothing is
+    /// detected and no alerts pop up.  Persists across restarts until resumed.
+    func setDetection(_ enabled: Bool) {
+        Task {
+            do {
+                _ = try await PyNIDSClient.request("/api/detection", method: "POST", body: ["enabled": enabled])
+            } catch {
+                self.error = error.localizedDescription
+            }
+            refresh()
+        }
+    }
+
+    /// Quit: unload the root daemon (and keep launchd from restarting it at
+    /// boot), then quit the menu bar app.  Needs an administrator password.
+    func quitEverything() {
+        let alert = NSAlert()
+        alert.messageText = "Quit PyNIDS completely?"
+        alert.informativeText = "This shuts down the background daemon and the menu bar app. "
+            + "Nothing will be monitored until you open PyNIDS again and start it."
+        alert.addButton(withTitle: "Quit PyNIDS")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        runPrivileged("/bin/launchctl disable \(Daemon.target); "
+                      + "/bin/launchctl bootout \(Daemon.target) || true") { ok in
+            if ok { NSApp.terminate(nil) }
+        }
+    }
+
+    /// Start the daemon again after a Quit.
+    func startDaemon() {
+        runPrivileged("/bin/launchctl enable \(Daemon.target); "
+                      + "/bin/launchctl bootstrap system '\(Daemon.plist)' || "
+                      + "/bin/launchctl kickstart \(Daemon.target)") { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.refresh() }
+        }
+    }
+
+    /// Run a shell command as root through the standard macOS password prompt.
+    private func runPrivileged(_ command: String, completion: @escaping @MainActor (Bool) -> Void) {
+        busy = true
+        let script = "do shell script \"\(command)\" with administrator privileges"
+        Task.detached {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            proc.arguments = ["-e", script]
+            let errPipe = Pipe()
+            proc.standardError = errPipe
+            var ok = false
+            var message = ""
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                ok = proc.terminationStatus == 0
+                message = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            } catch {
+                message = error.localizedDescription
+            }
+            let (succeeded, output) = (ok, message)
+            await MainActor.run {
+                self.busy = false
+                // -128 is the user pressing Cancel on the password prompt.
+                if !succeeded && !output.contains("-128") {
+                    self.error = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                completion(succeeded)
+            }
+        }
+    }
+
     func toggleLaunchAtLogin() {
         do {
             if SMAppService.mainApp.status == .enabled {
@@ -113,20 +187,27 @@ final class Monitor: ObservableObject {
     }
 }
 
+enum Daemon {
+    static let label = "com.pynids.daemon"
+    static let target = "system/\(label)"
+    static let plist = "/Library/LaunchDaemons/\(label).plist"
+}
+
 // MARK: - Menu bar icon
 
 struct MenuBarLabel: View {
     @ObservedObject var monitor: Monitor
 
     var body: some View {
-        let symbol = monitor.summary == nil ? "shield.slash" : monitor.level.symbol
+        let symbol = monitor.summary == nil ? "shield.slash"
+            : monitor.paused ? "pause.circle" : monitor.level.symbol
         HStack(spacing: 3) {
             Image(systemName: symbol)
-            if monitor.threats > 0 {
+            if monitor.threats > 0 && !monitor.paused {
                 Text("\(monitor.threats)").monospacedDigit()
             }
         }
-        .accessibilityLabel("PyNIDS: \(monitor.summary == nil ? "offline" : monitor.level.title)")
+        .accessibilityLabel("PyNIDS: \(monitor.summary == nil ? "offline" : monitor.paused ? "stopped" : monitor.level.title)")
     }
 }
 
@@ -139,7 +220,9 @@ struct MenuContent: View {
         VStack(alignment: .leading, spacing: 12) {
             header
             if let s = monitor.summary {
-                if monitor.needsRoot {
+                if monitor.paused {
+                    Notice(text: "Detection is stopped — no traffic is analysed and no alerts are shown.")
+                } else if monitor.needsRoot {
                     Notice(text: "Packet capture needs root. Run: sudo pynids daemon install")
                 }
                 stats(s)
@@ -158,9 +241,10 @@ struct MenuContent: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: monitor.summary == nil ? "shield.slash" : monitor.level.symbol)
+            Image(systemName: monitor.summary == nil ? "shield.slash"
+                  : monitor.paused ? "pause.circle" : monitor.level.symbol)
                 .font(.system(size: 26))
-                .foregroundStyle(monitor.summary == nil ? Color.secondary : monitor.level.color)
+                .foregroundStyle(monitor.summary == nil || monitor.paused ? Color.secondary : monitor.level.color)
             VStack(alignment: .leading, spacing: 1) {
                 Text("PyNIDS").font(.headline)
                 Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -169,11 +253,38 @@ struct MenuContent: View {
             Button { monitor.refresh() } label: { Image(systemName: "arrow.clockwise") }
                 .buttonStyle(.borderless)
                 .help("Refresh")
+            powerMenu
         }
+    }
+
+    private var powerMenu: some View {
+        Menu {
+            if monitor.summary != nil {
+                if monitor.paused {
+                    Button("Resume Detection") { monitor.setDetection(true) }
+                } else {
+                    Button("Stop Detection") { monitor.setDetection(false) }
+                }
+            } else if monitor.daemonInstalled {
+                Button("Start PyNIDS…") { monitor.startDaemon() }
+            }
+            Divider()
+            Button("Quit PyNIDS Completely…") { monitor.quitEverything() }
+                .disabled(!monitor.daemonInstalled)
+            Button("Quit Menu Bar App Only") { NSApp.terminate(nil) }
+        } label: {
+            Image(systemName: "power")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(monitor.busy)
+        .help("Stop or quit PyNIDS")
     }
 
     private var subtitle: String {
         guard let s = monitor.summary else { return "Daemon offline" }
+        if monitor.paused { return "Stopped · not detecting" }
         let ifaces = (s.status.interfaces ?? []).joined(separator: " + ")
         return "\(monitor.level.title) · \(ifaces.isEmpty ? "—" : ifaces) · \(Format.bits(s.rates.bps))"
     }
@@ -260,10 +371,30 @@ struct MenuContent: View {
         }
     }
 
+    @ViewBuilder
     private var offline: some View {
+        if monitor.daemonInstalled {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("PyNIDS is shut down.").font(.callout)
+                Button {
+                    monitor.startDaemon()
+                } label: {
+                    Label("Start PyNIDS", systemImage: "play.fill")
+                }
+                .disabled(monitor.busy)
+                if let error = monitor.error, !error.contains("not running") {
+                    Text(error).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                }
+            }
+        } else {
+            notInstalled
+        }
+    }
+
+    private var notInstalled: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("The PyNIDS daemon isn't running.").font(.callout)
-            Text("Start it in Terminal:").font(.caption).foregroundStyle(.secondary)
+            Text("The PyNIDS daemon isn't installed.").font(.callout)
+            Text("Install it in Terminal:").font(.caption).foregroundStyle(.secondary)
             Text("sudo pynids daemon install")
                 .font(.system(.caption, design: .monospaced))
                 .textSelection(.enabled)
@@ -296,8 +427,6 @@ struct MenuContent: View {
                 Toggle("Launch at login", isOn: Binding(
                     get: { monitor.launchAtLogin },
                     set: { _ in monitor.toggleLaunchAtLogin() }))
-                Divider()
-                Button("Quit PyNIDS menu") { NSApp.terminate(nil) }
             } label: {
                 Image(systemName: "gearshape")
             }
@@ -350,11 +479,14 @@ struct AlertRow: View {
                 .foregroundStyle(Severity.color(alert.severity))
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
-                Text(alert.message).font(.callout).lineLimit(2)
-                Text([Severity.label(alert.severity), alert.context?.app, Format.ago(alert.timestamp)]
+                Text(alert.headline).font(.callout).lineLimit(2)
+                Text([alert.about?.verdict ?? Severity.label(alert.severity), alert.context?.app,
+                      Format.ago(alert.timestamp)]
                     .compactMap { $0 }.joined(separator: " · "))
                     .font(.caption2).foregroundStyle(.secondary)
             }
+            .help(alert.about.map { "\($0.meaning)\n\nWhat to do: " + ($0.nextSteps ?? []).joined(separator: " ") }
+                  ?? alert.message)
             Spacer(minLength: 0)
             if hovering, ["HIGH", "CRITICAL"].contains(alert.severity),
                let ip = alert.context?.remoteIp ?? alert.dstIp {

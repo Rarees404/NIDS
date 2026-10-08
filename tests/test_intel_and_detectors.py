@@ -130,8 +130,16 @@ class TestFalsePositiveFixes:
         det = LocalhostProbeDetector()
         probe = make_meta(src_ip="192.168.1.23", dst_ip="192.168.1.50", src_port=51000,
                           dst_port=9999, protocol="udp")
-        assert len(list(det.analyze(probe, {}, None))) == 1
-        assert list(det.analyze(probe, {}, None)) == []
+        chrome = {"context": {"app": "Google Chrome"}}
+        assert len(list(det.analyze(probe, chrome, None))) == 1
+        assert list(det.analyze(probe, chrome, None)) == []
+
+    def test_lan_broadcast_discovery_is_not_a_probe(self):
+        det = LocalhostProbeDetector()
+        for dst in ("192.168.0.255", "255.255.255.255"):
+            probe = make_meta(src_ip="192.168.0.202", dst_ip=dst, src_port=51000,
+                              dst_port=32108, protocol="udp")
+            assert list(det.analyze(probe, {}, None)) == []
 
     def test_bulk_transfer_is_not_beaconing(self):
         det = BeaconingDetector(min_connections=6)

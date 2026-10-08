@@ -216,32 +216,53 @@ class LocalhostProbeDetector(BaseDetector):
     Flag connections directed at the user's own loopback or private-LAN
     space — the classic "website is port-scanning my machine" pattern.
 
-    The detector treats every TCP SYN to 127.0.0.0/8 or ``::1`` as
-    interesting, plus connections to RFC1918 ranges on uncommon ports.
-    Repeated probes from the same source against many ports are
-    upgraded to a HIGH-severity *fingerprinting* alert.
+    Who opened the connection decides how loud the alert is:
+
+    * a **browser** (confirmed by process attribution) → HIGH for loopback,
+      MEDIUM for the LAN; a burst across many ports → CRITICAL scan alert
+    * an **unidentified** process (the connection closed before the socket
+      table was sampled) → MEDIUM, and repeats are rate-limited
+    * a **native app** → silent unless it sweeps many ports
+
+    Local IPC is ignored: ephemeral-port pairs (a program connecting to a
+    port it just opened next door), PyNIDS's own API/dashboard port, and
+    UDP from anything but a browser (web pages cannot send raw UDP; the
+    LAN broadcasts and discovery chatter this would otherwise flag come
+    from the OS and native apps).
     """
 
     _FLAG_SYN = 0x02
     _FLAG_ACK = 0x10
+    _EPHEMERAL = 49152
 
     def __init__(
         self,
         scan_threshold: int = 5,
         scan_window: float = 30.0,
+        ignore_ports: Iterable[int] = (),
+        repeat_cooldown: float = 3600.0,
     ) -> None:
         self.scan_threshold = scan_threshold
         self.scan_window = scan_window
-        # (src_ip, dst_ip) -> deque[(timestamp, dst_port)]
+        self.ignore_ports = frozenset(int(p) for p in ignore_ports if p)
+        self.repeat_cooldown = repeat_cooldown
+        # (src_ip, dst_ip, app) -> deque[(timestamp, dst_port)]
         self._history: Dict[Tuple[str, str, Optional[str]], Deque[Tuple[float, int]]] = defaultdict(
             lambda: deque(maxlen=64)
         )
         self._reported: Set[Tuple[str, str, Optional[str]]] = set()
         self._udp_seen: Set[Tuple[str, str, int]] = set()
+        # (app, dst_ip, dst_port) -> [last_alert_ts, attempts_since]
+        self._recent: Dict[Tuple[Optional[str], str, int], list] = {}
 
     @property
     def name(self) -> str:
         return "stealth_localhost"
+
+    def _is_local_ipc(self, src_port: int, dst_port: int) -> bool:
+        """A process connecting to a socket it opened a moment earlier."""
+        return (src_port >= self._EPHEMERAL and dst_port >= self._EPHEMERAL
+                and abs(src_port - dst_port) <= 4)
 
     def analyze(
         self,
@@ -259,12 +280,19 @@ class LocalhostProbeDetector(BaseDetector):
 
         proto = meta.get("protocol")
         dst_port = meta.get("dst_port") or 0
+        src_port = meta.get("src_port") or 0
         src_ip = meta.get("src_ip")
 
         # A probe originates on this machine (or the LAN).  Replies from the
         # internet to our own private address are ordinary return traffic.
         if classify_ip(src_ip) not in ("loopback", "private", "link_local"):
             return
+        if dst_port in self.ignore_ports:
+            return  # PyNIDS's own API / dashboard
+
+        context = layer7.get("context") or {}
+        app = context.get("app")
+        browser = bool(app) and is_browser_app(app)
 
         # Only look at the start of a connection, not every keep-alive packet.
         if proto == "tcp":
@@ -274,11 +302,15 @@ class LocalhostProbeDetector(BaseDetector):
                 return
             if dst_port in _LOCAL_QUIET_TCP_PORTS and kind != "loopback":
                 return
+            if not browser and self._is_local_ipc(src_port, dst_port):
+                return
         elif proto == "udp":
-            if dst_port in _LOCAL_QUIET_UDP_PORTS:
+            if not browser:
+                return
+            if dst_port in _LOCAL_QUIET_UDP_PORTS or _is_broadcast(dst_ip):
                 return
             # Replies from local services (the router's DNS, NTP, SSDP …).
-            if (meta.get("src_port") or 0) in _LOCAL_SERVICE_SRC_PORTS:
+            if src_port in _LOCAL_SERVICE_SRC_PORTS:
                 return
             # UDP has no handshake: report each (src, dst, port) only once.
             udp_key = (src_ip, dst_ip, dst_port)
@@ -290,44 +322,53 @@ class LocalhostProbeDetector(BaseDetector):
         else:
             return
 
-        # Who opened the connection (set by the engine's enricher, if any).
-        app = (layer7.get("context") or {}).get("app")
-        browser = app is None or is_browser_app(app)
-        who = f"{app} ({src_ip})" if app else src_ip
+        now = meta.get("timestamp", time.time())
+        target_app = context.get("target_app")
+        target = f"{dst_ip}:{dst_port}" + (f" ({target_app})" if target_app else "")
 
-        # Single-probe events are reported for browsers (and unknown owners):
+        # Single probes are reported for browsers and unidentified owners:
         # native apps talk to their own localhost helpers all the time.
-        sev = Severity.HIGH if kind == "loopback" else Severity.MEDIUM
-        if browser:
-            yield Alert(
-            alert_type=AlertType.BEHAVIORAL,
-            severity=sev,
-                message=(
-                    f"{proto.upper()} probe to {kind} address {dst_ip}:{dst_port} "
-                    f"from {who} (browser/local-software fingerprinting?)"
-                ),
-                src_ip=src_ip,
-                dst_ip=dst_ip,
-                src_port=meta.get("src_port"),
-                dst_port=dst_port,
-                protocol=proto,
-                rule_id="STEALTH-LOCALHOST-PROBE",
-                mitre_technique="T1046",
-                tags=["localhost_probe", "stealth", "fingerprint", kind],
-                confidence=0.85 if kind == "loopback" else 0.65,
-                evidence={
-                    "destination_class": kind,
-                    "destination_port": dst_port,
-                    "transport": proto,
-                },
-            )
+        if browser or app is None:
+            repeat = self._repeat(app, dst_ip, dst_port, now)
+            if repeat is not None:
+                if browser:
+                    sev = Severity.HIGH if kind == "loopback" else Severity.MEDIUM
+                    message = (f"{app} connected to {target} on your {_PLACE[kind]} — "
+                               f"websites use this to fingerprint locally running software")
+                else:
+                    sev = Severity.MEDIUM if kind == "loopback" else Severity.LOW
+                    message = (f"Unidentified process connected to {target} on your "
+                               f"{_PLACE[kind]} (it closed too fast to identify)")
+                yield Alert(
+                    alert_type=AlertType.BEHAVIORAL,
+                    severity=sev,
+                    message=message,
+                    src_ip=src_ip,
+                    dst_ip=dst_ip,
+                    src_port=src_port,
+                    dst_port=dst_port,
+                    protocol=proto,
+                    rule_id="STEALTH-LOCALHOST-PROBE",
+                    mitre_technique="T1046",
+                    tags=["localhost_probe", "stealth", "fingerprint", kind],
+                    confidence=(0.85 if kind == "loopback" else 0.65) if browser else 0.4,
+                    evidence={
+                        "destination_class": kind,
+                        "destination_port": dst_port,
+                        "transport": proto,
+                        "initiator": "browser" if browser else "unidentified",
+                        "target_app": target_app,
+                        "repeats_since_last_alert": repeat,
+                    },
+                )
 
         # Track the per-(source, target, app) port spread for a scan alert.
         # Keying on the app matters on loopback, where every local program
-        # shares 127.0.0.1 as both source and destination.
-        if not src_ip:
+        # shares 127.0.0.1 as both source and destination.  Outside browsers,
+        # ephemeral destinations are dynamically assigned local services,
+        # not the well-known ports a fingerprinting script sweeps.
+        if not src_ip or (not browser and dst_port >= self._EPHEMERAL):
             return
-        now = meta.get("timestamp", time.time())
         key = (src_ip, dst_ip, app)
         hist = self._history[key]
         # Expire stale samples.
@@ -337,14 +378,15 @@ class LocalhostProbeDetector(BaseDetector):
         unique_ports = {p for _, p in hist}
         if len(unique_ports) >= self.scan_threshold and key not in self._reported:
             self._reported.add(key)
+            who = app or "An unidentified process"
             yield Alert(
                 alert_type=AlertType.BEHAVIORAL,
                 severity=Severity.CRITICAL if browser else Severity.HIGH,
                 message=(
-                    f"Localhost port scan: {who} probed {len(unique_ports)} "
-                    f"ports on {dst_ip} in {self.scan_window:.0f}s — "
-                    + ("likely browser-side fingerprinting" if browser
-                       else "unusual for a local app")
+                    f"Port scan of your {_PLACE[kind]}: {who} tried {len(unique_ports)} "
+                    f"different ports on {dst_ip} within {self.scan_window:.0f}s — "
+                    + ("a web page is probing which software you run" if browser
+                       else "unusual for a normal app")
                 ),
                 src_ip=src_ip,
                 dst_ip=dst_ip,
@@ -352,13 +394,37 @@ class LocalhostProbeDetector(BaseDetector):
                 rule_id="STEALTH-LOCALHOST-SCAN",
                 mitre_technique="T1046",
                 tags=["localhost_scan", "stealth", "fingerprint"],
-                confidence=0.95,
+                confidence=0.95 if browser else 0.7,
                 evidence={
                     "ports_probed": sorted(unique_ports),
                     "port_count": len(unique_ports),
                     "window_seconds": self.scan_window,
+                    "initiator": "browser" if browser else (app or "unidentified"),
                 },
             )
+
+    def _repeat(self, app: Optional[str], dst_ip: str, dst_port: int, now: float) -> Optional[int]:
+        """
+        Rate-limit repeats of the same probe.  Returns how many attempts were
+        suppressed since the last alert, or None while still cooling down.
+        """
+        key = (app, dst_ip, dst_port)
+        entry = self._recent.get(key)
+        if entry is not None and now - entry[0] < self.repeat_cooldown:
+            entry[1] += 1
+            return None
+        suppressed = entry[1] if entry else 0
+        if len(self._recent) > 20_000:
+            self._recent.clear()
+        self._recent[key] = [now, 0]
+        return suppressed
+
+
+_PLACE = {"loopback": "own Mac (localhost)", "private": "local network", "link_local": "local network"}
+
+
+def _is_broadcast(ip: str) -> bool:
+    return ip == "255.255.255.255" or ip.endswith(".255") or classify_ip(ip) == "multicast"
 
 
 # ---------------------------------------------------------------------------
@@ -862,6 +928,29 @@ class DohDetector(BaseDetector):
 
         method = ""
         resolver = ""
+        relay = _private_relay_host(sni) or _private_relay_host(dns_name)
+        if relay:
+            key = (src, "icloud-private-relay", "relay")
+            if key in self._reported:
+                return
+            self._reported.add(key)
+            yield Alert(
+                alert_type=AlertType.BEHAVIORAL,
+                severity=Severity.LOW,
+                message=(f"iCloud Private Relay in use ({relay}) — Safari traffic and DNS go through "
+                         f"Apple's relay, so websites and this tool see less of it"),
+                src_ip=src,
+                dst_ip=dst,
+                src_port=meta.get("src_port"),
+                dst_port=dst_port,
+                protocol=proto,
+                rule_id="STEALTH-ENCRYPTED-DNS",
+                mitre_technique="T1090",
+                tags=["doh", "encrypted_dns", "private_relay", "privacy"],
+                confidence=0.95,
+                evidence={"method": "iCloud Private Relay", "resolver": relay, "resolver_ip": dst},
+            )
+            return
         if sni and sni.lower().rstrip(".") in self.hosts:
             method = "DoH (DNS-over-HTTPS)" if dst_port != 853 else "DoT (DNS-over-TLS)"
             resolver = sni.lower()
@@ -905,3 +994,15 @@ class DohDetector(BaseDetector):
                 "sni": sni,
             },
         )
+
+
+_PRIVATE_RELAY_SUFFIXES = ("mask.icloud.com", "mask-api.icloud.com", "mask-h2.icloud.com",
+                           "mask-t.icloud.com", "mask-canary.icloud.com")
+
+
+def _private_relay_host(name: Optional[str]) -> Optional[str]:
+    """Apple's iCloud Private Relay ingress hosts (a proxy, not a DoH resolver)."""
+    if not name:
+        return None
+    host = name.lower().rstrip(".")
+    return host if host.endswith(_PRIVATE_RELAY_SUFFIXES) else None

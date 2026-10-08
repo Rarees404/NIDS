@@ -335,6 +335,8 @@ class DetectionEngine:
                 LocalhostProbeDetector(
                     scan_threshold=int(stealth_cfg.get("scan_threshold", 5)),
                     scan_window=float(stealth_cfg.get("scan_window", 30.0)),
+                    # The dashboard / menu bar app talking to our own API.
+                    ignore_ports=[(config.get("daemon") or {}).get("api_port") or 0],
                 )
             )
             self._detectors.append(QuicHttp3Detector())

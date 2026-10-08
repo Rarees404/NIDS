@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 
 from .geo import GeoResolver
 from .hostnames import HostnameCache
-from .process import ProcessResolver, local_addresses
+from .process import ProcessResolver, is_system_daemon, local_addresses
 
 __all__ = ["Enricher", "GeoResolver", "HostnameCache", "ProcessResolver"]
 
@@ -78,6 +78,13 @@ class Enricher:
                 ctx["app"] = proc["app"]
                 ctx["process"] = proc["process"]
                 ctx["pid"] = proc["pid"]
+                if is_system_daemon(proc.get("exe")):
+                    ctx["system_process"] = True
+            if direction == "local":
+                # Which program owns the port being connected to.
+                target = self.processes.lookup(meta.get("protocol"), meta.get("dst_port"))
+                if target and target is not proc:
+                    ctx["target_app"] = target["app"]
 
         host = self.hostnames.lookup(remote)
         if host:

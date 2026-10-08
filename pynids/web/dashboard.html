@@ -291,6 +291,19 @@ pre.json { background: var(--surface-2); border: 1px solid var(--border); border
 .btn svg { width: 15px; height: 15px; }
 .ai-box { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; background: var(--surface-2); display: none; }
 .ai-box.show { display: block; }
+.guide { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; background: var(--surface-2); }
+.guide .summary { font-weight: 600; margin: 8px 0 6px; }
+.guide p { margin: 0 0 10px; color: var(--ink-2); line-height: 1.5; }
+.guide ul { margin: 4px 0 0; padding-left: 18px; color: var(--ink-2); line-height: 1.5; }
+.guide li + li { margin-top: 4px; }
+.guide h5 { margin: 12px 0 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.verdict-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border); }
+.verdict-pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--vcolor, var(--muted)); }
+.verdict-pill[data-v="Usually harmless"] { --vcolor: var(--good); }
+.verdict-pill[data-v="Privacy"] { --vcolor: var(--accent); }
+.verdict-pill[data-v="Worth checking"] { --vcolor: var(--warning); }
+.verdict-pill[data-v="Act now"] { --vcolor: var(--critical); }
+.guide code { font-size: 12px; background: var(--surface); padding: 1px 4px; border-radius: 4px; }
 .ai-box p { margin: 0 0 8px; }
 .ai-box .verdict { display: inline-flex; align-items: center; gap: 6px; font-weight: 640; margin-bottom: 8px; }
 .ai-box .foot { color: var(--muted); font-size: 11.5px; margin-top: 8px; }
@@ -872,6 +885,7 @@ async function loadAlerts() {
 function eventRow(a, isNew) {
   const ctx = a.context || {};
   const meta = el("div", { class: "meta" });
+  if (a.about) meta.append(el("span", { class: "verdict-pill", "data-v": a.about.verdict, text: a.about.verdict }));
   if (ctx.app) meta.append(el("span", { class: "chip", text: ctx.app }));
   if (ctx.remote_host) meta.append(el("span", { class: "chip", title: ctx.remote_host, text: ctx.remote_host }));
   if (ctx.country) meta.append(el("span", { class: "chip", text: ctx.country }));
@@ -879,7 +893,7 @@ function eventRow(a, isNew) {
   const row = el("div", { class: "event" + (isNew ? " new" : ""), tabindex: 0, role: "button" },
     el("time", { text: fmtTime(a.timestamp) }),
     el("div", { class: "sevcol" }, sevBadge(a.severity)),
-    el("div", {}, el("div", { class: "msg", text: a.message }), meta.childNodes.length ? meta : null),
+    el("div", {}, el("div", { class: "msg", text: (a.about && a.about.summary) || a.message, title: a.message }), meta.childNodes.length ? meta : null),
     el("div", { class: "kind", text: KIND_LABELS[a.kind] || a.kind }));
   row.addEventListener("click", () => openDrawer(a));
   row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDrawer(a); } });
@@ -933,6 +947,29 @@ function blockableIp(a) {
   const ctx = a.context || {};
   return ctx.remote_ip || (ctx.direction === "inbound" ? a.src_ip : a.dst_ip) || a.src_ip;
 }
+// Plain-English explanation computed by the daemon (pynids/alerts/guide.py).
+function inlineCode(text) {
+  // `command` → <code>; everything else stays plain text.
+  return String(text).split(/(`[^`]+`)/).map(part =>
+    part.startsWith("`") && part.endsWith("`") ? el("code", { text: part.slice(1, -1) }) : part);
+}
+function guideBox(g) {
+  if (!g) return el("div");
+  const box = el("section", { class: "guide", "aria-label": "What this means" },
+    el("span", { class: "verdict-pill", "data-v": g.verdict, text: g.verdict }),
+    el("div", { class: "summary", text: g.summary }),
+    el("p", { text: g.meaning }));
+  if (g.next_steps && g.next_steps.length) {
+    box.append(el("h5", { text: "What to do" }),
+      el("ul", {}, ...g.next_steps.map(t => el("li", {}, ...inlineCode(t)))));
+  }
+  if (g.details && g.details.length) {
+    const dl = el("dl", { class: "kv", style: "margin-top:10px" });
+    for (const [k, v] of g.details) dl.append(el("dt", { text: k }), el("dd", { text: String(v) }));
+    box.append(el("h5", { text: "Details" }), dl);
+  }
+  return box;
+}
 function openDrawer(a) {
   state.openAlert = a;
   const ctx = a.context || {};
@@ -980,11 +1017,14 @@ function openDrawer(a) {
   });
 
   $("drawerBody").replaceChildren(
-    kv,
+    guideBox(a.about),
     el("div", { class: "actions" }, explainBtn, blockBtn),
     aiBox,
-    el("h4", { text: "Evidence" }),
-    el("pre", { class: "json", text: JSON.stringify(a.evidence || {}, null, 2) }),
+    el("h4", { text: "Connection" }),
+    kv,
+    el("details", { class: "datatable" },
+      el("summary", { text: "Raw evidence (JSON)" }),
+      el("pre", { class: "json", text: JSON.stringify(a.evidence || {}, null, 2) })),
   );
   $("drawer").classList.add("show"); $("drawer").setAttribute("aria-hidden", "false"); $("scrim").classList.add("show");
   $("drawerClose").focus();

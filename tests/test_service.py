@@ -1,6 +1,7 @@
 """Enrichment, response (pf / notifications), storage, live state, API, Claude module."""
 from __future__ import annotations
 
+import time
 import json
 import sqlite3
 import threading
@@ -291,3 +292,65 @@ class TestExplain:
 
         with pytest.raises(ai.ExplainError):
             ai.explain_alert(alert().to_dict(), client=SimpleNamespace(beta=SimpleNamespace(messages=Refusing())))
+
+
+def test_detection_toggle_route():
+    calls = []
+    ctx = ServiceContext(live=LiveState(), token="t0ken",
+                         set_detection=lambda on: calls.append(on) or {"enabled": on})
+    server = make_server(ctx, "127.0.0.1", 0)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        assert call(port, "/api/detection", token=None, method="POST", body={"enabled": False})[0] == 401
+        assert call(port, "/api/detection", method="POST", body={"enabled": False}) == (200, {"enabled": False})
+        assert call(port, "/api/detection", method="POST", body={"enabled": True}) == (200, {"enabled": True})
+        assert calls == [False, True]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_loopback_attribution_never_blames_the_listener():
+    from pynids.enrich import Enricher
+    from pynids.enrich.process import ProcessResolver
+    rows = [("tcp", 8787, {"pid": 1, "process": "Python", "app": "Python", "exe": "/x/python", "user": "root"}),
+            ("tcp", 52000, {"pid": 2, "process": "trustd", "app": "trustd", "exe": "/usr/libexec/trustd", "user": "root"})]
+    res = ProcessResolver(snapshot=lambda: rows)
+    res.refresh()
+    enr = Enricher(processes=res, local_ips=frozenset({"127.0.0.1", "10.0.0.5"}))
+    # Client port unknown (connection already closed): no app, but the target is named.
+    ctx = enr.packet_context({"src_ip": "127.0.0.1", "dst_ip": "127.0.0.1", "protocol": "tcp",
+                              "src_port": 61000, "dst_port": 8787}, {})
+    assert "app" not in ctx and ctx["target_app"] == "Python"
+    ctx = enr.packet_context({"src_ip": "10.0.0.5", "dst_ip": "17.253.53.146", "protocol": "tcp",
+                              "src_port": 52000, "dst_port": 443}, {})
+    assert ctx["app"] == "trustd" and ctx["system_process"] is True
+
+
+def test_process_resolver_refreshes_on_unknown_ports_and_idles_otherwise():
+    from pynids.enrich.process import ProcessResolver
+    calls = []
+    rows = [("tcp", 50001, {"pid": 7, "process": "curl", "app": "curl", "exe": "", "user": ""})]
+
+    def snap():
+        calls.append(time.monotonic())
+        return rows if len(calls) > 1 else []
+
+    res = ProcessResolver(min_interval=0.05, max_interval=30, snapshot=snap).start()
+    try:
+        time.sleep(0.2)
+        assert len(calls) == 1          # idle: only the initial snapshot
+        assert res.lookup("tcp", 50001) is None
+        deadline = time.monotonic() + 2
+        while res.lookup("tcp", 50001) is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert res.lookup("tcp", 50001)["app"] == "curl"   # unknown port woke it up
+        n = len(calls)
+        res.lookup("tcp", 60000)        # resolves to nothing …
+        time.sleep(0.3)
+        res.lookup("tcp", 60000)        # … and doesn't keep waking the thread
+        time.sleep(0.3)
+        assert len(calls) <= n + 1
+    finally:
+        res.stop()

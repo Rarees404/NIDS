@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import pytest
+from pynids.alerts.model import Severity
 from pynids.detection.anomaly import AnomalyDetector, PortScanDetector, BruteForceDetector
 from pynids.alerts.model import AlertType
 from tests.conftest import make_meta
@@ -105,12 +106,37 @@ class TestBruteForceDetector:
         ts = time.time()
         alerts = []
         for i in range(10):
-            meta = make_meta(src_ip="attacker", dst_ip="server", dst_port=22, timestamp=ts + i * 0.5)
+            meta = make_meta(src_ip="attacker", dst_ip="server", src_port=40000 + i, dst_port=22,
+                             tcp_flags=0x02, timestamp=ts + i * 0.5)
             alerts.extend(det.analyze(meta, {}, None))
 
         bf_alerts = [a for a in alerts if "brute_force" in a.tags]
         assert len(bf_alerts) == 1
         assert bf_alerts[0].mitre_technique == "T1110"
+        assert bf_alerts[0].severity == Severity.HIGH
+
+    def test_packets_inside_one_session_are_not_attempts(self):
+        det = BruteForceDetector(threshold=5, window=30.0)
+        ts = time.time()
+        alerts = []
+        for i in range(20):  # one busy SSH session: ACK/PSH traffic, same ports
+            meta = make_meta(src_ip="10.0.0.5", dst_ip="140.82.121.3", src_port=50000, dst_port=22,
+                             tcp_flags=0x18, timestamp=ts + i * 0.1)
+            alerts.extend(det.analyze(meta, {}, None))
+        assert alerts == []
+
+    def test_outbound_connections_are_medium(self):
+        det = BruteForceDetector(threshold=5, window=30.0)
+        ts = time.time()
+        alerts = []
+        ctx = {"context": {"direction": "outbound", "app": "git", "remote_host": "github.com"}}
+        for i in range(6):
+            meta = make_meta(src_ip="10.0.0.5", dst_ip="140.82.121.3", src_port=50000 + i, dst_port=22,
+                             tcp_flags=0x02, timestamp=ts + i)
+            alerts.extend(det.analyze(meta, ctx, None))
+        assert len(alerts) == 1
+        assert alerts[0].severity == Severity.MEDIUM
+        assert "github.com" in alerts[0].message and "git" in alerts[0].message
 
     def test_only_watched_ports_trigger(self):
         det = BruteForceDetector(threshold=5, window=30.0, watched_ports=frozenset({22}))

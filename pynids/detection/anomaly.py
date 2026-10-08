@@ -67,6 +67,12 @@ def _is_public(ip: Optional[str]) -> bool:
 
 logger = logging.getLogger(__name__)
 
+_SERVICE_NAMES = {
+    21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 110: "POP3", 143: "IMAP",
+    389: "LDAP", 636: "LDAPS", 3389: "Remote Desktop", 5900: "Screen Sharing/VNC",
+    8080: "HTTP-alt",
+}
+
 
 # ---------------------------------------------------------------------------
 # Volumetric spike detection
@@ -402,6 +408,14 @@ class BruteForceDetector(BaseDetector):
         dst_ip = meta.get("dst_ip")
         if not (src_ip and dst_ip):
             return
+        # Count login *attempts* (new connections), not every packet: one
+        # interactive SSH session easily sends 10 packets in a second.
+        if flow is not None and flow.packet_count > 1:
+            return
+        if meta.get("protocol") == "tcp":
+            flags = meta.get("tcp_flags") or 0
+            if not (flags & 0x02) or flags & 0x10:  # SYN without ACK
+                return
 
         ts = meta.get("timestamp", time.time())
         key: Tuple[str, str, int] = (src_ip, dst_ip, dst_port)
@@ -416,13 +430,24 @@ class BruteForceDetector(BaseDetector):
 
         if count >= self.threshold and key not in self._alerted:
             self._alerted.add(key)
+            context = layer7.get("context") or {}
+            outbound = context.get("direction") == "outbound"
+            service = _SERVICE_NAMES.get(dst_port, f"port {dst_port}")
+            target = context.get("remote_host") or dst_ip
+            if outbound:
+                # This Mac opening many connections to a remote service is
+                # usually tooling (git over SSH, mail clients reconnecting).
+                severity = Severity.MEDIUM
+                message = (f"Many {service} connections: {context.get('app') or src_ip} opened "
+                           f"{count} connections to {target}:{dst_port} in {self.window:.0f}s")
+            else:
+                severity = Severity.HIGH
+                message = (f"Brute force on {service}: {src_ip} made {count} connection "
+                           f"attempts to {dst_ip}:{dst_port} in {self.window:.0f}s")
             yield Alert(
                 alert_type=AlertType.ANOMALY,
-                severity=Severity.HIGH,
-                message=(
-                    f"Brute force: {src_ip} → {dst_ip}:{dst_port} "
-                    f"({count} attempts in {self.window:.0f}s)"
-                ),
+                severity=severity,
+                message=message,
                 src_ip=src_ip,
                 dst_ip=dst_ip,
                 dst_port=dst_port,
@@ -434,6 +459,8 @@ class BruteForceDetector(BaseDetector):
                     "attempt_count": count,
                     "window_seconds": self.window,
                     "service_port": dst_port,
+                    "service": service,
+                    "direction": "outbound" if outbound else "inbound",
                 },
             )
         elif count < self.threshold:

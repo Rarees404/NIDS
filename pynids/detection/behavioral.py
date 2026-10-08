@@ -44,6 +44,7 @@ from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 from .base import BaseDetector
 from ..alerts.model import Alert, AlertType, Severity
 from ..flow.tracker import Flow
+from ..protocols.stealth import classify_ip
 
 
 # Destinations that are never interesting for scan / beacon heuristics:
@@ -390,6 +391,17 @@ class BeaconingDetector(BaseDetector):
         # Service discovery / time sync / DNS are periodic by design.
         if _is_multicast_or_broadcast(dst_ip) or dst_port in _SYSTEM_SERVICE_PORTS:
             return
+        # Command-and-control servers live on the internet.  Loopback helpers,
+        # link-local housekeeping (DHCPv6, neighbour discovery) and LAN
+        # devices (AirPlay receivers, printers, NAS) poll on timers by design.
+        if classify_ip(dst_ip) != "public":
+            return
+        context = layer7.get("context") or {}
+        # macOS's own daemons (trustd, transparencyd, configd …) check in with
+        # Apple on fixed schedules.  They run from SIP-protected system paths
+        # that malware cannot replace.
+        if context.get("system_process"):
+            return
 
         ts = meta.get("timestamp", time.time())
         key: Tuple[str, str, int] = (src_ip, dst_ip, dst_port)
@@ -419,12 +431,21 @@ class BeaconingDetector(BaseDetector):
 
         if cv <= self.cv_threshold:
             self._alerted.add(key)
+            app = context.get("app")
+            host = context.get("remote_host")
+            # Apps that poll a named server (mail sync, update checks, chat
+            # presence) are the common benign case.  Malware more often calls
+            # home to a bare IP it never looked up in DNS.
+            severity = Severity.MEDIUM if host else Severity.HIGH
+            who = app or src_ip
+            target = f"{host} ({dst_ip}:{dst_port})" if host else f"{dst_ip}:{dst_port}"
             yield Alert(
                 alert_type=AlertType.BEHAVIORAL,
-                severity=Severity.HIGH,
+                severity=severity,
                 message=(
-                    f"C2 beaconing suspected: {src_ip} → {dst_ip}:{dst_port} "
-                    f"interval={mean:.1f}s CV={cv:.3f}"
+                    f"Regular check-ins: {who} contacted {target} every "
+                    f"{_human_interval(mean)} like clockwork ({len(hist)} times, CV={cv:.2f})"
+                    + ("" if host else " — bare IP with no DNS lookup")
                 ),
                 src_ip=src_ip,
                 dst_ip=dst_ip,
@@ -438,5 +459,14 @@ class BeaconingDetector(BaseDetector):
                     "stddev_seconds": round(stddev, 2),
                     "coefficient_of_variation": round(cv, 4),
                     "sample_count": len(hist),
+                    "hostname_known": bool(host),
                 },
             )
+
+
+def _human_interval(seconds: float) -> str:
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f} min"
+    return f"{seconds / 3600:.1f} h"

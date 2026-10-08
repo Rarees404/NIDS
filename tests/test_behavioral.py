@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import pytest
+from pynids.alerts.model import Severity
 from pynids.detection.behavioral import (
     DnsTunnelingDetector,
     HttpAttackDetector,
@@ -173,8 +174,8 @@ class TestBeaconingDetector:
         alerts = []
         for i in range(10):
             meta = make_meta(
-                src_ip="infected",
-                dst_ip="c2-server",
+                src_ip="10.0.0.5",
+                dst_ip="45.33.32.156",
                 dst_port=4444,
                 timestamp=base_ts + i * interval,
             )
@@ -184,6 +185,34 @@ class TestBeaconingDetector:
         assert len(beacon_alerts) == 1
         assert beacon_alerts[0].mitre_technique == "T1071"
         assert beacon_alerts[0].evidence["coefficient_of_variation"] < 0.20
+        # A bare IP nobody looked up in DNS is the suspicious case.
+        assert beacon_alerts[0].severity == Severity.HIGH
+
+    @staticmethod
+    def _beacon(det, dst_ip, layer7):
+        alerts = []
+        for i in range(10):
+            meta = make_meta(src_ip="10.0.0.5", dst_ip=dst_ip, dst_port=443, timestamp=1000.0 + i * 600)
+            alerts.extend(det.analyze(meta, layer7, None))
+        return alerts
+
+    def test_named_host_polling_is_medium(self):
+        det = BeaconingDetector(min_connections=6, cv_threshold=0.20)
+        alerts = self._beacon(det, "40.79.141.156", {"context": {
+            "app": "Microsoft Outlook", "remote_host": "outlook.office365.com"}})
+        assert len(alerts) == 1
+        assert alerts[0].severity == Severity.MEDIUM
+        assert "Microsoft Outlook" in alerts[0].message and "10 min" in alerts[0].message
+
+    def test_apple_system_daemons_ignored(self):
+        det = BeaconingDetector(min_connections=6, cv_threshold=0.20)
+        assert self._beacon(det, "17.253.53.146", {"context": {
+            "app": "trustd", "system_process": True}}) == []
+
+    def test_local_destinations_ignored(self):
+        det = BeaconingDetector(min_connections=6, cv_threshold=0.20)
+        for ip in ("127.0.0.1", "192.168.178.30", "fe80::c54:e772:1abf:56e1"):
+            assert self._beacon(det, ip, {}) == []
 
     def test_irregular_traffic_no_alert(self):
         det = BeaconingDetector(min_connections=6, cv_threshold=0.10)

@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#-license)
 [![Version](https://img.shields.io/badge/version-2.0.0-orange.svg)]()
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)]()
-[![Tests](https://img.shields.io/badge/tests-201%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-230%20passing-brightgreen.svg)]()
 
 PyNIDS watches your Mac's real network traffic and tells you, in plain language, what is
 going on. It catches attacks and connections to known-malicious servers. It also shows
@@ -16,9 +16,11 @@ what browsers and apps do quietly behind your back: trackers, WebRTC IP leaks, w
 port-scanning your machine, DNS hidden inside HTTPS, and more. For every connection you see
 **which app** made it and **where in the world** it went.
 
-It runs as an always-on background service, with a **web dashboard**, a **menu bar app**,
-a **desktop widget**, **native notifications**, one-click **blocking**, and optional
-**"Explain with Claude"** for any alert.
+Every alert comes with a **plain-English explanation**: what happened, whether it is
+usually harmless, and what to do. It runs as an always-on background service, with a
+**web dashboard**, a **menu bar app** (stop, resume, or quit from there), a **desktop
+widget**, **native notifications**, one-click **blocking**, and optional
+**"Explain with Claude"** for a deeper look at any alert.
 
 </div>
 
@@ -63,6 +65,11 @@ a **desktop widget**, **native notifications**, one-click **blocking**, and opti
 | **Encrypted DNS** | DNS-over-HTTPS / TLS / QUIC sessions that bypass your system resolver |
 | **QUIC / HTTP-3, WebSockets, beacons, prefetch storms** | Background connections that never show up in the browser's Network tab |
 
+### Fast, accurate capture
+
+* **Raw-frame decoder.** Packets are read straight from the kernel's BPF socket and decoded with a small built-in parser (Ethernet, VLAN, loopback/`utun`, IPv4/IPv6, TCP/UDP/ICMP). About 23 µs per packet end to end, roughly 44,000 packets/s per core, 8× faster than before.
+* **Every DNS packet is seen.** Scapy used to swallow DNS and mDNS into its own layers, so DNS-based detection, tracker matching, and hostname learning missed live traffic. They now see all of it.
+
 ### Visibility inside encrypted traffic
 
 * **QUIC decryption.** PyNIDS decrypts the first packet of every HTTP/3 connection (RFC 9001) to read which site it is for. Your data stays encrypted; only the handshake is read.
@@ -84,10 +91,20 @@ a **desktop widget**, **native notifications**, one-click **blocking**, and opti
 | **Notifications** | macOS banners for HIGH and CRITICAL alerts; bursts are grouped into one banner |
 | **Terminal** | `pynids status`, and the live full-screen `pynids xray` dashboard |
 
+### Plain-English alerts
+
+Every alert carries a short guide, written from that alert's own evidence (which app, which host, how often):
+
+* **Summary.** *"Microsoft Outlook contacts outlook.office365.com every 16 minutes, very regularly."*
+* **Verdict.** `Usually harmless` · `Privacy` · `Worth checking` · `Act now`
+* **What it means** and **what to do next**, with concrete commands where useful.
+
+It's generated locally and instantly, with no network calls. The dashboard, menu bar, widget, and notifications all show it.
+
 ### Response
 
 * **Blocking** through macOS's built-in `pf` firewall, from the dashboard, menu bar, or CLI. Optionally automatic for confirmed threats, with guard rails and expiry.
-* **Explain with Claude.** One click turns an alert into a verdict, an explanation, and next steps.
+* **Explain with Claude.** One click sends a single alert to Claude for a deeper, case-specific analysis.
 * **HTTPS decryption workflow.** Launch a browser that logs its TLS keys, record traffic, and list the decrypted requests.
 
 ---
@@ -189,15 +206,25 @@ pynids daemon logs -n 30
 | **Overview** | Hidden events, threats, trackers, leaks and probes, encrypted DNS, countries reached; live throughput; events per minute over the last hour |
 | **Network** | World map of every remote endpoint, sized by traffic. Orange dots raised an alert. Click one to see its events |
 | **Apps** | Each app's upload and download, how many endpoints it talks to, its alerts, and which hosts and countries |
-| **Events** | Live stream you can filter by kind, severity, and time range, with full-text search. Click an event to see its evidence, app, location, network owner, **Explain with Claude**, and **Block IP** |
+| **Events** | Live stream you can filter by kind, severity, and time range, with full-text search. Each event shows its plain-English summary and verdict. Click one to see **What this means** and what to do, then the app, location, network owner, **Explain with Claude**, and **Block IP**. The raw evidence JSON is folded underneath |
 | **Protection** | Blocked IPs (one-click unblock) and the status of each threat-intel feed |
 
 ### Menu bar
 
 The shield's colour shows the threat level: green is all clear, yellow is notable, orange
 is high severity, red is critical. The number next to it counts **high-severity alerts in
-the last hour**. Click it for stats, throughput, recent alerts (hover one to block its IP),
-busiest apps, pause/resume notifications (🔔), and **Open Dashboard** (⌘D).
+the last hour**. Click it for stats, throughput, recent alerts (each with its summary and
+verdict; hover for the full explanation, or to block its IP), busiest apps, pause/resume
+notifications (🔔), and **Open Dashboard** (⌘D).
+
+The **power menu** in the popover controls PyNIDS itself:
+
+| Item | What it does |
+|---|---|
+| **Stop Detection** / **Resume Detection** | Stops capturing and analysing traffic without shutting the service down. The icon turns into a ⏸ and no alerts appear. The choice survives restarts and reboots until you resume |
+| **Quit PyNIDS Completely…** | Asks for your password, shuts down the background daemon (it stays off after reboot), and quits the menu bar app |
+| **Start PyNIDS…** | Shown when the daemon is shut down: starts it again |
+| **Quit Menu Bar App Only** | Closes the menu bar app; monitoring continues in the background |
 
 ### Widget
 
@@ -209,7 +236,8 @@ busiest apps, pause/resume notifications (🔔), and **Open Dashboard** (⌘D).
 ### Notifications
 
 HIGH and CRITICAL alerts show as macOS banners, grouped into one banner if several arrive
-together. Pause them from the menu bar or the dashboard's 🔔 button. Change the threshold in
+together. The banner text is the plain-English summary, and the subtitle shows the verdict
+and the app. Pause them from the menu bar or the dashboard's 🔔 button. Change the threshold in
 the [config](#-configuration).
 
 ### Terminal X-Ray (no daemon needed)
@@ -261,6 +289,18 @@ Config changes (see [Configuration](#-configuration)) also only need
 | **High** | Look at it: WebRTC leaking your private IP, a webpage probing localhost, a port scan, threat-intel hits | Yes |
 | **Critical** | Act now: a localhost port scan by a webpage, a known botnet C2, a multi-vector attack | Yes (with sound) |
 
+### Verdicts
+
+Severity is how serious an event *could* be; the verdict is the plain-English call on this
+particular event.
+
+| Verdict | Meaning |
+|---|---|
+| **Usually harmless** | Normal behaviour for this app or this kind of event. Nothing to do unless it surprises you |
+| **Privacy** | Not an attack, but something is tracking you or leaking information |
+| **Worth checking** | Could be fine, could be a problem. The guide says what to look at |
+| **Act now** | A known-malicious server or a clear attack. Follow the next steps |
+
 ### Kinds
 
 `threat` (threat-intel match) · `attack` (signatures, anomalies, behavioural) · `webrtc` ·
@@ -273,14 +313,19 @@ Config changes (see [Configuration](#-configuration)) also only need
 | `STEALTH-WEBRTC-LEAK` | STUN response leaked a private/loopback IP (HIGH) |
 | `STEALTH-WEBRTC-REFLEXIVE` | STUN response revealed your public address (LOW) |
 | `STEALTH-WEBRTC-STUN` / `-TURN` | WebRTC connectivity check or relay request (LOW) |
-| `STEALTH-LOCALHOST-PROBE` | A browser connected to `127.0.0.0/8` or a LAN address on an unusual port |
+| `STEALTH-LOCALHOST-PROBE` | Something connected to `127.0.0.0/8` or a LAN address on an unusual port. HIGH from a browser, MEDIUM/LOW when the app couldn't be identified, silent for ordinary apps |
 | `STEALTH-LOCALHOST-SCAN` | One app probed 5+ local ports within 30 s. CRITICAL for browsers, HIGH for other apps |
 | `STEALTH-QUIC-INITIAL` | First HTTP/3 connection to a site (with its hostname) |
 | `STEALTH-WEBSOCKET` | WebSocket upgrade handshake |
 | `STEALTH-BEACON` | `navigator.sendBeacon` POST or 1×1 tracking pixel |
 | `STEALTH-DNS-PREFETCH` | Burst of third-party DNS lookups (`<link rel="dns-prefetch">`) |
 | `STEALTH-TRACKER` | Connection to a tracker domain (TLS/QUIC SNI, HTTP Host, or DNS) |
-| `STEALTH-ENCRYPTED-DNS` | DoH / DoT / DoQ session bypassing the system resolver |
+| `STEALTH-ENCRYPTED-DNS` | DoH / DoT / DoQ session bypassing the system resolver, or iCloud Private Relay in use (LOW) |
+
+Other detectors worth knowing:
+
+* **Brute force** counts new connection attempts only, not packets inside a session. Attempts *against your Mac* are HIGH ("Brute force on SSH"). Many connections *from your Mac* to one service are MEDIUM ("Many SSH connections"), since that's usually git over SSH or a mail client reconnecting.
+* **Beaconing** (regular check-ins) is MEDIUM when the app polls a named server it looked up, and HIGH when it polls a **bare IP with no DNS lookup**, the more malware-like pattern.
 
 ### Built to stay quiet on a normal Mac
 
@@ -289,8 +334,10 @@ These detectors were tuned against real traffic so everyday use doesn't raise al
 * **Traffic spikes** only count traffic you *didn't* ask for (not your downloads), and only above 100 packets/s.
 * **Port scans** count new connection attempts only, so replies (like your router's DNS answers) don't count. Local app-to-app traffic on loopback is ignored, and browsing many HTTPS sites isn't a "host sweep".
 * **Large uploads** count bytes *you send*, from 100 MiB per connection. Video and voice calls through WebRTC relays are excluded.
-* **Beaconing** ignores service discovery (mDNS, SSDP, broadcasts), time sync, and DNS.
-* **Localhost probes** from ordinary apps talking to their own helpers aren't reported one by one; a scan is still caught, per app.
+* **Beaconing** only looks at new connections to public internet addresses. It ignores your LAN (AirPlay, printers, NAS), loopback, service discovery, time sync, DNS, and macOS system daemons running from SIP-protected paths (`/System`, `/usr/libexec`, `/usr/sbin`).
+* **Brute force** ignores the packets of an ongoing SSH or mail session.
+* **Localhost probes** from ordinary apps talking to their own helpers aren't reported one by one; a scan is still caught, per app. Local IPC (a program connecting to a socket it just opened), PyNIDS's own dashboard port, and broadcasts are ignored, and the same app → port probe is reported at most once an hour (the next alert says how many repeats were skipped).
+* **iCloud Private Relay** is reported once, as LOW, not as a stream of encrypted-DNS alerts.
 * **Correlation** ignores privacy telemetry, so your own browsing never makes your Mac look like an "attacker".
 * **QUIC** is reported once per site, not once per CDN server.
 
@@ -303,20 +350,30 @@ If something is still noisy on your network, silence it with a suppression rule 
 
 ```
  en0 (Wi-Fi/Ethernet) ─┐
- lo0 (loopback) ───────┴─► capture ─► dissect ─► enrich ─► flow tracking ─► detect ─► alert manager
-                                     │          │                           │         (dedup, suppress,
-                                     │          │                           │          correlate)
-                     HTTP · DNS · TLS · QUIC    │               16 detectors +            │
-                     STUN · SSH · SMTP          │               threat intel              ▼
-                     (QUIC decrypt, TLS         │                                SQLite · live state ·
-                      reassembly)        app · hostname ·                        notifications · auto-block
-                                         country · ASN                                    │
-                                                                                          ▼
-                                                              local API (127.0.0.1:8787) ─► dashboard ·
-                                                                                            menu bar · widget
+ lo0 (loopback) ───────┴─► capture ──────► raw BPF frames, decoded in-house (no Scapy objects)
+                              │
+                              ▼
+                           dissect ──────► HTTP · DNS · TLS · QUIC · STUN · SSH · SMTP
+                              │            (QUIC decrypt, TLS reassembly)
+                              ▼
+                           enrich ───────► app · hostname · country · ASN
+                              │
+                              ▼
+                     flow tracking + detect ► 16 detectors + threat intel
+                              │
+                              ▼
+                        alert manager ───► dedup · suppress · correlate · plain-English guide
+                              │
+                              ▼
+          SQLite · live state · notifications · auto-block
+                              │
+                              ▼
+          local API (127.0.0.1:8787) ─► dashboard · menu bar · widget
 ```
 
-* **Background service.** A launchd daemon running as root (`/Library/LaunchDaemons/com.pynids.daemon.plist`). It restarts itself on crashes and on network changes.
+* **Background service.** A launchd daemon running as root (`/Library/LaunchDaemons/com.pynids.daemon.plist`). It restarts itself on crashes and on network changes. Detection can be paused without stopping the service (`POST /api/detection`, used by the menu bar app).
+* **Capture.** A reader thread drains the BPF socket (`AF_PACKET` on Linux) into a bounded queue; the engine thread decodes raw frames itself. If the engine falls behind, packets are dropped and counted rather than piling up in memory.
+* **Alert guide.** [`pynids/alerts/guide.py`](pynids/alerts/guide.py) turns each alert into a summary, verdict, explanation, and next steps. The API attaches it as `about` on every alert.
 * **Storage.** Alerts go to SQLite with full-text search at `/Library/Application Support/PyNIDS/events.db`.
 * **Threat intel.** Hash-indexed, so a lookup takes about 4 µs regardless of feed size. Feeds:
 
@@ -500,6 +557,7 @@ sudo .venv/bin/pynids query --db "/Library/Application Support/PyNIDS/events.db"
 | `…/intel/`, `…/geoip/` | Cached feeds, GeoIP databases |
 | `…/api-token`, `…/anthropic-key` | API token (0644), Claude key (0600) |
 | `…/blocklist.json` | Active blocks and why |
+| `…/paused` | Present while detection is stopped from the menu bar |
 | `…/captures/` | Rolling capture (only with `--record`) |
 | `/Library/Logs/PyNIDS/daemon.log` | Daemon log |
 | `~/Applications/PyNIDS.app` | Menu bar app + widget |
@@ -516,6 +574,9 @@ sudo .venv/bin/pynids query --db "/Library/Application Support/PyNIDS/events.db"
 | `pynids status` says **not running** | Check `pynids daemon logs -n 50`, then `sudo .venv/bin/pynids daemon restart` |
 | **Widget not in the gallery** | Run `pynids app` again, open the app once, then `killall NotificationCenter` and reopen **Edit Widgets** |
 | Widget shows **"Not running"** | The daemon is down. See above |
+| Menu bar shows ⏸ **"Stopped · not detecting"** | Detection was stopped. Click the shield → power menu → **Resume Detection** |
+| Daemon won't start after **Quit PyNIDS Completely** | Quitting disables the service. Use **Start PyNIDS…** in the menu bar app, or `sudo launchctl enable system/com.pynids.daemon` then `sudo .venv/bin/pynids daemon restart` |
+| "Many SSH connections" alerts while using git | Expected at MEDIUM when your Mac opens lots of SSH connections quickly. Add a suppression rule for the rule/destination if it's noisy |
 | Widget numbers look stale | It refreshes every few minutes. Check the "Updated" time, or run `killall NotificationCenter` |
 | World map is empty | Run `sudo .venv/bin/pynids geoip download` and restart. The map outline also needs internet access |
 | Many **"Unattributed"** connections | Very short-lived connections can close before they're matched. Run `sudo .venv/bin/pynids daemon restart` to make sure the latest attribution code is loaded |
@@ -541,25 +602,26 @@ sudo rm -rf "/Library/Application Support/PyNIDS" /Library/Logs/PyNIDS   # data,
 
 ```bash
 pip install -e ".[dev,all]"
-pytest                                    # 201 tests
+pytest                                    # 230 tests
 pytest --cov=pynids --cov-report=term-missing
 ```
 
 Tests use real protocol test vectors (for example the RFC 9001 QUIC keys) and cover every
-detector, the false-positive regressions above, the API security checks, pf guard rails,
-and the Claude request shape.
+detector, the raw-frame decoder, the plain-English guides, pausing detection, the
+false-positive regressions above, the API security checks, pf guard rails, and the Claude
+request shape.
 
 ### Project layout
 
 ```
 pynids/
 ├── engine.py            detection pipeline
-├── sniffer.py           live capture / PCAP replay
+├── sniffer.py           live capture (raw BPF frames + decoder) / PCAP replay
 ├── protocols/           HTTP, DNS, TLS, QUIC (+ decryption), STUN, SSH, SMTP
 ├── detection/           signature, anomaly, behavioural, X-Ray (stealth) detectors
 ├── enrich/              app attribution (psutil + nettop), hostnames, GeoIP
 ├── intel/               threat intel index + live feeds
-├── alerts/              alert model, manager, outputs (SQLite, JSON, syslog, terminal)
+├── alerts/              alert model, manager, plain-English guide, outputs (SQLite, JSON, syslog, terminal)
 ├── response/            pf blocking, macOS notifications
 ├── ai/                  Explain with Claude
 ├── service/             daemon, local API, live stats, launchd, PCAP recorder
@@ -614,7 +676,7 @@ engine = DetectionEngine(
     config={}, rules_path="rules/enterprise_rules.yaml", alert_manager=mgr,
     enricher=Enricher(processes=ProcessResolver().start(), hostnames=HostnameCache()),
 )
-alerts = engine.process_packet(meta)   # meta from pynids.sniffer.packet_to_meta()
+alerts = engine.process_packet(meta)   # meta from pynids.sniffer.decode_frame() / packet_to_meta()
 ```
 
 ### MITRE ATT&CK coverage

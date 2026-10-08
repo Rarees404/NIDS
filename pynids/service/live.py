@@ -21,6 +21,7 @@ from collections import Counter, OrderedDict, deque
 from typing import Any, Deque, Dict, List, Optional
 
 from ..alerts.classify import KIND_LABELS, KINDS, classify
+from ..alerts.guide import describe
 from ..alerts.manager import BaseOutput
 from ..alerts.model import Alert, Severity
 
@@ -133,6 +134,7 @@ class LiveState(BaseOutput):
     def emit(self, alert: Alert) -> None:
         d = alert.to_dict()
         d["kind"] = classify(alert)
+        d["about"] = describe(d)
         with self._lock:
             self.kind_counts[d["kind"]] += 1
             self.severity_counts[alert.severity.value] += 1
@@ -283,4 +285,6 @@ def _brief(alert: Dict[str, Any]) -> Dict[str, Any]:
         "subject": subject,
         "message": alert.get("message"),
         "app": ctx.get("app"),
+        "summary": (alert.get("about") or {}).get("summary"),
+        "verdict": (alert.get("about") or {}).get("verdict"),
     }
