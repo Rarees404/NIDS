@@ -28,7 +28,7 @@ import ipaddress
 import logging
 import time
 from collections import defaultdict, deque
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 from .model import Alert, AlertType, Severity
 
@@ -103,6 +103,8 @@ class AlertManager:
         self.min_severity = min_severity
 
         self._outputs: List[BaseOutput] = []
+        # Callables returning True drop an alert (e.g. the user's allowlist).
+        self._filters: List[Callable[[Alert], bool]] = []
         self._suppression: List[_SuppressionEntry] = [
             _SuppressionEntry(r.get("rule_id", "*"), r.get("src_cidr", "0.0.0.0/0"))
             for r in (suppression_rules or [])
@@ -124,6 +126,10 @@ class AlertManager:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def add_filter(self, predicate: Callable[[Alert], bool]) -> None:
+        """Drop every alert for which *predicate* returns True."""
+        self._filters.append(predicate)
 
     def register_output(self, output: BaseOutput) -> None:
         """Register a backend that will receive every emitted alert."""
@@ -148,6 +154,15 @@ class AlertManager:
             logger.debug("Suppressed alert %s (whitelist)", alert.alert_id)
             self.total_suppressed += 1
             return False
+        for predicate in self._filters:
+            try:
+                dropped = predicate(alert)
+            except Exception as exc:  # noqa: BLE001 — a broken filter must not lose alerts
+                logger.error("Alert filter failed: %s", exc)
+                dropped = False
+            if dropped:
+                self.total_suppressed += 1
+                return False
 
         # Deduplication
         key = alert.dedup_key

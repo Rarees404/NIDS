@@ -36,8 +36,11 @@ class Enricher:
         geo: Optional[GeoResolver] = None,
         hostnames: Optional[HostnameCache] = None,
         local_ips: Optional[frozenset] = None,
+        signatures: Any = None,
     ) -> None:
         self.processes = processes
+        # Optional SignatureChecker; lookups never block (unknown → checked in background).
+        self.signatures = signatures if signatures is not None and signatures.available else None
         self.geo = geo if geo is not None and geo.available else None
         self.hostnames = hostnames or HostnameCache()
         self._fixed_local = local_ips
@@ -78,8 +81,15 @@ class Enricher:
                 ctx["app"] = proc["app"]
                 ctx["process"] = proc["process"]
                 ctx["pid"] = proc["pid"]
-                if is_system_daemon(proc.get("exe")):
+                exe = proc.get("exe")
+                if exe:
+                    ctx["exe"] = exe
+                if is_system_daemon(exe):
                     ctx["system_process"] = True
+                elif exe and self.signatures is not None:
+                    sig = self.signatures.lookup(exe)
+                    if sig:
+                        ctx["signature"] = sig.get("status")
             if direction == "local":
                 # Which program owns the port being connected to.
                 target = self.processes.lookup(meta.get("protocol"), meta.get("dst_port"))

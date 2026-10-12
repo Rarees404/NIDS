@@ -19,8 +19,11 @@ struct Provider: TimelineProvider {
     func getTimeline(in context: Context, completion: @escaping (Timeline<Entry>) -> Void) {
         Task {
             let snap = try? await PyNIDSClient.widgetSnapshot()
-            // The menu bar app also asks WidgetKit to reload whenever new events arrive.
-            let next = Calendar.current.date(byAdding: .minute, value: snap == nil ? 2 : 5, to: .now)!
+            // The menu bar app also asks WidgetKit to reload whenever new events
+            // arrive and when PyNIDS is stopped, resumed, started or quit, so a
+            // stopped / quit PyNIDS only needs a rare check.
+            let idle = snap == nil || snap?.isPaused == true
+            let next = Calendar.current.date(byAdding: .minute, value: idle ? 15 : 5, to: .now)!
             completion(Timeline(entries: [Entry(date: .now, snapshot: snap)], policy: .after(next)))
         }
     }
@@ -45,7 +48,8 @@ struct PyNIDSWidgetView: View {
             }
         }
         .containerBackground(.fill.tertiary, for: .widget)
-        .widgetURL(URL(string: "pynids://events"))
+        .widgetURL(URL(string: (entry.snapshot?.flaggedPrograms ?? 0) > 0 && (entry.snapshot?.attention ?? 0) == 0
+                              ? "pynids://connections" : "pynids://events"))
     }
 }
 
@@ -61,12 +65,25 @@ struct Status {
     let count: Int?
 
     init(_ s: WidgetSnapshot) {
-        if s.needsRoot {
+        let flagged = s.flaggedPrograms ?? 0
+        if s.isPaused {
+            symbol = "pause.circle"
+            color = .secondary
+            title = "Stopped"
+            detail = "Detection is paused · resume from the menu bar"
+            count = nil
+        } else if s.needsRoot {
             symbol = "shield.slash"
             color = .secondary
             title = "Capture off"
             detail = "Run: sudo pynids daemon install"
             count = nil
+        } else if s.attention == 0 && flagged > 0 {
+            symbol = Level.warning.symbol
+            color = Palette.serious
+            title = "Needs attention"
+            detail = flagged == 1 ? "untrusted program online" : "untrusted programs online"
+            count = flagged
         } else if s.attention == 0 {
             symbol = "checkmark.shield.fill"
             color = Palette.good
@@ -79,7 +96,8 @@ struct Status {
             color = level == .ok ? Palette.warning : level.color
             title = (s.recentHigh ?? 0) > 0 ? "Needs attention" : "Worth a look"
             let high = s.recentHigh ?? 0
-            detail = high > 0 ? "\(high) high · last hour" : "in the last hour"
+            let base = high > 0 ? "\(high) high · last hour" : "in the last hour"
+            detail = flagged > 0 ? base + " · \(flagged) untrusted app\(flagged == 1 ? "" : "s")" : base
             count = s.attention
         }
     }
@@ -217,9 +235,13 @@ struct SmallView: View {
             Hero(status: status, compact: true)
             Spacer(minLength: 4)
             HStack(spacing: 9) {
+                if s.flaggedPrograms != nil {
+                    Label(Format.count(s.flaggedPrograms ?? 0), systemImage: "app.badge.checkmark")
+                    Label(Format.count(s.exposedPorts ?? 0), systemImage: "door.left.hand.open")
+                } else {
+                    Label(Format.count(s.leaks), systemImage: "network.badge.shield.half.filled")
+                }
                 Label(Format.count(s.trackers), systemImage: "eye")
-                Label(Format.count(s.leaks), systemImage: "network.badge.shield.half.filled")
-                Label(Format.count(s.encryptedDns), systemImage: "lock.shield")
             }
             .font(.system(size: 10, weight: .medium))
             .monospacedDigit()
@@ -262,9 +284,14 @@ struct MediumView: View {
             StatusColumn(s: s, date: date)
                 .frame(width: 118, alignment: .leading)
             VStack(alignment: .leading, spacing: 4) {
+                if s.flaggedPrograms != nil {
+                    Metric(label: "Untrusted apps", value: s.flaggedPrograms ?? 0, symbol: "app.badge.checkmark")
+                    Metric(label: "Exposed ports", value: s.exposedPorts ?? 0, symbol: "door.left.hand.open")
+                } else {
+                    Metric(label: "Leaks & probes", value: s.leaks, symbol: "network.badge.shield.half.filled")
+                    Metric(label: "Encrypted DNS", value: s.encryptedDns, symbol: "lock.shield")
+                }
                 Metric(label: "Trackers", value: s.trackers, symbol: "eye")
-                Metric(label: "Leaks & probes", value: s.leaks, symbol: "network.badge.shield.half.filled")
-                Metric(label: "Encrypted DNS", value: s.encryptedDns, symbol: "lock.shield")
                 Throughput(s: s).padding(.top, 3)
             }
         }
@@ -281,10 +308,17 @@ struct LargeView: View {
                 StatusColumn(s: s, date: date)
                     .frame(width: 118, alignment: .leading)
                 VStack(alignment: .leading, spacing: 4) {
+                    if s.flaggedPrograms != nil {
+                        Metric(label: "Untrusted apps", value: s.flaggedPrograms ?? 0, symbol: "app.badge.checkmark")
+                        Metric(label: "Exposed ports", value: s.exposedPorts ?? 0, symbol: "door.left.hand.open")
+                    } else {
+                        Metric(label: "Encrypted DNS", value: s.encryptedDns, symbol: "lock.shield")
+                    }
                     Metric(label: "Trackers", value: s.trackers, symbol: "eye")
                     Metric(label: "Leaks & probes", value: s.leaks, symbol: "network.badge.shield.half.filled")
-                    Metric(label: "Encrypted DNS", value: s.encryptedDns, symbol: "lock.shield")
-                    Metric(label: "Countries", value: s.countries, symbol: "globe")
+                    if s.flaggedPrograms == nil {
+                        Metric(label: "Countries", value: s.countries, symbol: "globe")
+                    }
                 }
             }
             .frame(height: 104)
@@ -303,7 +337,11 @@ struct LargeView: View {
         VStack(alignment: .leading, spacing: 5) {
             SectionTitle(text: "Needs attention")
             let alerts = s.notableAlerts ?? []
-            if alerts.isEmpty {
+            if s.isPaused {
+                Label("Detection is stopped", systemImage: "pause.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            } else if alerts.isEmpty {
                 Label("Nothing notable in the last hour", systemImage: "checkmark.circle")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
@@ -387,7 +425,7 @@ struct OfflineView: View {
             }
             Spacer(minLength: 0)
             Text("Not running").font(.system(size: 15, weight: .semibold))
-            Text("Start the monitor in Terminal:")
+            Text("Start it from the menu bar, or in Terminal:")
                 .font(.system(size: 10.5)).foregroundStyle(.secondary)
             Text("sudo pynids daemon install")
                 .font(.system(size: 9.5, design: .monospaced))
@@ -409,7 +447,7 @@ struct PyNIDSStatusWidget: Widget {
             PyNIDSWidgetView(entry: entry)
         }
         .configurationDisplayName("PyNIDS")
-        .description("What needs your attention on the network, plus trackers, leaks, and throughput.")
+        .description("What needs your attention: serious alerts, untrusted programs, exposed ports, trackers, and throughput.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }

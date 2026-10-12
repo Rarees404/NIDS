@@ -7,7 +7,10 @@ open      open the web dashboard
 intel     update / show the live threat-intel feeds
 geoip     download the free DB-IP GeoIP databases
 block     add / remove / list / flush pf blocks
-ai        set-key / explain — Claude-powered alert explanations
+ai        set-key / explain / ask — Claude-powered analysis and investigation
+connections, listening, program, launch-items, lookup, devices
+          what's running, what's exposed, who owns an IP, who's on the LAN
+allow     list / add / remove "expected" alert rules
 keylog    launch a browser that logs TLS keys (for decryption)
 decrypt   decrypt recorded traffic with tshark + a TLS key log
 app       build and install the menu bar app + widget
@@ -427,6 +430,231 @@ def ai_explain(alert_id: str) -> None:
     from rich.markdown import Markdown
     console.print(Panel(Markdown(r["text"]), title=f"{r.get('verdict') or 'Analysis'} · {r['model']}",
                         expand=False))
+
+
+@ai.command("ask")
+@click.argument("question", nargs=-1, required=True)
+def ai_ask(question) -> None:
+    """Let Claude investigate this Mac with read-only tools and answer a question."""
+    try:
+        with console.status("Claude is investigating (connections, programs, alerts)…"):
+            r = _client().post("/api/investigate", {"question": " ".join(question)}, timeout=600)
+    except Exception as exc:  # noqa: BLE001
+        _fail(str(exc))
+    from rich.markdown import Markdown
+    console.print(Panel(Markdown(r["text"]), title=f"{r.get('verdict') or 'Answer'} · {r['model']}", expand=False))
+    if r.get("steps"):
+        console.print("[dim]Tools used: " + ", ".join(s["tool"] for s in r["steps"]) + "[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# host inspection: connections, listening ports, programs, launch items,
+# IP lookups, LAN devices, allowlist
+# ---------------------------------------------------------------------------
+
+_RISK = {0: "[green]ok[/green]", 1: "[yellow]unusual[/yellow]", 2: "[bold red]suspicious[/bold red]",
+         3: "[bold white on red] high [/bold white on red]"}
+_SIG = {"apple": "[green]Apple[/green]", "app_store": "[green]App Store[/green]",
+        "developer_id": "[green]Developer ID[/green]", "development": "[yellow]Development[/yellow]",
+        "adhoc": "[yellow]Ad-hoc[/yellow]", "unsigned": "[red]Unsigned[/red]",
+        "invalid": "[bold red]Broken[/bold red]", None: "[dim]…[/dim]"}
+
+
+def _get(path: str):
+    try:
+        return _client().get(path, timeout=60)
+    except Exception as exc:  # noqa: BLE001
+        _fail(str(exc))
+
+
+@main.command("connections")
+@click.option("--all", "show_all", is_flag=True, help="Include LAN connections, not just the internet.")
+@click.option("--flagged", is_flag=True, help="Only risky connections.")
+@click.option("--app", default=None, help="Filter by app name (substring).")
+def connections_cmd(show_all: bool, flagged: bool, app: Optional[str]) -> None:
+    """Live connections and the program behind each (a better netstat)."""
+    snap = _get("/api/connections")
+    rows = snap["connections"]
+    if flagged:
+        rows = [r for r in rows if r["risk"] >= 2]
+    elif not show_all:
+        rows = [r for r in rows if r["scope"] == "internet"]
+    if app:
+        rows = [r for r in rows if app.lower() in (r.get("app") or "").lower()]
+    s = snap["summary"]
+    console.print(f"[bold]{s['connections']}[/bold] connections · {s['programs']} programs · "
+                  f"[{'red' if s['flagged_programs'] else 'green'}]{s['flagged_programs']} flagged[/] · "
+                  f"{s['exposed_ports']} exposed ports")
+    if not rows:
+        console.print("[dim]Nothing matches.[/dim]")
+        return
+    t = Table()
+    for col in ("Risk", "App", "PID", "Remote", "Port", "Where", "Signature", "Flags"):
+        t.add_column(col)
+    labels = snap.get("flag_labels", {})
+    for r in rows[:200]:
+        remote = (r.get("remote_host") + "\n" if r.get("remote_host") else "") + (r.get("remote_ip") or "")
+        t.add_row(_RISK.get(r["risk"], "?"), r.get("app") or r.get("process") or "?", str(r.get("pid") or ""),
+                  remote, f"{r['proto']}/{r.get('remote_port')}",
+                  ", ".join(x for x in (r.get("country"), r.get("org")) if x),
+                  _SIG.get(r.get("signature"), r.get("signature") or ""),
+                  ", ".join(labels.get(f, f) for f in r.get("flags") or []))
+    console.print(t)
+
+
+@main.command("listening")
+def listening_cmd() -> None:
+    """Listening ports and who can reach them."""
+    rows = _get("/api/connections")["listening"]
+    t = Table()
+    for col in ("Reachable from", "Program", "PID", "Port", "Addresses", "Signature"):
+        t.add_column(col)
+    for r in rows:
+        style = "bold" if "exposed" in r.get("flags", []) else ""
+        t.add_row(f"[{style}]{r['exposure_label']}[/]" if style else r["exposure_label"],
+                  r.get("app") or r.get("process") or "?", str(r.get("pid") or ""),
+                  f"{r['proto']}/{r['local_port']}", ", ".join(a or "*" for a in r.get("addresses") or []),
+                  _SIG.get(r.get("signature"), r.get("signature") or ""))
+    console.print(t)
+
+
+@main.command("program")
+@click.argument("exe")
+def program_cmd(exe: str) -> None:
+    """Signature, hash, launch items and sockets of one executable."""
+    from urllib.parse import quote
+    p = _get("/api/program?exe=" + quote(os.path.abspath(exe)))
+    sig, a = p.get("signature") or {}, p.get("assessment") or {}
+    lines = [f"[bold]{p['app']}[/bold]  {_RISK.get(a.get('risk'), '')}", p["exe"], "",
+             f"Signature:  {sig.get('label') or sig.get('status')}" + (f" — {sig['authority']}" if sig.get("authority") else ""),
+             f"SHA-256:    {p.get('sha256') or '—'}"]
+    if a.get("reasons"):
+        lines.append("Why:        " + "; ".join(a["reasons"]))
+    for j in p.get("launchd") or []:
+        lines.append(f"Starts via: {j['label']}  ({j['plist']})")
+    if p.get("virustotal"):
+        lines.append(f"VirusTotal: {p['virustotal']}")
+    console.print(Panel("\n".join(lines), expand=False))
+
+
+@main.command("launch-items")
+@click.option("--flagged", is_flag=True, help="Only items with risk flags.")
+def launch_items_cmd(flagged: bool) -> None:
+    """Programs macOS starts automatically (LaunchAgents / LaunchDaemons)."""
+    rows = _get("/api/launch-items")
+    if flagged:
+        rows = [r for r in rows if r["risk"] >= 1 or "missing_program" in r["flags"]]
+    t = Table()
+    for col in ("Risk", "Label", "Kind", "Program", "Signature", "Flags"):
+        t.add_column(col)
+    for r in rows:
+        t.add_row(_RISK.get(r["risk"], "?"), r["label"], r["kind"], r.get("program") or "—",
+                  _SIG.get(r.get("signature"), r.get("signature") or ""), ", ".join(r["flags"]))
+    console.print(t)
+
+
+@main.command("lookup")
+@click.argument("ip")
+@click.option("--external/--local", default=True, show_default=True,
+              help="Also ask RDAP, reverse DNS and Shodan InternetDB (sends the IP to them).")
+def lookup_cmd(ip: str, external: bool) -> None:
+    """Everything known about an IP: what PyNIDS saw, owner, reputation."""
+    d = _get(f"/api/dossier/{ip}" + ("?external=1" if external else ""))
+    L, X = d.get("local") or {}, d.get("external") or {}
+    rdap, idb = X.get("rdap") or {}, X.get("internetdb") or {}
+    rows = [
+        ("Seen as", L.get("remote_host")), ("Apps", ", ".join(L.get("apps") or [])),
+        ("Location", ", ".join(x for x in (L.get("city"), L.get("country_name") or L.get("country")) if x)),
+        ("Network", L.get("org")), ("Threat intel", (L.get("intel") or {}).get("description") or "no match"),
+        ("Reverse DNS", X.get("ptr")), ("Owner", rdap.get("owner")),
+        ("Range", rdap.get("cidr") or rdap.get("range")), ("Abuse", rdap.get("abuse_email")),
+        ("Open ports", ", ".join(map(str, idb.get("ports") or [])) if idb.get("listed") else None),
+        ("Tags", ", ".join(idb.get("tags") or [])), ("CVEs", ", ".join((idb.get("vulns") or [])[:8])),
+        ("Note", X.get("reason")),
+    ]
+    t = Table(show_header=False, box=None)
+    for k, v in rows:
+        if v:
+            t.add_row(f"[dim]{k}[/dim]", str(v))
+    console.print(Panel(t, title=ip, expand=False))
+    for a in (L.get("recent_alerts") or [])[:8]:
+        console.print(f"  [{_SEV_STYLE.get(a['severity'], '')}]{a['severity']:<8}[/] {a['message'][:100]}")
+
+
+@main.command("devices")
+@click.option("--scan", "scan_ip", default=None, metavar="IP", help="Identify a LAN device with nmap.")
+def devices_cmd(scan_ip: Optional[str]) -> None:
+    """Devices seen on your local network (optionally nmap-scan one)."""
+    if scan_ip:
+        try:
+            with console.status(f"Scanning {scan_ip}…"):
+                r = _client().post("/api/devices/scan", {"ip": scan_ip}, timeout=300)
+        except Exception as exc:  # noqa: BLE001
+            _fail(str(exc))
+        t = Table(title=f"{scan_ip} · {len(r['ports'])} open")
+        for col in ("Port", "Service", "Product"):
+            t.add_column(col)
+        for p in r["ports"]:
+            t.add_row(f"{p['proto']}/{p['port']}", p.get("service") or "", p.get("product") or "")
+        console.print(t)
+        return
+    r = _get("/api/devices")
+    t = Table()
+    for col in ("IP", "Name", "Vendor", "MAC", "Online", "First seen"):
+        t.add_column(col)
+    for d in r["devices"]:
+        t.add_row(d["ip"], d.get("name") or "", d.get("vendor") or ("(private address)" if d.get("randomized_mac") else ""),
+                  d["mac"], "yes" if d["online"] else "no",
+                  datetime.fromtimestamp(d["first_seen"]).strftime("%Y-%m-%d %H:%M"))
+    console.print(t)
+    if not r.get("nmap"):
+        console.print("[dim]Install nmap (brew install nmap) to identify devices with --scan.[/dim]")
+
+
+@main.group()
+def allow() -> None:
+    """Alerts you've marked as expected (the allowlist)."""
+
+
+@allow.command("list")
+def allow_list() -> None:
+    rows = _get("/api/allowlist")
+    if not rows:
+        console.print("[dim]No rules.[/dim]")
+        return
+    t = Table()
+    for col in ("ID", "Matches", "Silenced", "Note"):
+        t.add_column(col)
+    for r in rows:
+        match = ", ".join(f"{k}={r[k]}" for k in ("kind", "rule_id", "app", "host", "ip") if r.get(k))
+        t.add_row(r["id"], match, str(r.get("hits", 0)), r.get("note") or "")
+    console.print(t)
+
+
+@allow.command("add")
+@click.option("--kind", default=None, help="tracker, beacon, quic, attack, host …")
+@click.option("--rule", "rule_id", default=None, help="Exact rule ID, e.g. STEALTH-TRACKER.")
+@click.option("--app", default=None)
+@click.option("--host", default=None, help="Hostname; covers subdomains.")
+@click.option("--ip", default=None)
+@click.option("--note", default="")
+def allow_add(kind, rule_id, app, host, ip, note) -> None:
+    try:
+        r = _client().post("/api/allowlist", {"kind": kind, "rule_id": rule_id, "app": app, "host": host,
+                                              "ip": ip, "note": note})
+    except Exception as exc:  # noqa: BLE001
+        _fail(str(exc))
+    console.print(f"[green]✓[/green] Added rule {r['id']}")
+
+
+@allow.command("remove")
+@click.argument("rule_id")
+def allow_remove(rule_id: str) -> None:
+    try:
+        r = _client().delete(f"/api/allowlist/{rule_id}")
+    except Exception as exc:  # noqa: BLE001
+        _fail(str(exc))
+    console.print("[green]✓[/green] Removed" if r.get("removed") else "[yellow]No such rule[/yellow]")
 
 
 # ---------------------------------------------------------------------------

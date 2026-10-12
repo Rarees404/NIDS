@@ -45,9 +45,55 @@ struct WidgetSnapshot: Codable, Hashable {
     let recentHigh: Int?
     let notableAlerts: [BriefAlert]?
     let totalBytes: Double?
+    // Added in 2.1 — host inspection (nil while paused or on an older daemon).
+    let flaggedPrograms: Int?
+    let exposedPorts: Int?
+    let paused: Bool?
 
     var needsRoot: Bool { status == "needs-root" }
+    var isPaused: Bool { paused ?? (status == "paused") }
     var attention: Int { recentNotable ?? 0 }
+}
+
+/// `/api/attention` — the few things worth a look right now.
+struct AttentionAction: Codable, Hashable {
+    let type: String
+    let id: String?
+    let exe: String?
+    let tab: String?
+}
+
+struct AttentionItem: Codable, Hashable, Identifiable {
+    let level: String
+    let title: String
+    let detail: String?
+    let action: AttentionAction?
+    var id: String { (action?.id ?? action?.exe ?? action?.tab ?? "") + title }
+
+    /// Dashboard tab that shows this item.
+    var anchor: String {
+        switch action?.type {
+        case "program": return "#connections"
+        case "tab": return "#" + (action?.tab ?? "overview")
+        default: return "#events"
+        }
+    }
+}
+
+/// Counts from the live socket table (`summary` of `/api/connections`).
+struct HostSummary: Codable, Hashable {
+    let connections: Int
+    let internet: Int
+    let programs: Int
+    let flaggedPrograms: Int
+    let exposedPorts: Int
+}
+
+struct AttentionResponse: Codable, Hashable {
+    let items: [AttentionItem]
+    let level: String
+    let paused: Bool?
+    let host: HostSummary?
 }
 
 struct Rates: Codable, Hashable {

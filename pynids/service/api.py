@@ -65,6 +65,10 @@ class ServiceContext:
         update_feeds: Optional[Callable[[], List[Dict[str, Any]]]] = None,
         feed_status: Optional[Callable[[], List[Dict[str, Any]]]] = None,
         set_detection: Optional[Callable[[bool], Dict[str, Any]]] = None,
+        inspector: Any = None,
+        allowlist: Any = None,
+        investigate: Optional[Callable[[str], Dict[str, Any]]] = None,
+        baseline: Any = None,
     ) -> None:
         self.live = live
         self.token = token
@@ -76,7 +80,12 @@ class ServiceContext:
         self.update_feeds = update_feeds
         self.feed_status = feed_status or (lambda: [])
         self.set_detection = set_detection
+        self.inspector = inspector
+        self.allowlist = allowlist
+        self.investigate = investigate
+        self.baseline = baseline
         self._explain_lock = threading.Lock()
+        self._investigate_lock = threading.Lock()
         if self.db_path:
             self._init_explanations()
 
@@ -209,6 +218,9 @@ class _Handler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/api/widget":
             self._send_json(self._widget())
             return
+        if method == "GET" and path.startswith("/static/"):
+            self._serve_static(path[len("/static/"):])
+            return
         if not path.startswith("/api/"):
             self._error(HTTPStatus.NOT_FOUND, "not found")
             return
@@ -281,6 +293,26 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             ctx.notifier.enabled = bool(self._body().get("enabled", True))
             self._send_json({"enabled": ctx.notifier.enabled})
+        elif method == "GET" and path == "/api/attention":
+            self._send_json(self._attention())
+        elif method == "GET" and path.startswith("/api/apps/"):
+            name = unquote(path[len("/api/apps/"):])
+            app = ctx.live.app(name)
+            if not app:
+                self._error(HTTPStatus.NOT_FOUND, "app not seen this session")
+                return
+            if ctx.baseline is not None:
+                app["usual_countries"] = ctx.baseline.values(name, "country")
+            self._send_json(app)
+        elif path in ("/api/connections", "/api/program", "/api/launch-items", "/api/devices",
+                      "/api/devices/scan") or path.startswith("/api/dossier/"):
+            self._host(method, path, query)
+        elif path == "/api/allowlist" or path.startswith("/api/allowlist/"):
+            self._allowlist(method, path)
+        elif method == "POST" and path == "/api/investigate":
+            self._investigate()
+        elif method == "GET" and path == "/api/baseline":
+            self._send_json(ctx.baseline.status() if ctx.baseline is not None else {"enabled": False})
         elif method == "POST" and path == "/api/detection":
             if not ctx.set_detection:
                 self._error(HTTPStatus.NOT_IMPLEMENTED, "pausing detection is unavailable")
@@ -322,7 +354,11 @@ class _Handler(BaseHTTPRequestHandler):
             if key not in seen:
                 seen.add(key)
                 rows.append(b)
+        host = self._host_counts()
         return {
+            "flagged_programs": host.get("flagged_programs"),
+            "exposed_ports": host.get("exposed_ports"),
+            "paused": bool(self.ctx.status().get("paused")),
             "recent_notable": len(notable),
             "recent_high": sum(1 for a in notable if _SEV_NUM.get(a.get("severity"), 0) >= 3),
             "notable_alerts": rows[:3],
@@ -453,6 +489,169 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._error(HTTPStatus.NOT_FOUND, "not found")
 
+    # --- static assets (vendored map libraries) -----------------------------
+
+    _STATIC_TYPES = {".js": "application/javascript; charset=utf-8", ".json": "application/json"}
+
+    def _serve_static(self, name: str) -> None:
+        # Flat directory, fixed extensions: no path traversal possible.
+        if not re.fullmatch(r"[a-z0-9][a-z0-9.\-]*\.(js|json)", name):
+            self._error(HTTPStatus.NOT_FOUND, "not found")
+            return
+        try:
+            body = resources.files("pynids.web").joinpath("vendor", name).read_bytes()
+        except (FileNotFoundError, ModuleNotFoundError, IsADirectoryError, NotADirectoryError):
+            self._error(HTTPStatus.NOT_FOUND, "not found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", self._STATIC_TYPES[name[name.rfind("."):]])
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+    # --- host inspection ------------------------------------------------------
+
+    def _host(self, method: str, path: str, query: Dict[str, List[str]]) -> None:
+        insp = self.ctx.inspector
+        if insp is None:
+            self._error(HTTPStatus.NOT_IMPLEMENTED, "host inspection is unavailable")
+            return
+        q1 = lambda name, default=None: (query.get(name) or [default])[0]  # noqa: E731
+        flag = lambda name: q1(name) in ("1", "true", "yes")  # noqa: E731
+        if method == "GET" and path == "/api/connections":
+            self._send_json(insp.connections(include_local=flag("local")))
+        elif method == "GET" and path == "/api/program":
+            exe = q1("exe") or ""
+            if not exe.startswith("/"):
+                self._error(HTTPStatus.BAD_REQUEST, "exe must be an absolute path")
+                return
+            self._send_json(insp.program(exe))
+        elif method == "GET" and path.startswith("/api/dossier/"):
+            try:
+                self._send_json(insp.dossier(unquote(path[len("/api/dossier/"):]),
+                                             external=flag("external"), refresh=flag("refresh")))
+            except ValueError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        elif method == "GET" and path == "/api/launch-items":
+            self._send_json(insp.launch_items(refresh=flag("refresh")))
+        elif method == "GET" and path == "/api/devices":
+            from ..host.lan import nmap_path
+            self._send_json({"devices": insp.lan.devices() if insp.lan else [],
+                             "nmap": bool(nmap_path())})
+        elif method == "POST" and path == "/api/devices/scan":
+            if insp.lan is None:
+                self._error(HTTPStatus.NOT_IMPLEMENTED, "LAN inventory is unavailable")
+                return
+            ip = str(self._body().get("ip") or "").strip()
+            try:
+                self._send_json(insp.lan.scan(ip))
+            except PermissionError as exc:
+                self._error(HTTPStatus.FORBIDDEN, str(exc))
+            except RuntimeError as exc:
+                self._error(HTTPStatus.BAD_GATEWAY, str(exc))
+        else:
+            self._error(HTTPStatus.NOT_FOUND, "not found")
+
+    def _allowlist(self, method: str, path: str) -> None:
+        al = self.ctx.allowlist
+        if al is None:
+            self._error(HTTPStatus.NOT_IMPLEMENTED, "allowlist unavailable")
+            return
+        if method == "GET" and path == "/api/allowlist":
+            self._send_json(al.rules())
+        elif method == "POST" and path == "/api/allowlist":
+            body = self._body()
+            try:
+                rule = al.add(note=str(body.get("note") or ""),
+                              **{k: body.get(k) for k in ("kind", "rule_id", "app", "host", "ip")})
+            except ValueError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self.ctx.live.broadcast("allowlist", {"added": rule})
+            self._send_json(rule, HTTPStatus.CREATED)
+        elif method == "DELETE" and path.startswith("/api/allowlist/"):
+            removed = al.remove(unquote(path[len("/api/allowlist/"):]))
+            self.ctx.live.broadcast("allowlist", {"removed": removed})
+            self._send_json({"removed": removed})
+        else:
+            self._error(HTTPStatus.NOT_FOUND, "not found")
+
+    def _investigate(self) -> None:
+        ctx = self.ctx
+        if ctx.investigate is None:
+            self._error(HTTPStatus.NOT_IMPLEMENTED, 'Claude integration unavailable: pip install "pynids[ai]"')
+            return
+        question = str(self._body().get("question") or "")
+        if not ctx._investigate_lock.acquire(blocking=False):
+            self._error(HTTPStatus.CONFLICT, "An investigation is already running — wait for it to finish.")
+            return
+        from ..ai.explain import ExplainError
+        try:
+            self._send_json(ctx.investigate(question))
+        except ExplainError as exc:
+            self._error(HTTPStatus.BAD_GATEWAY, str(exc))
+        finally:
+            ctx._investigate_lock.release()
+
+    def _host_counts(self) -> Dict[str, Any]:
+        """Program / port counts from the (cached) socket table; nothing while paused."""
+        insp = self.ctx.inspector
+        if insp is None or self.ctx.status().get("paused"):
+            return {}
+        try:
+            return insp.connections()["summary"]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("host counts failed: %s", exc)
+            return {}
+
+    def _attention(self) -> Dict[str, Any]:
+        """The few things worth a look right now, most urgent first."""
+        items: List[Dict[str, Any]] = []
+        paused = bool(self.ctx.status().get("paused"))
+        for row in self._widget()["notable_alerts"]:
+            items.append({"level": row["severity"], "title": row.get("summary") or row["message"],
+                          "detail": row["title"] + (f" · {row['app']}" if row.get("app") else ""),
+                          "action": {"type": "alert", "id": row["alert_id"]}})
+        insp = None if paused else self.ctx.inspector
+        snap = None
+        if insp is not None:
+            try:
+                snap = insp.connections()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("attention: connections failed: %s", exc)
+                snap = None
+            if snap:
+                for prog in [p for p in snap["programs"] if p["risk"] >= 2][:4]:
+                    items.append({
+                        "level": "HIGH" if prog["risk"] >= 3 else "MEDIUM",
+                        "title": f"{prog['app']} looks untrusted",
+                        "detail": "; ".join(prog.get("reasons") or []) or ", ".join(
+                            snap["flag_labels"].get(f, f) for f in prog["flags"]),
+                        "action": {"type": "program", "exe": prog["exe"]},
+                    })
+                exposed = [r for r in snap["listening"] if "exposed" in r["flags"]
+                           and r.get("signature") != "apple"]
+                if exposed:
+                    names = sorted({r.get("app") or r.get("process") or "?" for r in exposed})
+                    items.append({
+                        "level": "LOW",
+                        "title": f"{len(exposed)} port{'s' if len(exposed) > 1 else ''} reachable from the network",
+                        "detail": ", ".join(names[:5]) + (" …" if len(names) > 5 else ""),
+                        "action": {"type": "tab", "tab": "connections"},
+                    })
+            if insp.lan is not None:
+                new = [d for d in insp.lan.devices() if d.get("new")]
+                if new:
+                    items.append({"level": "LOW",
+                                  "title": f"{len(new)} new device{'s' if len(new) > 1 else ''} on your network",
+                                  "detail": ", ".join(d.get("name") or d.get("vendor") or d["ip"] for d in new[:4]),
+                                  "action": {"type": "tab", "tab": "network"}})
+        items.sort(key=lambda i: -_SEV_NUM.get(i["level"], 0))
+        return {"items": items[:8], "level": _threat_level(self.ctx.live), "paused": paused,
+                "host": snap["summary"] if snap else None}
+
     def _explain(self, alert_id: str) -> None:
         ctx = self.ctx
         conn = ctx.db()
@@ -520,6 +719,10 @@ class _QuietServer(ThreadingHTTPServer):
     """Browsers drop dashboard / SSE connections all the time — not an error."""
 
     daemon_threads = True
+    # socketserver's default listen backlog is 5; the dashboard opens more
+    # parallel requests than that on load, and the overflow gets reset or
+    # stalls on SYN retries ("Failed to fetch", multi-second hangs).
+    request_queue_size = 128
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         import sys as _sys

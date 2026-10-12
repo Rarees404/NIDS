@@ -54,6 +54,11 @@ widget**, **native notifications**, one-click **blocking**, and optional
 | **Attacks & anomalies** | Port scans and host sweeps, brute force (SSH, RDP, VNC, mail …), SQL injection / XSS / path traversal, DNS tunnelling, C2 beaconing, large uploads, unsolicited traffic floods, and 20+ MITRE-tagged signature rules |
 | **Live threat intelligence** | Every IP, DNS name, and TLS/QUIC hostname is checked against abuse.ch Feodo (botnet C2) and URLhaus (malware), Spamhaus DROP, and Tor exit lists, refreshed every 6 hours |
 | **Correlation** | Several different attack signatures from one source become a single CRITICAL "multi-vector attack" alert |
+| **Untrusted programs** | Every program that reaches the internet has its code signature checked (Apple, App Store, Developer ID, ad-hoc, unsigned, or tampered) and its location judged (`/tmp`, hidden folders, `/Users/Shared`, Downloads …). Homebrew, pip, npm and other dev-tool locations are recognised, so ordinary developer tools stay quiet |
+| **Likely command-and-control** | One CRITICAL alert when independent signals line up for the same program and server: regular check-ins, a bare IP never looked up in DNS, a blocklist hit, an untrusted binary, a brand-new program, or a server Shodan tags as C2 |
+| **Baseline** | Learns this Mac for a day, then flags change: a program using the network for the first time, or an app suddenly talking to a new country (browsers excluded) |
+| **Persistence** | Every LaunchAgent / LaunchDaemon is listed with the program it starts and that program's signature; untrusted programs are linked to the launch item that keeps restarting them |
+| **Your network** | Devices on your LAN (from the neighbour table, named via mDNS), with an alert when a new one joins and optional `nmap` identification |
 
 ### Privacy X-Ray: what DevTools doesn't show you
 
@@ -85,7 +90,7 @@ widget**, **native notifications**, one-click **blocking**, and optional
 
 | | |
 |---|---|
-| **Web dashboard** | `http://127.0.0.1:8787`: live throughput, events per minute, a world map of every endpoint, per-app traffic, a searchable event stream, blocking, and feed status |
+| **Web dashboard** | `http://127.0.0.1:8787`: a "needs your attention" summary, every live connection and the program behind it, what's exposed, a grouped event stream, per-app traffic, a world map, LAN devices, launch items, blocking, and Ask Claude. Works offline: nothing is loaded from a CDN |
 | **Menu bar app** | Shield icon that changes colour with the threat level; popover with stats, a throughput graph, recent alerts, and busiest apps |
 | **Desktop widget** | Small / medium / large. Headlines what needs attention *in the last hour*, or "All clear" |
 | **Notifications** | macOS banners for HIGH and CRITICAL alerts; bursts are grouped into one banner |
@@ -104,7 +109,10 @@ It's generated locally and instantly, with no network calls. The dashboard, menu
 ### Response
 
 * **Blocking** through macOS's built-in `pf` firewall, from the dashboard, menu bar, or CLI. Optionally automatic for confirmed threats, with guard rails and expiry.
-* **Explain with Claude.** One click sends a single alert to Claude for a deeper, case-specific analysis.
+* **Explain with Claude.** One click sends a single alert to Claude, together with what PyNIDS knows about the program and server, for a deeper, case-specific analysis.
+* **Ask Claude.** Ask a question ("is anything on my Mac suspicious right now?") and Claude investigates with read-only tools: connections, programs, signatures, launch items, alerts, IP lookups.
+* **Mark as expected.** Silence an app + host, a kind of alert for one app, or a rule, straight from the alert. Undo any time under Protection.
+* **IP dossier.** Click any IP for everything PyNIDS saw plus reverse DNS, RDAP (owner, abuse contact) and Shodan InternetDB (open ports, tags, CVEs).
 * **HTTPS decryption workflow.** Launch a browser that logs its TLS keys, record traffic, and list the decrypted requests.
 
 ---
@@ -201,13 +209,16 @@ pynids daemon logs -n 30
 
 ### Dashboard: `pynids open`
 
-| Section | What it shows |
+| Tab | What it shows |
 |---|---|
-| **Overview** | Hidden events, threats, trackers, leaks and probes, encrypted DNS, countries reached; live throughput; events per minute over the last hour |
-| **Network** | World map of every remote endpoint, sized by traffic. Orange dots raised an alert. Click one to see its events |
-| **Apps** | Each app's upload and download, how many endpoints it talks to, its alerts, and which hosts and countries |
-| **Events** | Live stream you can filter by kind, severity, and time range, with full-text search. Each event shows its plain-English summary and verdict. Click one to see **What this means** and what to do, then the app, location, network owner, **Explain with Claude**, and **Block IP**. The raw evidence JSON is folded underneath |
-| **Protection** | Blocked IPs (one-click unblock) and the status of each threat-intel feed |
+| **Overview** | **Needs your attention**: the few things worth a look right now (serious alerts from the last hour, untrusted programs, exposed ports, new devices), or "All clear". **Ask Claude**. Then the counters, live throughput, events per minute, and events by kind |
+| **Connections** | Every program with an open socket, riskiest first, with its signature and flags; every live connection (app, remote host, country, network owner, signature, alerts), filterable by Internet / Flagged / All; and **What's exposed**: listening ports and who can reach them. Click a program for its verified signature, SHA-256 (with a VirusTotal link), the launch items that start it, and its sockets |
+| **Events** | Live stream you can filter by kind, severity, and time range, with full-text search. Similar events are grouped (×N). Click one to see **What this means** and what to do, the app and program, **Explain with Claude**, **Block IP**, and **Mark as expected** |
+| **Apps** | Each app's upload and download, endpoints, alerts, hosts and countries. Click an app for its hosts, countries, remote IPs and learned "usual countries" |
+| **Network** | World map of every remote endpoint (click a dot for its IP dossier) and the devices on your LAN, with optional nmap scans |
+| **Protection** | Blocked IPs, rules you marked as expected, launch items, and threat-intel feed status |
+
+Every IP address anywhere in the dashboard is clickable and opens its dossier.
 
 ### Menu bar
 
@@ -304,7 +315,8 @@ particular event.
 ### Kinds
 
 `threat` (threat-intel match) · `attack` (signatures, anomalies, behavioural) · `webrtc` ·
-`localhost` · `doh` (encrypted DNS) · `tracker` · `beacon` · `websocket` · `quic` · `prefetch`
+`localhost` · `doh` (encrypted DNS) · `tracker` · `beacon` · `websocket` · `quic` · `prefetch` ·
+`host` (programs & devices)
 
 ### X-Ray rule IDs
 
@@ -321,6 +333,16 @@ particular event.
 | `STEALTH-DNS-PREFETCH` | Burst of third-party DNS lookups (`<link rel="dns-prefetch">`) |
 | `STEALTH-TRACKER` | Connection to a tracker domain (TLS/QUIC SNI, HTTP Host, or DNS) |
 | `STEALTH-ENCRYPTED-DNS` | DoH / DoT / DoQ session bypassing the system resolver, or iCloud Private Relay in use (LOW) |
+
+### Host rule IDs
+
+| Rule ID | What triggered it |
+|---|---|
+| `HOST-PROCESS-RISK` | An untrusted program reached the internet: LOW when it is only unsigned outside a dev-tool location, MEDIUM when it runs from a suspicious place, HIGH when both, or when its signature is broken. Once per program |
+| `HOST-NEW-PROGRAM` | A program used the internet for the first time after the 24 h learning period (MEDIUM if untrusted) |
+| `BASELINE-NEW-COUNTRY` | A non-browser app contacted a country it never used before (LOW) |
+| `LAN-NEW-DEVICE` | A new MAC address appeared on your local network (LOW) |
+| `HOST-C2-LIKELY` | Two or more independent C2 signals for the same program and server, at least one of them network-side (CRITICAL) |
 
 Other detectors worth knowing:
 
@@ -416,13 +438,29 @@ After `sudo .venv/bin/pynids ai set-key`, click **Explain with Claude** on any e
 pynids ai explain <alert-id>
 ```
 
-Only that one alert is sent to Claude Opus 5, with its evidence and context, and only when
-you click. You get back:
+Only that one alert is sent to Claude Opus 5.5, with its evidence and context, and only when
+you click. PyNIDS adds what it knows about the program (signature, launch items) and the
+server (owner and reputation lookups), so Claude can tell a signed vendor app talking to its
+own cloud from an unsigned binary in `/tmp` calling a bare IP. You get back:
 
 * **Verdict:** Benign, Privacy concern, Suspicious, or Malicious
 * **What happened**, **Why it matters**, and **What to do**
 
 Explanations are cached, so asking again costs nothing. Each new explanation costs about a cent.
+
+### Ask Claude (investigation)
+
+Type a question in **Ask Claude** on the Overview tab, or run:
+
+```bash
+pynids ai ask "is anything on my Mac suspicious right now?"
+```
+
+Claude answers by calling read-only tools against the live daemon: overview, connections,
+listening ports, a program's signature and launch items, IP dossiers, recent alerts, launch
+items, and LAN devices. It **cannot** block, kill, scan, or change anything; it recommends,
+and you act. The answer lists the evidence it used and, under "How Claude checked", every
+tool call. A typical investigation makes 3–8 tool calls.
 
 ### Seeing inside HTTPS
 
@@ -475,6 +513,17 @@ anomaly:
   min_rate_pps: 100        # never flag traffic spikes below this rate
 behavioral:
   exfil_threshold_bytes: 104857600   # 100 MiB uploaded by one connection
+
+host:
+  signatures: true               # check code signatures of programs on the network
+  baseline: true                 # learn, then flag new programs / new countries
+  baseline_learning_hours: 24
+  lan_inventory: true            # devices on your network + "new device" alerts
+  c2_correlation: true           # the "Likely command-and-control" alert
+
+lookups:
+  mode: alerts             # alerts | always | manual — when IPs may be looked up automatically
+  min_severity: MEDIUM     # for mode "alerts"
 ```
 
 The foreground CLI tools (`live`, `xray`, `pcap`) take `--config`. See
@@ -499,6 +548,14 @@ The foreground CLI tools (`live`, `xray`, `pcap`) take `--config`. See
 | `pynids block add/remove/list/flush` | Manage pf blocks |
 | `sudo pynids ai set-key` | Store your Anthropic API key |
 | `pynids ai explain ALERT_ID` | Explain an alert with Claude |
+| `pynids ai ask "QUESTION"` | Let Claude investigate this Mac (read-only tools) |
+| `pynids connections [--flagged] [--all] [--app NAME]` | Live connections with program, signature and risk flags |
+| `pynids listening` | Listening ports and who can reach them |
+| `pynids program PATH` | Signature, SHA-256, launch items and sockets of one executable |
+| `pynids launch-items [--flagged]` | LaunchAgents / LaunchDaemons and the programs they start |
+| `pynids lookup IP [--local]` | IP dossier: what PyNIDS saw, plus RDAP / reverse DNS / InternetDB |
+| `pynids devices [--scan IP]` | Devices on your LAN; identify one with nmap |
+| `pynids allow list/add/remove` | Manage "Mark as expected" rules |
 | `pynids keylog [--browser …]` | Launch a browser that logs TLS keys |
 | `pynids decrypt [PCAP…] [--wireshark]` | List decrypted requests from recorded traffic |
 | `sudo pynids xray --iface en0` | Live terminal X-Ray dashboard |
@@ -538,7 +595,9 @@ sudo .venv/bin/pynids query --db "/Library/Application Support/PyNIDS/events.db"
 
 ## 🔐 Privacy & security
 
-* **Everything stays on your Mac.** The only outbound requests are feed and GeoIP downloads and, only when you click it, Explain with Claude.
+* **Everything stays on your Mac.** The only outbound requests are feed and GeoIP downloads, IP lookups, and, only when you ask, Claude.
+* **IP lookups are limited on purpose.** Reverse DNS, RDAP and Shodan InternetDB lookups tell those services (and, for reverse DNS, whoever runs the IP's zone, possibly an attacker) that you are interested in an address. By default they run automatically only for IPs in MEDIUM-or-worse alerts (at most 40 an hour) and when you click **Look up**; private addresses are never sent. Set `lookups.mode: manual` to only look up on request.
+* **nmap scans are refused for internet hosts.** Only private / link-local addresses and this Mac can be scanned, and only when you click.
 * **The API listens on `127.0.0.1` only**, and a malicious webpage can't use it:
   * a **Host-header allowlist** blocks DNS-rebinding attacks
   * a **random token** is required for every data route
@@ -553,10 +612,11 @@ sudo .venv/bin/pynids query --db "/Library/Application Support/PyNIDS/events.db"
 |---|---|
 | `/Library/LaunchDaemons/com.pynids.daemon.plist` | Background service definition |
 | `/Library/Application Support/PyNIDS/config.yaml` | Your settings |
-| `…/events.db` | Alert history |
+| `…/events.db` | Alert history, plus the learned baseline, LAN devices, and cached IP lookups |
 | `…/intel/`, `…/geoip/` | Cached feeds, GeoIP databases |
 | `…/api-token`, `…/anthropic-key` | API token (0644), Claude key (0600) |
 | `…/blocklist.json` | Active blocks and why |
+| `…/allowlist.json` | Rules you marked as expected |
 | `…/paused` | Present while detection is stopped from the menu bar |
 | `…/captures/` | Rolling capture (only with `--record`) |
 | `/Library/Logs/PyNIDS/daemon.log` | Daemon log |
@@ -602,7 +662,7 @@ sudo rm -rf "/Library/Application Support/PyNIDS" /Library/Logs/PyNIDS   # data,
 
 ```bash
 pip install -e ".[dev,all]"
-pytest                                    # 230 tests
+pytest                                    # 268 tests
 pytest --cov=pynids --cov-report=term-missing
 ```
 
@@ -620,12 +680,13 @@ pynids/
 ├── protocols/           HTTP, DNS, TLS, QUIC (+ decryption), STUN, SSH, SMTP
 ├── detection/           signature, anomaly, behavioural, X-Ray (stealth) detectors
 ├── enrich/              app attribution (psutil + nettop), hostnames, GeoIP
+├── host/                code signatures, socket table, launch items, IP dossiers, LAN inventory
 ├── intel/               threat intel index + live feeds
 ├── alerts/              alert model, manager, plain-English guide, outputs (SQLite, JSON, syslog, terminal)
 ├── response/            pf blocking, macOS notifications
-├── ai/                  Explain with Claude
+├── ai/                  Explain with Claude, Ask Claude (investigation agent)
 ├── service/             daemon, local API, live stats, launchd, PCAP recorder
-├── web/dashboard.html   web dashboard
+├── web/dashboard.html   web dashboard (vendor/: offline map libraries)
 ├── cli.py, cli_service.py
 macos/
 ├── src/                 SwiftUI menu bar app + WidgetKit widget

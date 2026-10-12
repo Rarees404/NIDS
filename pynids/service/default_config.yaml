@@ -32,6 +32,23 @@ response:
   ttl: 3600                # seconds before a block lifts automatically
   never_block: []          # extra IPs / CIDRs to protect, e.g. ["203.0.113.10/32"]
 
+host:
+  signatures: true         # check the code signature of every program that uses the network
+  baseline: true           # learn this Mac, then flag new programs and new countries per app
+  baseline_learning_hours: 24
+  lan_inventory: true      # devices on your network, and an alert when a new one joins
+  lan_learning_hours: 1
+  c2_correlation: true     # join independent signals into a "Likely command-and-control" alert
+
+lookups:
+  # Reverse DNS, RDAP (who owns an IP) and Shodan InternetDB (open ports, tags, CVEs).
+  # Each lookup tells those services you're interested in that address.
+  #   alerts — automatically for IPs in alerts at or above min_severity (default)
+  #   always — automatically for every alerting IP
+  #   manual — only when you click "Look up" in the dashboard or run `pynids lookup`
+  mode: alerts
+  min_severity: MEDIUM
+
 alert_manager:
   dedup_window: 60
   correlation_window: 120

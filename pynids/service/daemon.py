@@ -37,7 +37,14 @@ from ..alerts.model import Severity
 from ..alerts.outputs.sqlite_out import SQLiteOutput
 from ..config import DEFAULT_CONFIG, _deep_merge, load_config
 from ..engine import DetectionEngine
+from ..alerts.allowlist import Allowlist
+from ..detection.hostrisk import BaselineDetector, BaselineStore, C2Correlator, ProcessRiskDetector
 from ..enrich import Enricher, GeoResolver, HostnameCache, ProcessResolver
+from ..host.codesign import SignatureChecker
+from ..host.dossier import IpLookup, LookupPrefetch
+from ..host.inspector import HostInspector
+from ..host.lan import LanInventory
+from ..host.persistence import PersistenceIndex
 from ..intel import feeds as feeds_mod
 from ..intel.threat_intel import ThreatIntel
 from ..paths import (
@@ -83,6 +90,23 @@ DAEMON_DEFAULTS: Dict[str, Any] = {
         "dedup_window": 60,
         "correlation_window": 120,
         "correlation_threshold": 3,
+    },
+    # Host-aware detection: code signatures, baseline, LAN inventory, C2 correlation.
+    "host": {
+        "signatures": True,
+        "baseline": True,
+        "baseline_learning_hours": 24,
+        "lan_inventory": True,
+        "lan_learning_hours": 1,
+        "c2_correlation": True,
+    },
+    # External IP lookups (reverse DNS, RDAP, Shodan InternetDB).
+    #   alerts — automatically, only for IPs in alerts at or above min_severity
+    #   always — automatically for every alerting IP, any severity
+    #   manual — only when you open an IP in the dashboard and ask
+    "lookups": {
+        "mode": "alerts",
+        "min_severity": "MEDIUM",
     },
 }
 
@@ -184,9 +208,15 @@ class Daemon:
         self.live = LiveState()
 
         # --- Enrichment ---
+        hcfg = self.cfg["host"]
         self.processes = ProcessResolver() if dcfg.get("process_attribution", True) else None
         self.geo = GeoResolver() if dcfg.get("geoip", True) else None
-        self.enricher = Enricher(processes=self.processes, geo=self.geo, hostnames=HostnameCache())
+        self.signatures = SignatureChecker() if hcfg.get("signatures", True) else None
+        self.enricher = Enricher(processes=self.processes, geo=self.geo, hostnames=HostnameCache(),
+                                 signatures=self.signatures)
+        self.persistence = PersistenceIndex()
+        lcfg = self.cfg["lookups"]
+        self.lookups = IpLookup(db_path(), mode=str(lcfg.get("mode", "alerts")))
 
         # --- Alert pipeline ---
         am = self.cfg["alert_manager"]
@@ -197,9 +227,18 @@ class Daemon:
             min_severity=Severity.LOW,
             suppression_rules=am.get("suppression", []),
         )
+        self.allowlist = Allowlist(data_dir() / "allowlist.json")
+        self.alerts.add_filter(self.allowlist)
         self.alerts.register_output(self.live)
         self.store = SQLiteOutput(path=str(db_path()), batch_size=100, flush_interval=2.0)
         self.alerts.register_output(self.store)
+        self.alerts.register_output(LookupPrefetch(
+            self.lookups, min_severity=Severity(str(lcfg.get("min_severity", "MEDIUM")).upper())))
+        if hcfg.get("c2_correlation", True):
+            self.alerts.register_output(C2Correlator(
+                emit=self.alerts.add,
+                infra_tags=lambda ip: ((self.lookups.cached(ip) or {}).get("internetdb") or {}).get("tags") or [],
+            ))
 
         ncfg = self.cfg["notifications"]
         self.notifier = None
@@ -236,12 +275,36 @@ class Daemon:
             enricher=self.enricher,
             packet_observers=[self.live.observe_packet],
         )
+        if self.signatures is not None:
+            self.engine.add_detector(ProcessRiskDetector(self.signatures.lookup, self.persistence.for_program))
+        self.baseline: Optional[BaselineDetector] = None
+        if hcfg.get("baseline", True):
+            self.baseline = BaselineDetector(
+                BaselineStore(db_path()),
+                learning_seconds=float(hcfg.get("baseline_learning_hours", 24)) * 3600,
+            )
+            self.engine.add_detector(self.baseline)
+        self.lan = None
+        if hcfg.get("lan_inventory", True):
+            self.lan = LanInventory(
+                db_path(), emit=self.alerts.add, hostname=self.enricher.hostnames.lookup,
+                learning_seconds=float(hcfg.get("lan_learning_hours", 1)) * 3600,
+                own_ips=lambda: self.enricher.local_ips,
+            )
+        self.inspector = HostInspector(
+            live=self.live, signatures=self.signatures or SignatureChecker(),
+            persistence=self.persistence, lookups=self.lookups, lan=self.lan,
+            hostnames=self.enricher.hostnames, geo=self.enricher.geo,
+            intel=lambda: self.engine.intel, baseline=self.baseline, db_path=db_path(),
+        )
 
         # --- API ---
-        explain = None
+        explain = investigate = None
         from ..ai import explain as ai_explain
         if ai_explain.is_available():
-            explain = ai_explain.explain_alert
+            from ..ai.investigate import Toolbox, investigate as ai_investigate
+            explain = lambda alert: ai_explain.explain_alert(alert, extra=self.explain_context(alert))  # noqa: E731
+            investigate = lambda q: ai_investigate(q, Toolbox(self.inspector, self.live))  # noqa: E731
         self.token = ensure_token()
         self.api_ctx = ServiceContext(
             live=self.live,
@@ -254,6 +317,10 @@ class Daemon:
             update_feeds=self.refresh_feeds,
             feed_status=lambda: feeds_mod.feed_status(intel_dir()),
             set_detection=self.set_detection,
+            inspector=self.inspector,
+            allowlist=self.allowlist,
+            investigate=investigate,
+            baseline=self.baseline,
         )
         self.server = make_server(self.api_ctx, dcfg["api_host"], int(dcfg["api_port"]))
 
@@ -283,7 +350,38 @@ class Daemon:
             "feeds_age_hours": _hours(feeds_mod.oldest_fetch_age(intel_dir())),
             "recording": str(self.recorder.current) if self.recorder else None,
             "data_dir": str(data_dir()),
+            "signatures": bool(self.signatures and self.signatures.available),
+            "lookup_mode": self.lookups.mode,
+            "baseline_learning": bool(self.baseline and self.baseline.learning),
+            "lan_inventory": self.lan is not None,
+            "local_ips": sorted(ip for ip in self.enricher.local_ips
+                                if ":" not in ip and not ip.startswith("127.")),
+            "allowlisted": self.allowlist.hits,
         }
+
+    def explain_context(self, alert: Dict[str, Any]) -> Dict[str, Any]:
+        """Host facts sent to Claude with an alert (program signature, IP dossier)."""
+        ctx = alert.get("context") or {}
+        extra: Dict[str, Any] = {}
+        exe = ctx.get("exe") or (alert.get("evidence") or {}).get("exe")
+        try:
+            if exe:
+                prog = self.inspector.program(exe, with_hash=False)
+                extra["program"] = {k: prog.get(k) for k in ("exe", "signature", "assessment", "launchd",
+                                                             "usual_countries", "first_network_use")}
+            ip = ctx.get("remote_ip") or alert.get("dst_ip")
+            if ip:
+                # Asking Claude is a deliberate user action, so a fresh lookup is fine.
+                d = self.inspector.dossier(ip, external=self.lookups.mode != "manual")
+                local = d["local"]
+                extra["remote"] = {
+                    "ip": ip, "hostname_seen": local.get("remote_host"), "apps": local.get("apps"),
+                    "intel": local.get("intel"), "bytes": local.get("bytes"),
+                    "lookup": {k: (d.get("external") or {}).get(k) for k in ("ptr", "rdap", "internetdb")},
+                }
+        except Exception as exc:  # noqa: BLE001 — context is best-effort
+            logger.debug("explain context failed: %s", exc)
+        return extra
 
     def refresh_feeds(self) -> List[Dict[str, Any]]:
         results = feeds_mod.update_feeds(intel_dir())
@@ -321,6 +419,13 @@ class Daemon:
         while not self.stop_event.wait(2.0):
             tick += 1
             self.store.flush()
+            if tick % 15 == 0 and self.baseline is not None:
+                self.baseline.store.flush()
+            if tick % 30 == 0 and self.lan is not None and not self.paused:
+                try:
+                    self.lan.refresh()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("LAN refresh failed: %s", exc)
             if self.blocker and tick % 15 == 0:
                 for ip in self.blocker.expire():
                     self.live.broadcast("unblock", {"ip": ip, "expired": True})
@@ -332,7 +437,7 @@ class Daemon:
                     self._restart_requested = True
                     self.capture_stop.set()
                     self.stop_event.set()
-            if refresh_s > 0 and tick % 300 == 0:
+            if refresh_s > 0 and tick % 300 == 0 and not self.paused:
                 if feeds_mod.oldest_fetch_age(intel_dir()) > refresh_s:
                     threading.Thread(target=self.refresh_feeds, daemon=True).start()
 
@@ -363,6 +468,9 @@ class Daemon:
                 flag.write_text(f"{time.time()}\n", encoding="utf-8")
                 self.capture_stop.set()
                 self.interfaces = []
+                # Idle everything that only exists to feed detection.
+                if self.processes:
+                    self.processes.pause()
                 if self.notifier:
                     self.notifier.discard_pending()
                 if self.state == "running":
@@ -372,6 +480,8 @@ class Daemon:
             elif enabled and self.paused:
                 self.paused = False
                 flag.unlink(missing_ok=True)
+                if self.processes:
+                    self.processes.resume()
                 if self.state == "paused":
                     self._start_capture()
                 logger.warning("Detection resumed")
@@ -385,6 +495,13 @@ class Daemon:
 
         if self.processes:
             self.processes.start()
+            if self.paused:
+                self.processes.pause()
+        if self.signatures:
+            self.signatures.start()
+        self.lookups.start()
+        if self.lan is not None and not self.paused:
+            threading.Thread(target=self.lan.refresh, name="lan", daemon=True).start()
         if self.blocker:
             try:
                 self.blocker.sync()
@@ -440,11 +557,27 @@ class Daemon:
             self.server.server_close()
         except Exception:  # noqa: BLE001
             pass
+        self.capture_stop.set()
         if self.processes:
             self.processes.stop()
+        if self.signatures:
+            self.signatures.stop()
+        from ..host.lan import kill_scans
+        kill_scans()
+        if self.baseline is not None:
+            self.baseline.store.flush()
         if self.recorder:
             self.recorder.close()
+        # A network change (exit 75) restarts us within seconds: keep the
+        # blocks.  A real stop leaves nothing behind in the firewall; the
+        # ledger re-applies unexpired blocks on the next start.
+        if self.blocker and not self._restart_requested:
+            try:
+                self.blocker.unload()
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Could not unload pf rules: %s", exc)
         self.alerts.close()
+        logger.info("Stopped cleanly")
 
 
 def _hours(seconds: float) -> Optional[float]:

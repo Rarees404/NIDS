@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from .alerts.manager import AlertManager
 from .alerts.model import Alert, AlertType, Severity
 from .detection.anomaly import AnomalyDetector, PortScanDetector, BruteForceDetector
+from .detection.base import BaseDetector
 from .detection.behavioral import (
     DnsTunnelingDetector,
     HttpAttackDetector,
@@ -251,6 +252,15 @@ class DetectionEngine:
     @property
     def enricher(self) -> Optional["Enricher"]:
         return self._enricher
+
+    def add_detector(self, detector: BaseDetector) -> None:
+        """Register an extra detector (the daemon's host-aware ones)."""
+        with self._lock:
+            self._detectors.append(detector)
+
+    @property
+    def intel(self) -> Optional[ThreatIntel]:
+        return self._intel
 
     def add_packet_observer(self, observer: Callable[[dict, dict, dict], None]) -> None:
         self._observers.append(observer)

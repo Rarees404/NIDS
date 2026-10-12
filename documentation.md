@@ -31,6 +31,7 @@
 15. [Test Suite](#15-test-suite)
 16. [Design Decisions & Trade-offs](#16-design-decisions--trade-offs)
 17. [Version 2: Always-On Service, Enrichment & Response](#17-version-2-always-on-service-enrichment--response)
+18. [Host Inspection: Programs, Persistence, IP Dossiers, LAN, Claude Investigation](#18-host-inspection-programs-persistence-ip-dossiers-lan-claude-investigation)
 
 ---
 
@@ -1322,3 +1323,47 @@ sniff_live(lo0) ─┴─► DetectionEngine.process_packet(meta)
   events arrive); the menu bar and dashboard are the live views.
 * The menu bar app is ad-hoc signed. It runs on the Mac that built it; distributing it
   needs a Developer ID signature and notarization.
+
+---
+
+## 18. Host Inspection: Programs, Persistence, IP Dossiers, LAN, Claude Investigation
+
+Packets say *what* happened; `pynids/host/` says *who* did it and whether to trust them.
+
+### 18.1 Modules
+
+| Module | Role |
+|---|---|
+| `host/codesign.py` | `SignatureChecker` runs `codesign -dv` + `codesign --verify` (not `--strict`, which rejects harmless layouts in signed apps such as Teams) on a background thread, cached per (path, size, mtime). `lookup()` never blocks. `path_risk()` judges the location; `assess()` combines both into flags and a 0–3 risk. Dev-tool locations (Homebrew, `.venv`, `.nvm`, `node_modules` …) don't count as untrusted, because ad-hoc linker signatures are normal there |
+| `host/connections.py` | psutil socket table + `nettop` user-space flows (with remote endpoints). UDP sockets on ephemeral ports (≥ 49152) with no peer are client sockets, not listeners |
+| `host/persistence.py` | Reads every LaunchAgent / LaunchDaemon plist; `PersistenceIndex.for_program()` maps an executable (or anything in its `.app` bundle) to the jobs that start it |
+| `host/dossier.py` | `IpLookup`: PTR, RDAP (`rdap.org`) and Shodan InternetDB, concurrently, cached 24 h in `ip_lookups` (events DB). Never sent for non-global addresses. `LookupPrefetch` (alert output) queues automatic lookups per `lookups.mode`, capped at 40/hour |
+| `host/lan.py` | `LanInventory` from `arp -an` + hostname cache, persisted in `lan_devices`; `LAN-NEW-DEVICE` after the learning window. `run_nmap()` (`-sV --top-ports 200`) only for private / link-local / own addresses |
+| `host/inspector.py` | `HostInspector` joins everything for the API, CLI and Claude tools. The connection table is single-flight cached (3 s); programs are grouped by outermost `.app` bundle |
+
+### 18.2 Detectors (`detection/hostrisk.py`)
+
+* **`ProcessRiskDetector`**: once per executable, on its first outbound packet to a public IP after its signature is known. The enricher adds `exe` and `signature` to every packet context.
+* **`BaselineDetector`** with `BaselineStore` (`baseline` table): silent for `baseline_learning_hours`; afterwards `HOST-NEW-PROGRAM` for unseen executables and `BASELINE-NEW-COUNTRY` for non-browser apps known longer than the learning window.
+* **`C2Correlator`**: an alert *output* that re-injects into `AlertManager.add`. Signals are kept per program (`untrusted_binary`, `new_program`) and per remote (`beacon`, `bare_ip`, `intel`, plus `c2_infra` from cached InternetDB tags). It fires `HOST-C2-LIKELY` when there are ≥ 2 distinct signals (not counting `bare_ip`), at least one network-side, once per (program, remote) per 6 h.
+
+### 18.3 Allowlist (`alerts/allowlist.py`)
+
+"Mark as expected" rules (`kind`, `rule_id`, `app`, `host` with subdomain match, `ip`) in
+`allowlist.json`, applied through the new `AlertManager.add_filter()` hook before dedup and
+outputs. A rule with only `kind: threat` or `kind: attack` is refused as too broad.
+
+### 18.4 Claude
+
+* `ai/explain.py` uses `claude-opus-5-5` with `output_config.effort: high` (Opus 5.5 defaults to `medium`) and server-side `fallbacks: "default"`. The daemon passes `host_context` (program signature + launch items, IP dossier) with the alert.
+* `ai/investigate.py` is a manual tool-use loop (max 14 turns) over eight strict, read-only tools backed by `HostInspector`. The full `response.content` is appended each turn (append-only history); tool failures go back as `is_error` results; tool output is capped at 24 kB and framed as untrusted data in the system prompt. Only one investigation runs at a time (`409` otherwise).
+
+### 18.5 API additions
+
+`GET /api/attention`, `/api/connections`, `/api/program?exe=`, `/api/dossier/<ip>[?external=1&refresh=1]`,
+`/api/launch-items`, `/api/devices`, `POST /api/devices/scan`, `GET|POST /api/allowlist`,
+`DELETE /api/allowlist/<id>`, `POST /api/investigate`, `GET /api/apps/<name>`, `GET /api/baseline`,
+and unauthenticated `GET /static/<file>` for the vendored map libraries (flat allowlist of
+`.js` / `.json` names). The server's listen backlog is raised to 128, because the dashboard
+opens more parallel requests than socketserver's default of 5.
+

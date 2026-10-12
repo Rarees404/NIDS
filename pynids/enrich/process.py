@@ -103,6 +103,9 @@ class ProcessResolver:
         self._proc_cache: Dict[Tuple[int, float], ProcInfo] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        # Cleared while detection is paused: no socket snapshots at all.
+        self._active = threading.Event()
+        self._active.set()
         self._thread: Optional[threading.Thread] = None
         self.available = psutil is not None or snapshot is not None
         self.last_error: Optional[str] = None
@@ -122,10 +125,28 @@ class ProcessResolver:
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
+        self._active.set()
+
+    def pause(self) -> None:
+        """Stop snapshotting (detection paused) until :meth:`resume`."""
+        self._active.clear()
+        self._wake.set()
+
+    def resume(self) -> None:
+        self._active.set()
+        self._wake.set()
+
+    @property
+    def paused(self) -> bool:
+        return not self._active.is_set()
 
     def _run(self) -> None:
         last = time.monotonic()
         while not self._stop.is_set():
+            if not self._active.is_set():
+                self._active.wait()  # sleeps without waking until resumed or stopped
+                self._wake.clear()
+                continue
             # Sleep until a new unknown port shows up or the idle ceiling passes.
             self._wake.wait(max(0.0, self.max_interval - (time.monotonic() - last)))
             if self._stop.is_set():

@@ -177,6 +177,21 @@ class PfBlocker:
             self._save_ledger()
         return count
 
+    def unload(self) -> None:
+        """
+        Take the PyNIDS rules out of the kernel but keep the ledger.
+
+        Used when PyNIDS is shut down completely: nothing would be left to
+        lift expiring blocks, so the firewall is cleaned up and :meth:`sync`
+        re-applies whatever hasn't expired on the next start.
+        """
+        with self._lock:
+            if self.dry_run:
+                return
+            self._pfctl("-a", ANCHOR, "-t", TABLE, "-T", "flush", check=False)
+            self._pfctl("-a", ANCHOR, "-F", "rules", check=False)
+            self._anchor_loaded = False
+
     def list(self) -> List[BlockEntry]:
         with self._lock:
             return sorted(self._entries.values(), key=lambda e: e.created, reverse=True)

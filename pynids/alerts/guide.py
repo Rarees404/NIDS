@@ -455,6 +455,102 @@ def _generic(alert, ev, ctx) -> Guide:
     )
 
 
+def _process_risk(alert, ev, ctx) -> Guide:
+    exe = ev.get("exe") or "?"
+    reasons = ev.get("reasons") or []
+    jobs = ev.get("launchd_jobs") or []
+    high = alert.get("severity") in ("HIGH", "CRITICAL")
+    steps = [
+        "Check the program's path below. If you didn't install it, don't run it again.",
+        f"See what it is: `codesign -dv --verbose=2 \"{exe}\"` and `spctl -a -vv \"{exe}\"`.",
+        "Look up its SHA-256 on VirusTotal from the program's page in the dashboard (Connections tab).",
+    ]
+    if jobs:
+        steps.append(f"It is started automatically by `{jobs[0]['plist']}`. Removing that file (and "
+                     "logging out or rebooting) stops it from coming back.")
+    steps.append("If it looks malicious: block the server from the dashboard, quit the process "
+                 f"(`sudo kill {ev.get('pid') or '<pid>'}`), and scan your Mac.")
+    return _g(
+        f"{_who(ctx, exe.rsplit('/', 1)[-1])} reached the internet, and "
+        + (" and ".join(reasons) if reasons else "it isn't signed by a known developer") + ".",
+        "Apps from the App Store or reputable developers are signed: macOS can tell who made "
+        "them and that they haven't been modified. Malware is far more often unsigned, signed "
+        "with no identity (\"ad-hoc\"), or run from places normal apps don't live, such as "
+        "temporary or hidden folders. Plenty of legitimate developer tools are unsigned too, so "
+        "this is a prompt to check, not proof of infection.",
+        ACT if high else CHECK,
+        steps,
+        [("Program", exe), ("Signature", ev.get("signature_label") or ev.get("signature")),
+         ("Signed by", ev.get("authority")), ("Team ID", ev.get("team_id")),
+         ("Starts automatically", ", ".join(j["label"] for j in jobs) if jobs else None)],
+    )
+
+
+def _new_program(alert, ev, ctx) -> Guide:
+    exe = ev.get("exe") or "?"
+    return _g(
+        f"{_who(ctx, exe.rsplit('/', 1)[-1])} used the internet for the first time since PyNIDS "
+        "started learning this Mac's normal behaviour.",
+        "New programs appear when you install or update software. A program you don't "
+        "recognise suddenly going online is also how many infections first show up.",
+        CHECK if ev.get("signature") in ("unsigned", "adhoc", "invalid") else HARMLESS,
+        ["If you just installed or updated this program, nothing to do.",
+         "Otherwise open the Connections tab to see what it's talking to and who signed it."],
+        [("Program", exe), ("First server", ev.get("first_destination")),
+         ("Signature", ev.get("signature"))],
+    )
+
+
+def _new_country(alert, ev, ctx) -> Guide:
+    where = ev.get("country_name") or ev.get("country")
+    usual = ", ".join(ev.get("usual_countries") or [])
+    return _g(
+        f"{_who(ctx)} contacted a server in {where}, a country it never used before.",
+        "Apps usually talk to the same few places. A change can be a new CDN region or "
+        "feature, but it is also what a hijacked app or a tampered update looks like.",
+        HARMLESS,
+        ["Check the server and network owner below. Big cloud providers (Amazon, Google, "
+         "Microsoft, Cloudflare, Akamai) are usually benign.",
+         "Mark it as expected if it's fine, so it won't be reported again."],
+        [("Server", _host(alert, ctx, ev)), ("Network", ev.get("org")),
+         ("Usual countries", usual or None)],
+    )
+
+
+def _new_device(alert, ev, ctx) -> Guide:
+    name = ev.get("name") or ev.get("vendor") or "An unidentified device"
+    return _g(
+        f"{name} joined your local network at {ev.get('ip')}.",
+        "Every phone, laptop, TV and smart plug that connects shows up here. An unknown device "
+        "on a home network can be a guest, a new gadget, or someone using your Wi-Fi."
+        + (" Its MAC address is randomised (\"private Wi-Fi address\"), which is normal for "
+           "phones and recent laptops." if ev.get("randomized_mac") else ""),
+        HARMLESS,
+        ["If you recognise it, nothing to do.",
+         "Otherwise scan it from the Network tab to see what it is, and check your router's "
+         "client list. Change the Wi-Fi password if you can't account for it."],
+        [("MAC address", ev.get("mac")), ("Vendor", ev.get("vendor")), ("Interface", ev.get("interface"))],
+    )
+
+
+def _likely_c2(alert, ev, ctx) -> Guide:
+    reasons = ev.get("reasons") or []
+    return _g(
+        f"{_who(ctx)} shows several independent signs of being remote-controlled by "
+        f"{_host(alert, ctx, ev)}.",
+        "Malware usually calls home to its operator on a timer and runs from unsigned or "
+        "hidden binaries. Each of these on its own has innocent explanations; PyNIDS raises "
+        "this alert only when two or more different ones line up for the same program and "
+        "server.",
+        ACT,
+        ["Block the server now from this panel.",
+         "Open the program in the Connections tab: check who signed it and what starts it automatically.",
+         "Quit the process, remove its launch item, and run a malware scan. If you can't explain "
+         "it, assume the Mac is compromised and change important passwords from another device."],
+        [("Why", "; ".join(reasons)), ("Program", ev.get("exe"))],
+    )
+
+
 _BY_RULE: Dict[str, Callable[..., Guide]] = {
     "STEALTH-LOCALHOST-PROBE": _localhost_probe,
     "STEALTH-LOCALHOST-SCAN": _localhost_scan,
@@ -468,6 +564,11 @@ _BY_RULE: Dict[str, Callable[..., Guide]] = {
     "STEALTH-WEBSOCKET": _websocket,
     "STEALTH-BEACON": _beacon_pixel,
     "STEALTH-DNS-PREFETCH": _prefetch,
+    "HOST-PROCESS-RISK": _process_risk,
+    "HOST-NEW-PROGRAM": _new_program,
+    "BASELINE-NEW-COUNTRY": _new_country,
+    "LAN-NEW-DEVICE": _new_device,
+    "HOST-C2-LIKELY": _likely_c2,
 }
 
 _BY_TAG: List[Tuple[str, Callable[..., Guide]]] = [

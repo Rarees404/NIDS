@@ -318,6 +318,84 @@ pre.json { background: var(--surface-2); border: 1px solid var(--border); border
 .toast.show { opacity: 1; transform: translateX(-50%); }
 footer { color: var(--muted); font-size: 12px; margin-top: 28px; text-align: center; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+/* ---------- tabs ---------- */
+.nav a[aria-current="page"] { background: var(--surface-2); color: var(--ink); font-weight: 560; }
+[hidden] { display: none !important; }
+.nav a .n { display: inline-block; min-width: 16px; margin-left: 5px; padding: 0 5px; border-radius: 999px; font-size: 11px; line-height: 16px; text-align: center; background: var(--critical); color: #fff; font-weight: 600; }
+section[data-tab] { display: none; }
+section[data-tab].active { display: block; }
+.tabs-select { display: none; height: 32px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); padding: 0 8px; }
+@media (max-width: 820px) { .tabs-select { display: inline-block; } }
+.section-title { display: flex; align-items: baseline; gap: 10px; margin: 4px 0 14px; flex-wrap: wrap; }
+.section-title h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -0.015em; }
+.section-title .sub { color: var(--muted); font-size: 13px; }
+.section-title .right { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 16px; }
+@media (max-width: 1100px) { .row-3 { grid-template-columns: minmax(0, 1fr); } }
+.mt { margin-top: 16px; }
+
+/* ---------- attention ---------- */
+.attention { display: grid; gap: 8px; }
+.att { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); cursor: pointer; text-align: left; width: 100%; }
+.att:hover, .att:focus-visible { border-color: var(--axis); outline: none; }
+.att .t { font-weight: 600; overflow-wrap: anywhere; }
+.att .d { color: var(--ink-2); font-size: 12.5px; overflow-wrap: anywhere; }
+.att .go { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.allclear { display: flex; gap: 12px; align-items: center; padding: 6px 2px; }
+.allclear .big { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: color-mix(in srgb, var(--good) 16%, transparent); color: var(--good-text); font-weight: 700; }
+
+/* ---------- entity links + risk ---------- */
+button.link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-align: left; overflow-wrap: anywhere; }
+button.link:hover { text-decoration: underline; }
+button.link.mono { font-family: var(--mono); font-size: 12.5px; }
+.risk { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; border: 1px solid var(--border); }
+.risk::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--rc, var(--muted)); }
+.risk.r0 { --rc: var(--good); color: var(--ink-2); }
+.risk.r1 { --rc: var(--warning); }
+.risk.r2 { --rc: var(--serious); background: color-mix(in srgb, var(--serious) 14%, transparent); }
+.risk.r3 { --rc: #fff; background: var(--critical); color: #fff; border-color: transparent; }
+.chip.flag { background: color-mix(in srgb, var(--serious) 14%, var(--surface)); color: var(--ink); }
+.chip.flag.bad { background: color-mix(in srgb, var(--critical) 18%, var(--surface)); }
+.chip.ok { background: color-mix(in srgb, var(--good) 12%, var(--surface)); color: var(--ink); }
+.sig { font-size: 12px; white-space: nowrap; }
+.sig.bad { color: var(--critical); font-weight: 600; }
+.sig.warn { color: #b07800; font-weight: 600; }
+.sig.ok { color: var(--good-text); }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--surface-2); }
+td .sub2 { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.path { font-family: var(--mono); font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: var(--surface); padding: 0 10px; height: 30px; cursor: pointer; font-size: 12.5px; color: var(--ink-2); }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.toolbar.flat { padding: 0 0 10px; }
+.tablecap { color: var(--muted); font-size: 12px; padding: 8px 2px 0; }
+.event .count { display: inline-block; min-width: 22px; padding: 0 6px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); font-size: 11.5px; font-variant-numeric: tabular-nums; text-align: center; color: var(--ink-2); }
+label.check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; white-space: nowrap; }
+
+/* ---------- drawer extras ---------- */
+.drawer-body .section { margin-top: 18px; }
+.drawer-body .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+.menu { position: relative; display: inline-block; }
+.menu-list { position: absolute; z-index: 70; top: 38px; left: 0; min-width: 280px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,0.18); padding: 6px; display: none; }
+.menu-list.show { display: block; }
+.menu-list button { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 8px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+.menu-list button:hover { background: var(--surface-2); }
+.menu-list button small { display: block; color: var(--muted); font-size: 11.5px; }
+.minitable td, .minitable th { padding: 6px 8px; font-size: 12.5px; }
+a.ext::after { content: " ↗"; }
+
+/* ---------- Claude ---------- */
+.ask textarea { width: 100%; min-height: 64px; resize: vertical; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); padding: 10px 12px; font: inherit; color: inherit; }
+.ask .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+.ask .suggest { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.ask .suggest button { border: 1px solid var(--border); background: var(--surface-2); border-radius: 999px; padding: 4px 10px; font-size: 12.5px; cursor: pointer; color: var(--ink-2); }
+.ask .suggest button:hover { color: var(--ink); }
+.ask .ai-box { display: block; }
+.steps { margin-top: 10px; font-size: 12px; color: var(--muted); }
+.steps li { font-family: var(--mono); font-size: 11.5px; }
+.ai-box code, .guide code { font-family: var(--mono); }
 </style>
 </head>
 <body>
@@ -342,9 +420,18 @@ footer { color: var(--muted); font-size: 12px; margin-top: 28px; text-align: cen
   <div class="topbar-inner">
     <div class="brand"><svg style="color:var(--accent)"><use href="#i-shield"/></svg>PyNIDS</div>
     <span class="status-pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusText">Connecting…</span></span>
-    <nav class="nav" aria-label="Sections">
-      <a href="#overview">Overview</a><a href="#network">Network</a><a href="#apps">Apps</a><a href="#events">Events</a><a href="#protection">Protection</a>
+    <nav class="nav" id="nav" aria-label="Sections">
+      <a href="#overview" data-tab="overview">Overview</a>
+      <a href="#connections" data-tab="connections">Connections<span class="n" id="navConnN" hidden></span></a>
+      <a href="#events" data-tab="events">Events</a>
+      <a href="#apps" data-tab="apps">Apps</a>
+      <a href="#network" data-tab="network">Network</a>
+      <a href="#protection" data-tab="protection">Protection</a>
     </nav>
+    <select class="tabs-select" id="tabSelect" aria-label="Section">
+      <option value="overview">Overview</option><option value="connections">Connections</option><option value="events">Events</option>
+      <option value="apps">Apps</option><option value="network">Network</option><option value="protection">Protection</option>
+    </select>
     <div class="spacer"></div>
     <span class="live-rate" id="liveRate">— pkt/s · —</span>
     <button class="icon-btn" id="notifyBtn" aria-pressed="true" title="Notifications"><svg><use href="#i-bell"/></svg></button>
@@ -355,8 +442,25 @@ footer { color: var(--muted); font-size: 12px; margin-top: 28px; text-align: cen
 <main>
   <div class="banner" id="banner" role="status"></div>
 
-  <section id="overview">
-    <div class="grid kpis" id="kpis"></div>
+  <!-- ===================================================== overview -->
+  <section data-tab="overview" id="tab-overview">
+    <div class="grid row-map" style="margin-top:0">
+      <div class="card">
+        <div class="card-head"><h2>Needs your attention</h2><span class="sub" id="attSub">right now</span></div>
+        <div class="card-body"><div class="attention" id="attention"></div></div>
+      </div>
+      <div class="card ask" id="askCard">
+        <div class="card-head"><h2>Ask Claude</h2><span class="sub">investigates your Mac with read-only tools</span></div>
+        <div class="card-body">
+          <textarea id="askInput" placeholder="Is anything on my Mac suspicious right now?" aria-label="Question for Claude"></textarea>
+          <div class="suggest" id="askSuggest"></div>
+          <div class="row"><button class="btn primary" id="askBtn"><svg><use href="#i-spark"/></svg>Investigate</button><span class="muted" style="font-size:12px" id="askNote"></span></div>
+          <div id="askOut"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid kpis mt" id="kpis"></div>
 
     <div class="grid row-2">
       <div class="card">
@@ -374,35 +478,50 @@ footer { color: var(--muted); font-size: 12px; margin-top: 28px; text-align: cen
         </div>
       </div>
     </div>
-  </section>
-
-  <section id="network">
-    <div class="grid row-map">
+    <div class="grid row-1">
       <div class="card">
-        <div class="card-head">
-          <h2>Where your traffic goes</h2><span class="sub" id="mapSub">remote endpoints, sized by bytes</span>
-          <div class="right legend"><span><i class="dotkey" style="background:var(--series-1)"></i>Endpoint</span><span><i class="dotkey" style="background:var(--series-2)"></i>Raised an alert</span></div>
-        </div>
-        <div class="card-body"><div class="chart" id="map"></div></div>
-      </div>
-      <div class="card">
-        <div class="card-head"><h2>What was found</h2><span class="sub">events by kind, this session</span></div>
+        <div class="card-head"><h2>What was found</h2><span class="sub">events by kind, this session · click to filter</span></div>
         <div class="card-body"><div class="chart" id="kindChart"></div></div>
       </div>
     </div>
   </section>
 
-  <section id="apps">
+  <!-- ===================================================== connections -->
+  <section data-tab="connections" id="tab-connections">
+    <div class="section-title">
+      <h1>Connections</h1><span class="sub" id="connSub">every socket on this Mac and the program behind it</span>
+      <div class="right"><button class="btn" id="connRefresh"><svg><use href="#i-refresh"/></svg>Refresh</button></div>
+    </div>
+    <div class="grid kpis" id="connKpis"></div>
     <div class="grid row-1">
       <div class="card">
-        <div class="card-head"><h2>Apps on the network</h2><span class="sub">which process owns each connection</span></div>
-        <div class="card-body table-wrap" id="appsTable"></div>
+        <div class="card-head"><h2>Programs on the network</h2><span class="sub">riskiest first · click for signature, launch items and hash</span></div>
+        <div class="card-body table-wrap" id="progTable"></div>
+      </div>
+    </div>
+    <div class="grid row-1">
+      <div class="card">
+        <div class="card-head"><h2>Live connections</h2><span class="sub" id="liveConnSub"></span></div>
+        <div class="toolbar">
+          <div class="seg" id="connFilter" role="group" aria-label="Filter connections">
+            <button data-f="internet" aria-pressed="true">Internet</button><button data-f="flagged" aria-pressed="false">Flagged</button><button data-f="all" aria-pressed="false">All</button>
+          </div>
+          <input type="search" id="connSearch" placeholder="Filter by app, host, IP, country…" aria-label="Filter connections">
+        </div>
+        <div class="card-body table-wrap" id="connTable" style="padding-top:0"></div>
+      </div>
+    </div>
+    <div class="grid row-1">
+      <div class="card">
+        <div class="card-head"><h2>What's exposed</h2><span class="sub">listening ports and who can reach them</span></div>
+        <div class="card-body table-wrap" id="listenTable"></div>
       </div>
     </div>
   </section>
 
-  <section id="events">
-    <div class="grid row-1">
+  <!-- ===================================================== events -->
+  <section data-tab="events" id="tab-events">
+    <div class="grid row-1" style="margin-top:0">
       <div class="card">
         <div class="card-head"><h2>Event stream</h2><span class="sub" id="eventsSub">live</span></div>
         <div class="toolbar" id="kindFilters" role="group" aria-label="Filter by kind"></div>
@@ -420,14 +539,48 @@ footer { color: var(--muted); font-size: 12px; margin-top: 28px; text-align: cen
             <option value="86400">Last 24 hours</option>
             <option value="604800">Last 7 days</option>
           </select>
+          <label class="check"><input type="checkbox" id="groupToggle" checked> Group similar</label>
         </div>
         <div class="events" id="eventList" aria-live="polite"></div>
       </div>
     </div>
   </section>
 
-  <section id="protection">
-    <div class="grid row-2">
+  <!-- ===================================================== apps -->
+  <section data-tab="apps" id="tab-apps">
+    <div class="grid row-1" style="margin-top:0">
+      <div class="card">
+        <div class="card-head"><h2>Apps on the network</h2><span class="sub">which process owns the traffic · click an app for details</span></div>
+        <div class="card-body table-wrap" id="appsTable"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================================== network -->
+  <section data-tab="network" id="tab-network">
+    <div class="grid row-1" style="margin-top:0">
+      <div class="card">
+        <div class="card-head">
+          <h2>Where your traffic goes</h2><span class="sub" id="mapSub">remote endpoints, sized by bytes</span>
+          <div class="right legend"><span><i class="dotkey" style="background:var(--series-1)"></i>Endpoint</span><span><i class="dotkey" style="background:var(--series-2)"></i>Raised an alert</span></div>
+        </div>
+        <div class="card-body"><div class="chart" id="map"></div></div>
+      </div>
+    </div>
+    <div class="grid row-1">
+      <div class="card">
+        <div class="card-head">
+          <h2>Devices on your network</h2><span class="sub" id="lanSub">seen in the neighbour table</span>
+          <div class="right"><button class="btn" id="scanSelfBtn" hidden>Scan this Mac</button></div>
+        </div>
+        <div class="card-body table-wrap" id="lanTable"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================================== protection -->
+  <section data-tab="protection" id="tab-protection">
+    <div class="grid row-2" style="margin-top:0">
       <div class="card">
         <div class="card-head">
           <h2>Blocked IPs</h2><span class="sub" id="blockSub">pf firewall</span>
@@ -435,6 +588,21 @@ footer { color: var(--muted); font-size: 12px; margin-top: 28px; text-align: cen
         </div>
         <div class="card-body table-wrap" id="blocksTable"></div>
       </div>
+      <div class="card">
+        <div class="card-head"><h2>Marked as expected</h2><span class="sub">alerts matching these rules are not reported</span></div>
+        <div class="card-body table-wrap" id="allowTable"></div>
+      </div>
+    </div>
+    <div class="grid row-1">
+      <div class="card">
+        <div class="card-head">
+          <h2>Launch items</h2><span class="sub">programs macOS starts automatically (LaunchAgents &amp; LaunchDaemons)</span>
+          <div class="right"><label class="check"><input type="checkbox" id="launchFlagged"> Only flagged</label><button class="btn" id="launchRefresh"><svg><use href="#i-refresh"/></svg>Rescan</button></div>
+        </div>
+        <div class="card-body table-wrap" id="launchTable"></div>
+      </div>
+    </div>
+    <div class="grid row-1">
       <div class="card">
         <div class="card-head">
           <h2>Threat intelligence</h2><span class="sub">live feeds, refreshed automatically</span>
@@ -446,7 +614,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 28px; text-align: cen
   </section>
 
   <footer>
-    PyNIDS <span id="ver"></span> · data stays on this Mac · IP geolocation by <a href="https://db-ip.com" rel="noreferrer">DB-IP</a>
+    PyNIDS <span id="ver"></span> · data stays on this Mac unless you look up an IP or ask Claude · IP geolocation by <a href="https://db-ip.com" rel="noreferrer">DB-IP</a>
   </footer>
 </main>
 
@@ -458,14 +626,17 @@ footer { color: var(--muted); font-size: 12px; margin-top: 28px; text-align: cen
       <div id="drawerSev" style="margin-bottom:6px"></div>
       <h3 id="drawerTitle"></h3>
     </div>
+    <button class="icon-btn" id="drawerBack" aria-label="Back" hidden>←</button>
     <button class="icon-btn" id="drawerClose" aria-label="Close"><svg><use href="#i-close"/></svg></button>
   </div>
   <div class="drawer-body" id="drawerBody"></div>
 </aside>
 <div class="toast" id="toast" role="status"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+<script src="/static/d3-array.min.js"></script>
+<script src="/static/d3-geo.min.js"></script>
+<script src="/static/topojson-client.min.js"></script>
+
 <script>
 "use strict";
 const TOKEN = "__PYNIDS_TOKEN__";
@@ -474,11 +645,13 @@ const SEV_ORDER = { LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
 const KIND_LABELS = {
   threat: "Threat intel", attack: "Attacks & anomalies", webrtc: "WebRTC / IP leaks",
   localhost: "Localhost probes", doh: "Encrypted DNS", tracker: "Trackers", beacon: "Beacons & pixels",
-  websocket: "WebSockets", quic: "QUIC / HTTP-3", prefetch: "DNS prefetch", other: "Other",
+  websocket: "WebSockets", quic: "QUIC / HTTP-3", prefetch: "DNS prefetch", host: "Programs & devices", other: "Other",
 };
+const TABS = ["overview", "connections", "events", "apps", "network", "protection"];
 const state = {
-  summary: null, alerts: [], kind: null, sev: "LOW", q: "", range: "live",
-  remotes: [], timeline: [], rates: null, world: null, openAlert: null,
+  summary: null, alerts: [], kind: null, sev: "LOW", q: "", range: "live", app: null, group: true,
+  remotes: [], timeline: [], rates: null, world: null, openAlert: null, tab: "overview",
+  conns: null, connFilter: "internet", connQ: "", devices: null, nmap: false, allow: [], launch: null,
 };
 
 // ---------------------------------------------------------------- utilities
@@ -595,7 +768,7 @@ function renderStatus(s) {
   const ifaces = (st.interfaces || []).join(" + ") || "—";
   const map = {
     running: ["live", "Monitoring " + ifaces],
-    "needs-root": ["bad", "Capture needs root"], starting: ["warn", "Starting…"], idle: ["warn", "Idle (no capture)"], stopping: ["warn", "Stopping…"],
+    "needs-root": ["bad", "Capture needs root"], paused: ["warn", "Detection paused"], starting: ["warn", "Starting…"], idle: ["warn", "Idle (no capture)"], stopping: ["warn", "Stopping…"],
   };
   const [cls, label] = map[st.state] || ["warn", st.state || "Unknown"];
   dot.className = "dot " + cls;
@@ -761,7 +934,7 @@ function renderKinds() {
     const hit = svgEl("rect", { x: 0, y: i * rowH, width: W, height: rowH, fill: "transparent", style: "cursor:pointer", tabindex: 0, role: "button", "aria-label": `Filter events: ${r.label}` });
     hit.addEventListener("pointermove", (e) => { bar.style.opacity = 0.8; showTip(e, () => [ttRow(color, fmtNum(r.v), r.label), el("div", { class: "tt-note", text: "Click to filter the event stream" })]); });
     hit.addEventListener("pointerleave", () => { bar.style.opacity = 1; hideTip(); });
-    const pick = () => { setKind(r.k); location.hash = "#events"; };
+    const pick = () => { setKind(r.k); go("events"); };
     hit.addEventListener("click", pick);
     hit.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
     svg.append(lab, bar, val, hit);
@@ -773,7 +946,7 @@ function renderKinds() {
 async function loadWorld() {
   if (state.world || !window.topojson) return;
   try {
-    const topo = await (await fetch("https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json")).json();
+    const topo = await (await fetch("/static/countries-110m.json")).json();
     state.world = topojson.feature(topo, topo.objects.countries);
     renderMap();
   } catch (_) { /* offline — the empty state explains */ }
@@ -783,7 +956,7 @@ function renderMap() {
   const pts = state.remotes.filter((r) => r.lat != null && r.lon != null);
   $("mapSub").textContent = pts.length ? `${pts.length} located endpoints, sized by bytes` : "remote endpoints, sized by bytes";
   if (!window.d3 || !state.world) {
-    host.replaceChildren(el("div", { class: "map-empty", text: window.d3 ? "Loading map…" : "The world map needs internet access to load its outline." }));
+    host.replaceChildren(el("div", { class: "map-empty", text: window.d3 ? "Loading map…" : "The map outline failed to load." }));
     return;
   }
   const W = host.clientWidth || 800, H = Math.max(220, Math.round(W / 2));
@@ -820,36 +993,556 @@ function renderMap() {
     c.addEventListener("pointerleave", hideTip);
     c.addEventListener("focus", () => { const b = c.getBoundingClientRect(); showTip({ clientX: b.right, clientY: b.bottom }, build); });
     c.addEventListener("blur", hideTip);
-    c.addEventListener("click", () => { $("search").value = first.ip; state.q = first.ip; state.range = "86400"; $("rangeFilter").value = "86400"; loadAlerts(); location.hash = "#events"; });
+    c.addEventListener("click", () => openDossier(first.ip));
     svg.append(c);
   }
   host.replaceChildren(svg);
   if (!pts.length) host.append(el("div", { class: "map-empty", text: state.summary && state.summary.status && !state.summary.status.geoip ? "Download the free GeoIP database to see locations:  pynids geoip download" : "Waiting for traffic…" }));
 }
 
+
+// ---------------------------------------------------------------- tabs
+function go(tab, opts = {}) {
+  if (!TABS.includes(tab)) tab = "overview";
+  if (location.hash !== "#" + tab) { history.replaceState(null, "", "#" + tab); }
+  state.tab = tab;
+  document.querySelectorAll("section[data-tab]").forEach((s) => s.classList.toggle("active", s.dataset.tab === tab));
+  document.querySelectorAll("#nav a").forEach((a) => { if (a.dataset.tab === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
+  $("tabSelect").value = tab;
+  if (!opts.noscroll) scrollTo({ top: 0 });
+  if (tab === "overview") { renderRate(); renderTimeline(); renderKinds(); loadAttention(); }
+  if (tab === "network") { renderMap(); loadDevices(); }
+  if (tab === "connections") loadConnections();
+  if (tab === "apps") loadApps();
+  if (tab === "events") renderEvents();
+  if (tab === "protection") { loadBlocks(); loadAllowlist(); loadLaunchItems(); loadIntel().catch(() => {}); }
+}
+addEventListener("hashchange", () => go(location.hash.slice(1), { noscroll: true }));
+$("tabSelect").addEventListener("change", (e) => go(e.target.value));
+
+// ---------------------------------------------------------------- shared bits
+const FLAG_LABELS = {
+  unsigned: "Unsigned", adhoc: "Ad-hoc signed", invalid_signature: "Broken signature", odd_path: "Unusual location",
+  intel: "On a blocklist", beacon: "Regular check-ins", c2: "Likely C2", c2_infra: "Tagged C2 by Shodan",
+  exposed: "Reachable from the network", persistent: "Starts automatically", missing_program: "Program missing",
+};
+const SIG_LABELS = {
+  apple: ["Apple", "ok"], app_store: ["App Store", "ok"], developer_id: ["Developer ID", "ok"], development: ["Development build", "warn"],
+  adhoc: ["Ad-hoc", "warn"], unsigned: ["Unsigned", "bad"], invalid: ["Broken signature", "bad"], unknown: ["Unknown", ""],
+};
+const RISK_LABELS = ["OK", "Unusual", "Suspicious", "High risk"];
+function riskBadge(r) { r = Math.max(0, Math.min(3, r || 0)); return el("span", { class: "risk r" + r, text: RISK_LABELS[r] }); }
+function sigBadge(status, exe) {
+  if (!status) return el("span", { class: "sig muted", text: exe ? "checking…" : "—" });
+  const [label, cls] = SIG_LABELS[status] || [status, ""];
+  return el("span", { class: "sig " + cls, text: label });
+}
+function flagChips(flags) {
+  const bad = new Set(["intel", "c2", "c2_infra", "invalid_signature"]);
+  return el("div", { class: "chips" }, (flags || []).map((f) => el("span", { class: "chip flag" + (bad.has(f) ? " bad" : ""), text: FLAG_LABELS[f] || f })));
+}
+function ipLink(ip, label) {
+  if (!ip) return el("span", { class: "muted", text: "—" });
+  return el("button", { class: "link mono", title: "Everything known about " + ip, onclick: (e) => { e.stopPropagation(); openDossier(ip); } }, label || ip);
+}
+function appLink(app) {
+  if (!app) return el("span", { class: "muted", text: "Unattributed" });
+  return el("button", { class: "link", onclick: (e) => { e.stopPropagation(); openApp(app); } }, app);
+}
+function progLink(label, exe) {
+  if (!exe) return el("span", { text: label || "?" });
+  return el("button", { class: "link", title: exe, onclick: (e) => { e.stopPropagation(); openProgram(exe); } }, label || exe.split("/").pop());
+}
+function kvList(pairs) {
+  const dl = el("dl", { class: "kv" });
+  for (const [k, v] of pairs) {
+    if (v == null || v === "" || (Array.isArray(v) && !v.length)) continue;
+    dl.append(el("dt", { text: k }), el("dd", {}, v instanceof Node ? v : String(v)));
+  }
+  return dl;
+}
+function table(headers, rows, opts = {}) {
+  return el("table", { class: opts.cls || "" },
+    el("thead", {}, el("tr", {}, headers.map((h) => el("th", { class: h.num ? "num" : "", text: h.label || h })))),
+    el("tbody", {}, rows));
+}
+function emptyBox(text) { return el("div", { class: "empty", text }); }
+function subjectOf(a) {
+  const ctx = a.context || {}, ev = a.evidence || {};
+  return ctx.remote_host || ev.host || ev.sni || ev.query_name || ev.leaked_ip || ctx.remote_ip || a.dst_ip || a.src_ip || "";
+}
+
+// ---------------------------------------------------------------- drawer (stack: alert → IP → program …)
+const drawerStack = [];
+function showDrawer(view, push) {
+  if (!push) drawerStack.length = 0;
+  drawerStack.push(view);
+  paintDrawer();
+}
+function paintDrawer() {
+  const view = drawerStack[drawerStack.length - 1];
+  if (!view) return closeDrawer();
+  $("drawerSev").replaceChildren(...(view.head || []));
+  $("drawerTitle").textContent = view.title;
+  $("drawerBody").replaceChildren(...view.body());
+  $("drawerBack").hidden = drawerStack.length < 2;
+  $("drawer").classList.add("show"); $("drawer").setAttribute("aria-hidden", "false"); $("scrim").classList.add("show");
+  $("drawerBody").scrollTop = 0;
+  $("drawerClose").focus();
+}
+function closeDrawer() {
+  drawerStack.length = 0; state.openAlert = null;
+  $("drawer").classList.remove("show"); $("drawer").setAttribute("aria-hidden", "true"); $("scrim").classList.remove("show");
+}
+$("drawerClose").addEventListener("click", closeDrawer);
+$("drawerBack").addEventListener("click", () => { drawerStack.pop(); paintDrawer(); });
+$("scrim").addEventListener("click", closeDrawer);
+addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+function isOpen() { return $("drawer").classList.contains("show"); }
+function loadingView(title) { return { title, head: [], body: () => [el("div", { style: "display:flex;gap:8px;align-items:center;color:var(--ink-2)" }, el("span", { class: "spinner" }), "Loading…")] }; }
+
+// ---------------------------------------------------------------- markdown (safe: textContent only)
+function renderMarkdown(text) {
+  const out = [];
+  for (const block of text.split(/\n{2,}/)) {
+    const lines = block.split("\n").filter((l) => l.trim());
+    if (!lines.length) continue;
+    if (lines.every((l) => /^\s*([-*]|\d+\.)\s+/.test(l))) {
+      const ul = el("ul", { style: "margin:0 0 8px;padding-left:20px" });
+      lines.forEach((l) => ul.append(inlineMd(el("li"), l.replace(/^\s*([-*]|\d+\.)\s+/, ""))));
+      out.push(ul);
+    } else if (/^#{1,4}\s/.test(lines[0])) {
+      out.push(inlineMd(el("p", { style: "font-weight:600" }), lines[0].replace(/^#+\s*/, "")));
+      if (lines.length > 1) out.push(inlineMd(el("p"), lines.slice(1).join(" ")));
+    } else out.push(inlineMd(el("p"), lines.join(" ")));
+  }
+  return out;
+}
+function inlineMd(node, text) {
+  text.split(/(\*\*[^*]+\*\*|`[^`]+`)/).forEach((part) => {
+    if (/^\*\*[^*]+\*\*$/.test(part)) node.append(el("strong", { text: part.slice(2, -2) }));
+    else if (/^`[^`]+`$/.test(part)) node.append(el("code", { text: part.slice(1, -1) }));
+    else if (part) node.append(document.createTextNode(part));
+  });
+  return node;
+}
+function inlineCode(text) {
+  return String(text).split(/(`[^`]+`)/).map((part) =>
+    part.startsWith("`") && part.endsWith("`") ? el("code", { text: part.slice(1, -1) }) : part);
+}
+function claudeAnswer(r) {
+  const body = r.text.replace(/^\s*\**\s*Verdict:.*$/im, "").trim();
+  const sevFor = { Benign: "LOW", "Privacy concern": "MEDIUM", Suspicious: "HIGH", Malicious: "CRITICAL" };
+  return [
+    r.verdict ? el("div", { class: "verdict" }, sevBadge(sevFor[r.verdict] || "LOW"), r.verdict) : null,
+    ...renderMarkdown(body),
+    r.steps && r.steps.length ? el("details", { class: "steps" }, el("summary", { text: `How Claude checked (${r.steps.length} tool call${r.steps.length > 1 ? "s" : ""})` }),
+      el("ol", {}, r.steps.map((s) => el("li", { text: `${s.tool}(${Object.entries(s.input || {}).filter(([, v]) => v != null).map(([k, v]) => k + "=" + JSON.stringify(v)).join(", ")})${s.ok ? "" : " — failed"}` })))) : null,
+    el("div", { class: "foot", text: `${r.model}${r.cached ? " · cached" : ""} · AI analysis can be wrong — check the evidence.` }),
+  ].filter(Boolean);
+}
+
+// ---------------------------------------------------------------- alert drawer
+function blockableIp(a) {
+  const ctx = a.context || {};
+  return ctx.remote_ip || (ctx.direction === "inbound" ? a.src_ip : a.dst_ip) || a.src_ip;
+}
+function guideBox(g) {
+  if (!g) return el("div");
+  const box = el("section", { class: "guide", "aria-label": "What this means" },
+    el("span", { class: "verdict-pill", "data-v": g.verdict, text: g.verdict }),
+    el("div", { class: "summary", text: g.summary }),
+    el("p", { text: g.meaning }));
+  if (g.next_steps && g.next_steps.length) box.append(el("h5", { text: "What to do" }), el("ul", {}, ...g.next_steps.map((t) => el("li", {}, ...inlineCode(t)))));
+  if (g.details && g.details.length) {
+    const dl = el("dl", { class: "kv", style: "margin-top:10px" });
+    for (const [k, v] of g.details) dl.append(el("dt", { text: k }), el("dd", { text: String(v) }));
+    box.append(el("h5", { text: "Details" }), dl);
+  }
+  return box;
+}
+async function blockIp(ip, reason, alertId) {
+  if (!confirm(`Block all traffic to and from ${ip} for 1 hour?`)) return;
+  try { await api("/api/blocks", { method: "POST", body: JSON.stringify({ ip, reason, ttl: 3600, alert_id: alertId }) }); toast("Blocked " + ip); loadBlocks(); }
+  catch (e) { toast(e.message); }
+}
+function expectMenu(a) {
+  const ctx = a.context || {}, kind = a.kind, host = ctx.remote_host || (a.evidence || {}).host || (a.evidence || {}).sni;
+  const label = KIND_LABELS[kind] || kind;
+  const options = [];
+  if (ctx.app && host) options.push([`${ctx.app} → ${host}`, `${label} alerts for this app and host`, { kind, app: ctx.app, host }]);
+  if (ctx.app && !["threat", "attack"].includes(kind)) options.push([`All ${label.toLowerCase()} from ${ctx.app}`, "any host", { kind, app: ctx.app }]);
+  if (host && !["threat"].includes(kind)) options.push([`${label} involving ${host}`, "any app, includes subdomains", { kind, host }]);
+  if (a.rule_id && ctx.app) options.push([`Rule ${a.rule_id} for ${ctx.app}`, "this detector, this app", { rule_id: a.rule_id, app: ctx.app }]);
+  if (!options.length && ctx.remote_ip) options.push([`${label} involving ${ctx.remote_ip}`, "this IP only", { kind, ip: ctx.remote_ip }]);
+  const list = el("div", { class: "menu-list", role: "menu" });
+  const btn = el("button", { class: "btn", "aria-haspopup": "true", disabled: !options.length }, "Mark as expected ▾");
+  for (const [title, sub, rule] of options) {
+    list.append(el("button", { role: "menuitem", onclick: async () => {
+      list.classList.remove("show");
+      try { await api("/api/allowlist", { method: "POST", body: JSON.stringify({ ...rule, note: a.message.slice(0, 180) }) }); toast("Won't report these again — undo under Protection"); loadAllowlist(); }
+      catch (e) { toast(e.message); }
+    } }, title, el("small", { text: sub })));
+  }
+  btn.addEventListener("click", (e) => { e.stopPropagation(); list.classList.toggle("show"); });
+  document.addEventListener("click", () => list.classList.remove("show"), { once: true });
+  return el("div", { class: "menu" }, btn, list);
+}
+function similarAlerts(a) {
+  const key = groupKey(a);
+  return state.alerts.filter((x) => x.alert_id !== a.alert_id && groupKey(x) === key);
+}
+function openDrawer(a, push) {
+  state.openAlert = a;
+  const ctx = a.context || {};
+  showDrawer({
+    title: a.message,
+    head: [sevBadge(a.severity), " ", el("span", { class: "muted", style: "font-size:12px", text: (KIND_LABELS[a.kind] || a.kind) + " · " + new Date(a.timestamp * 1000).toLocaleString() })],
+    body: () => {
+      const aiBox = el("div", { class: "ai-box" });
+      const explainBtn = el("button", { class: "btn primary" }, icon("i-spark"), "Explain with Claude");
+      explainBtn.addEventListener("click", async () => {
+        explainBtn.disabled = true; aiBox.classList.add("show");
+        aiBox.replaceChildren(el("div", { style: "display:flex;gap:8px;align-items:center;color:var(--ink-2)" }, el("span", { class: "spinner" }), "Claude is analysing this alert with what PyNIDS knows about the program and server…"));
+        try { aiBox.replaceChildren(...claudeAnswer(await api("/api/explain/" + encodeURIComponent(a.alert_id), { method: "POST" }))); }
+        catch (e) { aiBox.replaceChildren(el("div", { text: e.message })); explainBtn.disabled = false; }
+      });
+      const ip = blockableIp(a);
+      const blockBtn = el("button", { class: "btn danger", disabled: !ip, onclick: () => blockIp(ip, a.message, a.alert_id) }, icon("i-ban"), "Block " + (ip || "IP"));
+      const remoteIp = ctx.remote_ip || ip;
+      const similar = similarAlerts(a);
+      return [
+        guideBox(a.about),
+        el("div", { class: "actions" }, explainBtn, blockBtn, expectMenu(a)),
+        aiBox,
+        el("h4", { text: "Connection" }),
+        kvList([
+          ["App", ctx.app ? el("span", {}, appLink(ctx.app), ctx.process && ctx.process !== ctx.app ? ` (${ctx.process}${ctx.pid ? ", pid " + ctx.pid : ""})` : ctx.pid ? ` (pid ${ctx.pid})` : "") : null],
+          ["Program", ctx.exe ? progLink(ctx.exe, ctx.exe) : null],
+          ["Signature", ctx.signature ? sigBadge(ctx.signature) : null],
+          ["Remote host", ctx.remote_host],
+          ["Remote IP", remoteIp ? ipLink(remoteIp) : null],
+          ["Location", [ctx.city, ctx.country_name || ctx.country].filter(Boolean).join(", ")],
+          ["Network", ctx.org ? `${ctx.org}${ctx.asn ? " (AS" + ctx.asn + ")" : ""}` : null],
+          ["Flow", `${a.src_ip || "?"}${a.src_port ? ":" + a.src_port : ""} → ${a.dst_ip || "?"}${a.dst_port ? ":" + a.dst_port : ""} ${a.protocol ? "(" + a.protocol.toUpperCase() + ")" : ""}`],
+          ["Direction", ctx.direction],
+          ["Rule", a.rule_id],
+          ["MITRE ATT&CK", a.mitre_technique],
+          ["Confidence", a.confidence != null ? Math.round(a.confidence * 100) + "%" : null],
+          ["Tags", (a.tags || []).join(", ")],
+        ]),
+        similar.length ? el("div", { class: "section" }, el("h4", { text: `${similar.length} similar event${similar.length > 1 ? "s" : ""}` }),
+          el("div", {}, similar.slice(0, 12).map((x) => el("div", { class: "muted", style: "font-size:12.5px;padding:2px 0" }, fmtTime(x.timestamp) + " · ", el("button", { class: "link", onclick: () => openDrawer(x, true) }, x.message.slice(0, 90)))))) : null,
+        el("details", { class: "datatable" }, el("summary", { text: "Raw evidence (JSON)" }), el("pre", { class: "json", text: JSON.stringify(a.evidence || {}, null, 2) })),
+      ].filter(Boolean);
+    },
+  }, push);
+}
+async function openAlertById(id) {
+  const local = state.alerts.find((a) => a.alert_id === id);
+  if (local) return openDrawer(local);
+  try { openDrawer(await api("/api/alerts/" + encodeURIComponent(id))); } catch (e) { toast(e.message); }
+}
+
+// ---------------------------------------------------------------- IP dossier
+async function openDossier(ip, opts = {}) {
+  const push = isOpen();
+  if (!opts.replace) showDrawer(loadingView(ip), push);
+  let d;
+  try { d = await api("/api/dossier/" + encodeURIComponent(ip) + (opts.external ? "?external=1" + (opts.refresh ? "&refresh=1" : "") : "")); }
+  catch (e) { drawerStack.pop(); toast(e.message); paintDrawer(); return; }
+  const view = dossierView(d);
+  drawerStack[drawerStack.length - 1] = view;
+  paintDrawer();
+}
+function dossierView(d) {
+  const L = d.local || {}, X = d.external || {}, rdap = X.rdap || {}, idb = X.internetdb || {};
+  const scopeLabel = { internet: "Internet", lan: "Local network", loopback: "This Mac", unknown: "Unknown" }[L.scope] || L.scope;
+  return {
+    title: d.ip + (L.remote_host ? " · " + L.remote_host : ""),
+    head: [el("span", { class: "chip", text: scopeLabel }), L.intel ? el("span", { class: "chip flag bad", style: "margin-left:6px", text: "On a blocklist" }) : null].filter(Boolean),
+    body: () => {
+      const lookupBtn = el("button", { class: "btn primary" }, icon("i-spark"), X.external && X.fetched ? "Refresh lookup" : "Look up owner & reputation");
+      lookupBtn.disabled = L.scope !== "internet";
+      lookupBtn.addEventListener("click", () => { lookupBtn.disabled = true; lookupBtn.replaceChildren(el("span", { class: "spinner" }), "Looking up…"); openDossier(d.ip, { external: true, refresh: !!X.fetched, replace: true }); });
+      const ext = [];
+      if (X.external && X.fetched) {
+        ext.push(kvList([
+          ["Reverse DNS", X.ptr || "none"],
+          ["Network", [rdap.network, rdap.cidr || rdap.range].filter(Boolean).join(" · ")],
+          ["Owner", rdap.owner], ["Registry country", rdap.country], ["Registered", rdap.registered],
+          ["Abuse contact", rdap.abuse_email],
+          ["Open ports (Shodan)", idb.listed ? (idb.ports || []).join(", ") || "none" : "not in InternetDB"],
+          ["Tags", (idb.tags || []).join(", ")],
+          ["Known CVEs", (idb.vulns || []).slice(0, 10).join(", ") + ((idb.vulns || []).length > 10 ? " …" : "")],
+          ["Hostnames", (idb.hostnames || []).join(", ")],
+        ]));
+        ext.push(el("p", { class: "note", text: `Looked up ${fmtAgo(X.fetched)}${X.cached ? " (cached)" : ""} via RDAP, reverse DNS and Shodan InternetDB.` + (X.errors ? " Some sources failed: " + Object.keys(X.errors).join(", ") + "." : "") }));
+      } else {
+        ext.push(el("p", { class: "note", text: L.scope === "internet"
+          ? "Not looked up yet. A lookup asks rdap.org, Shodan InternetDB and your DNS resolver about this address, which tells them (and, for reverse DNS, whoever runs the IP's zone) that you're interested in it."
+          : "Private and reserved addresses are never sent to outside services." }));
+      }
+      const conn = (L.connected_now || []);
+      const alerts = (L.recent_alerts || []);
+      return [
+        el("div", { class: "actions", style: "margin-top:0" }, lookupBtn,
+          el("button", { class: "btn danger", disabled: L.scope === "loopback", onclick: () => blockIp(d.ip, "Blocked from the IP dossier") }, icon("i-ban"), "Block"),
+          d.virustotal ? el("a", { class: "btn ext", href: d.virustotal, target: "_blank", rel: "noreferrer noopener" }, "VirusTotal") : null),
+        el("h4", { text: "What PyNIDS saw" }),
+        kvList([
+          ["Hostname (from traffic)", L.remote_host],
+          ["Location", [L.city, L.country_name || L.country].filter(Boolean).join(", ")],
+          ["Network", L.org ? `${L.org}${L.asn ? " (AS" + L.asn + ")" : ""}` : null],
+          ["Apps", L.apps && L.apps.length ? el("span", {}, ...L.apps.flatMap((a, i) => [i ? ", " : "", appLink(a)])) : null],
+          ["Traffic", L.bytes ? `${fmtBytes(L.bytes)} in ${fmtNum(L.packets)} packets` : null],
+          ["First / last seen", L.first_seen ? `${fmtAgo(L.first_seen)} / ${fmtAgo(L.last_seen)}` : null],
+          ["Threat intel", L.intel ? `${L.intel.category}: ${L.intel.description} (${L.intel.indicator})` : "no match"],
+          ["LAN device", L.lan_device ? [L.lan_device.name, L.lan_device.vendor, L.lan_device.mac].filter(Boolean).join(" · ") : null],
+        ]),
+        conn.length ? el("div", { class: "section" }, el("h4", { text: "Connected right now" }),
+          table(["App", "Port", "State"], conn.map((c) => el("tr", {}, el("td", {}, progLink(c.app, c.exe)), el("td", { text: `${c.proto}/${c.remote_port}` }), el("td", { class: "muted", text: c.state || "" }))), { cls: "minitable" })) : null,
+        el("h4", { text: "Owner & reputation" }), ...ext,
+        alerts.length ? el("div", { class: "section" }, el("h4", { text: "Alerts involving this IP" }),
+          el("div", {}, alerts.map((x) => el("div", { style: "font-size:12.5px;padding:3px 0;display:flex;gap:8px;align-items:center" }, sevBadge(x.severity), el("button", { class: "link", onclick: () => openAlertById(x.alert_id) }, x.message.slice(0, 100)), el("span", { class: "muted", text: fmtAgo(x.timestamp) }))))) : null,
+      ].filter(Boolean);
+    },
+  };
+}
+
+// ---------------------------------------------------------------- program drawer
+async function openProgram(exe) {
+  const push = isOpen();
+  showDrawer(loadingView(exe.split("/").pop()), push);
+  let p;
+  try { p = await api("/api/program?exe=" + encodeURIComponent(exe)); }
+  catch (e) { drawerStack.pop(); toast(e.message); paintDrawer(); return; }
+  drawerStack[drawerStack.length - 1] = programView(p);
+  paintDrawer();
+}
+function programView(p) {
+  const sig = p.signature || {}, as = p.assessment || {};
+  return {
+    title: p.app,
+    head: [riskBadge(as.risk), " ", sigBadge(sig.status, p.exe)],
+    body: () => [
+      as.reasons && as.reasons.length ? el("section", { class: "guide" },
+        el("span", { class: "verdict-pill", "data-v": as.risk >= 3 ? "Act now" : "Worth checking", text: as.risk >= 3 ? "Act now" : "Worth checking" }),
+        el("div", { class: "summary", text: "Why this program stands out" }),
+        el("ul", {}, as.reasons.map((r) => el("li", { text: r }))),
+        el("p", { style: "margin-top:8px", text: "Many developer tools are unsigned too. Check the path and the launch items before deciding." })) : null,
+      el("div", { class: "actions", style: "margin-top:0" },
+        el("button", { class: "btn primary", onclick: () => { closeDrawer(); go("overview"); askClaude(`Investigate the program ${p.exe}: who made it, what it connects to, whether something starts it automatically, and whether it looks malicious.`); } }, icon("i-spark"), "Ask Claude about it"),
+        p.virustotal ? el("a", { class: "btn ext", href: p.virustotal, target: "_blank", rel: "noreferrer noopener", title: "Opens VirusTotal with this file's SHA-256 (the file itself is not uploaded)" }, "Check hash on VirusTotal") : null),
+      el("h4", { text: "Program" }),
+      kvList([
+        ["Path", el("span", { class: "path", text: p.exe })],
+        ["Signature", sig.label || sig.status],
+        ["Signed by", sig.authority], ["Team ID", sig.team_id], ["Bundle ID", sig.identifier],
+        ["Hardened runtime", sig.hardened_runtime == null ? null : sig.hardened_runtime ? "yes" : "no"],
+        ["Signature problem", sig.error],
+        ["SHA-256", p.sha256 ? el("span", { class: "path", text: p.sha256 }) : null],
+        ["Running as", (p.pids || []).length ? "pid " + p.pids.join(", ") : "not running"],
+        ["First used the network", p.first_network_use ? new Date(p.first_network_use * 1000).toLocaleString() : null],
+        ["Usual countries", (p.usual_countries || []).join(", ")],
+      ]),
+      el("h4", { text: "Starts automatically" }),
+      (p.launchd || []).length ? table(["Launch item", "Runs"], p.launchd.map((j) => el("tr", {},
+        el("td", {}, el("div", { text: j.label }), el("div", { class: "path", text: j.plist })),
+        el("td", { class: "muted", text: [j.run_at_load ? "at load" : null, j.keep_alive ? "kept alive" : null, j.interval ? `every ${j.interval}s` : null].filter(Boolean).join(", ") || "on demand" }))), { cls: "minitable" })
+        : el("p", { class: "note", text: "No LaunchAgent or LaunchDaemon points at this program." }),
+      el("h4", { text: "Sockets" }),
+      (p.connections || []).length ? table(["Proto", "Local", "Remote", "State"], p.connections.map((c) => el("tr", {},
+        el("td", { text: c.proto }), el("td", { class: "mono", text: `${c.local_ip || "*"}:${c.local_port}` }),
+        el("td", {}, c.remote_ip ? ipLink(c.remote_ip, `${c.remote_ip}:${c.remote_port}`) : el("span", { class: "muted", text: c.listening ? "listening" : "—" })),
+        el("td", { class: "muted", text: c.state || "" }))), { cls: "minitable" })
+        : el("p", { class: "note", text: "No open sockets right now." }),
+      p.traffic ? el("div", { class: "section" }, el("h4", { text: "Traffic this session" }), kvList([
+        ["Sent / received", `${fmtBytes(p.traffic.bytes_out)} / ${fmtBytes(p.traffic.bytes_in)}`],
+        ["Top hosts", (p.traffic.hosts || []).slice(0, 8).map((h) => h.host).join(", ")]])) : null,
+    ].filter(Boolean),
+  };
+}
+
+// ---------------------------------------------------------------- app drawer
+async function openApp(name) {
+  const push = isOpen();
+  showDrawer(loadingView(name), push);
+  let a;
+  try { a = await api("/api/apps/" + encodeURIComponent(name)); }
+  catch (e) { drawerStack.pop(); toast(e.message); paintDrawer(); return; }
+  drawerStack[drawerStack.length - 1] = {
+    title: a.app,
+    head: [el("span", { class: "muted", style: "font-size:12px", text: `${fmtBytes(a.bytes_out + a.bytes_in)} this session · ${fmtNum(a.alerts)} alerts` })],
+    body: () => [
+      el("div", { class: "actions", style: "margin-top:0" },
+        el("button", { class: "btn", onclick: () => { closeDrawer(); state.app = a.app; go("events"); loadAlerts(); } }, "Show its events"),
+        el("button", { class: "btn", onclick: () => { closeDrawer(); state.connQ = a.app; $("connSearch").value = a.app; setConnFilter("all"); go("connections"); } }, "Show its connections")),
+      el("h4", { text: "Overview" }),
+      kvList([["Process", a.process], ["Sent / received", `${fmtBytes(a.bytes_out)} / ${fmtBytes(a.bytes_in)}`], ["Packets", fmtNum(a.packets)],
+        ["First seen", fmtAgo(a.first_seen)], ["Usual countries (learned)", (a.usual_countries || []).join(", ")]]),
+      el("h4", { text: "Hosts" }),
+      (a.hosts || []).length ? table([{ label: "Host" }, { label: "Bytes", num: true }], a.hosts.slice(0, 25).map((h) => el("tr", {}, el("td", { text: h.host }), el("td", { class: "num", text: fmtBytes(h.bytes) }))), { cls: "minitable" }) : emptyBox("No named hosts yet."),
+      el("h4", { text: "Countries" }),
+      el("div", { class: "chips" }, (a.countries || []).map((c) => el("span", { class: "chip", text: `${c.country} · ${fmtBytes(c.bytes)}` }))),
+      el("h4", { text: `Remote IPs (${(a.remotes || []).length})` }),
+      el("div", { class: "chips" }, (a.remotes || []).slice(0, 60).map((ip) => ipLink(ip))),
+    ],
+  };
+  paintDrawer();
+}
+
+// ---------------------------------------------------------------- overview: attention + Claude
+async function loadAttention() {
+  let r;
+  try { r = await api("/api/attention"); } catch (_) { return; }
+  const host = $("attention");
+  if (!r.items.length) {
+    host.replaceChildren(el("div", { class: "allclear" }, el("div", { class: "big", text: "✓" }),
+      el("div", {}, el("div", { style: "font-weight:600", text: "All clear" }), el("div", { class: "muted", style: "font-size:12.5px", text: "Nothing needs a look right now. Untrusted programs, exposed ports, new devices, and medium-or-worse alerts from the last hour will show up here." }))));
+    $("attSub").textContent = "right now";
+    return;
+  }
+  $("attSub").textContent = `${r.items.length} item${r.items.length > 1 ? "s" : ""}`;
+  host.replaceChildren(...r.items.map((it) => {
+    const act = it.action || {};
+    const open = () => act.type === "alert" ? openAlertById(act.id) : act.type === "program" ? openProgram(act.exe) : act.type === "tab" ? go(act.tab) : null;
+    return el("button", { class: "att", onclick: open }, sevBadge(it.level), el("div", {}, el("div", { class: "t", text: it.title }), it.detail ? el("div", { class: "d", text: it.detail }) : null), el("span", { class: "go", text: act.type === "tab" ? "Open →" : "Details →" }));
+  }));
+}
+const SUGGESTIONS = [
+  "Is anything on my Mac suspicious right now?",
+  "Which programs are reachable from my network, and should they be?",
+  "Explain my most serious alert from the last hour.",
+  "Are any of my launch items unusual?",
+];
+$("askSuggest").replaceChildren(...SUGGESTIONS.map((q) => el("button", { onclick: () => { $("askInput").value = q; askClaude(q); } }, q)));
+$("askBtn").addEventListener("click", () => askClaude($("askInput").value));
+$("askInput").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) askClaude($("askInput").value); });
+async function askClaude(q) {
+  q = (q || "").trim();
+  if (!q) { $("askInput").focus(); return; }
+  $("askInput").value = q;
+  const out = $("askOut"), btn = $("askBtn");
+  btn.disabled = true;
+  const started = Date.now();
+  const box = el("div", { class: "ai-box show", style: "margin-top:14px" }, el("div", { style: "display:flex;gap:8px;align-items:center;color:var(--ink-2)" }, el("span", { class: "spinner" }), el("span", { id: "askTimer", text: "Claude is looking at your connections, programs and alerts…" })));
+  out.replaceChildren(box);
+  const timer = setInterval(() => { const t = $("askTimer"); if (t) t.textContent = `Claude is investigating… ${Math.round((Date.now() - started) / 1000)}s`; }, 1000);
+  try { box.replaceChildren(...claudeAnswer(await api("/api/investigate", { method: "POST", body: JSON.stringify({ question: q }) }))); }
+  catch (e) { box.replaceChildren(el("div", { text: e.message })); }
+  clearInterval(timer);
+  btn.disabled = false;
+}
+function renderAskAvailability(st) {
+  const ok = !!st.ai;
+  $("askBtn").disabled = !ok;
+  $("askNote").replaceChildren(ok ? "Read-only: Claude can look, not change anything." : el("span", {}, "Needs an Anthropic API key: ", el("code", { text: "sudo pynids ai set-key" })));
+}
+
+// ---------------------------------------------------------------- connections tab
+function setConnFilter(f) {
+  state.connFilter = f;
+  document.querySelectorAll("#connFilter button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.f === f)));
+  renderConnections();
+}
+document.querySelectorAll("#connFilter button").forEach((b) => b.addEventListener("click", () => setConnFilter(b.dataset.f)));
+let connSearchTimer;
+$("connSearch").addEventListener("input", (e) => { clearTimeout(connSearchTimer); connSearchTimer = setTimeout(() => { state.connQ = e.target.value.trim().toLowerCase(); renderConnections(); }, 150); });
+$("connRefresh").addEventListener("click", () => loadConnections());
+async function loadConnections() {
+  try { state.conns = await api("/api/connections"); }
+  catch (e) { $("progTable").replaceChildren(emptyBox(e.message)); return; }
+  renderConnections();
+}
+function updateConnBadge(n) { const b = $("navConnN"); b.hidden = !n; b.textContent = n || ""; }
+function renderConnections() {
+  const c = state.conns; if (!c) return;
+  const s = c.summary;
+  updateConnBadge(s.flagged_programs);
+  const tiles = [
+    { label: "Internet connections", value: s.internet, hint: fmtNum(s.connections) + " connections in total", hero: true },
+    { label: "Programs", value: s.programs, hint: s.pending_signatures ? `${s.pending_signatures} signatures being checked` : "all signatures checked" },
+    { label: "Flagged programs", value: s.flagged_programs, hint: s.flagged_programs ? "unsigned, odd location or bad server" : "nothing suspicious", status: s.flagged_programs ? "warning" : "ok" },
+    { label: "Exposed ports", value: s.exposed_ports, hint: "reachable from other devices" },
+  ];
+  $("connKpis").style.gridTemplateColumns = "repeat(auto-fit, minmax(180px, 1fr))";
+  $("connKpis").replaceChildren(...tiles.map((t) => {
+    const lbl = el("div", { class: "label" }, t.label, t.status === "warning" ? [" ", sevBadge("HIGH")] : null);
+    return el("div", { class: "card tile" + (t.hero ? " hero" : "") }, lbl, el("div", { class: "value", text: fmtNum(t.value || 0) }), el("div", { class: "hint", text: t.hint }));
+  }));
+  $("connSub").textContent = "updated " + fmtTime(c.generated);
+
+  // Programs
+  const q = state.connQ;
+  const matchProg = (p) => !q || [p.app, p.exe, p.process].join(" ").toLowerCase().includes(q);
+  const progs = c.programs.filter(matchProg);
+  $("progTable").replaceChildren(progs.length ? table(["Risk", "Program", "Signature", "Flags", { label: "Connections", num: true }, { label: "Listening", num: true }],
+    progs.map((p) => el("tr", { class: p.exe ? "clickable" : "", onclick: p.exe ? () => openProgram(p.exe) : null },
+      el("td", {}, riskBadge(p.risk)),
+      el("td", {}, el("div", { class: "app-name", text: p.app }),
+        p.exe ? el("div", { class: "path", title: p.exe, text: (p.bundle || p.exe) + (p.binaries > 1 ? ` · ${p.binaries} binaries` : "") }) : el("div", { class: "sub2", text: "path not visible (run the daemon as root)" })),
+      el("td", {}, sigBadge(p.signature, p.exe), p.authority ? el("div", { class: "sub2", text: p.authority.replace(/^Developer ID Application: /, "") }) : null),
+      el("td", {}, flagChips(p.flags)),
+      el("td", { class: "num", text: fmtNum(p.connections) }),
+      el("td", { class: "num", text: fmtNum(p.listening) })))) : emptyBox(q ? "No program matches." : "No programs with open sockets."));
+
+  // Connections
+  let rows = c.connections;
+  if (state.connFilter === "internet") rows = rows.filter((r) => r.scope === "internet");
+  else if (state.connFilter === "flagged") rows = rows.filter((r) => r.risk >= 2);
+  if (q) rows = rows.filter((r) => [r.app, r.exe, r.remote_ip, r.remote_host, r.country, r.country_name, r.org, r.remote_port].join(" ").toLowerCase().includes(q));
+  $("liveConnSub").textContent = `${rows.length} shown`;
+  const shown = rows.slice(0, 400);
+  $("connTable").replaceChildren(rows.length ? el("div", {}, table(["Risk", "App", "Remote", "Port", "Where", "Signature", "Flags", { label: "Alerts", num: true }],
+    shown.map((r) => el("tr", {},
+      el("td", {}, riskBadge(r.risk)),
+      el("td", {}, progLink(r.app || r.process, r.exe), el("div", { class: "sub2", text: r.pid ? "pid " + r.pid + (r.transport === "quic" ? " · QUIC" : "") : "" })),
+      el("td", {}, r.remote_host ? el("div", { text: r.remote_host }) : null, ipLink(r.remote_ip)),
+      el("td", { class: "mono", text: `${r.proto}/${r.remote_port ?? "?"}` }),
+      el("td", {}, el("div", { text: [r.city, r.country_name || r.country].filter(Boolean).join(", ") || (r.scope === "lan" ? "Local network" : "—") }), r.org ? el("div", { class: "sub2", text: r.org }) : null),
+      el("td", {}, sigBadge(r.signature, r.exe)),
+      el("td", {}, flagChips(r.flags)),
+      el("td", { class: "num" }, r.alerts ? el("button", { class: "link", onclick: () => { state.q = r.remote_ip; $("search").value = r.remote_ip; state.range = "86400"; $("rangeFilter").value = "86400"; go("events"); loadAlerts(); } }, fmtNum(r.alerts)) : el("span", { class: "muted", text: "0" }))))),
+    rows.length > shown.length ? el("div", { class: "tablecap", text: `Showing ${shown.length} of ${rows.length} — narrow the filter to see the rest.` }) : null)
+    : emptyBox(state.connFilter === "flagged" ? "No flagged connections. 👍" : "No connections match."));
+
+  // Listening
+  const L = c.listening.filter((r) => !q || [r.app, r.exe, r.local_port].join(" ").toLowerCase().includes(q));
+  $("listenTable").replaceChildren(L.length ? el("div", {}, table(["Reachable from", "Program", "Port", "Address", "Signature", "Flags"],
+    L.map((r) => el("tr", {},
+      el("td", {}, el("span", { class: "chip" + (r.flags.includes("exposed") ? " flag" : r.exposure === "this_mac" ? " ok" : ""), text: r.exposure_label })),
+      el("td", {}, progLink(r.app || r.process, r.exe), el("div", { class: "sub2", text: r.pid ? "pid " + r.pid : "" })),
+      el("td", { class: "mono", text: `${r.proto}/${r.local_port}` }),
+      el("td", { class: "mono", text: (r.addresses || [r.local_ip]).join(", ") }),
+      el("td", {}, sigBadge(r.signature, r.exe)),
+      el("td", {}, flagChips(r.flags.filter((f) => f !== "exposed")))))),
+    el("div", { class: "tablecap", text: "“Any network you join” means the port listens on every interface: anyone on the same Wi-Fi can try to connect, unless the macOS firewall blocks it. Multicast discovery ports (mDNS 5353) are normal." }))
+    : emptyBox("Nothing is listening."));
+}
+
 // ---------------------------------------------------------------- apps
 async function loadApps() {
-  const apps = await api("/api/apps?limit=60");
+  let apps;
+  try { apps = await api("/api/apps?limit=60"); } catch (_) { return; }
   const host = $("appsTable");
-  if (!apps.length) { host.replaceChildren(el("div", { class: "empty", text: "No attributed traffic yet." })); return; }
+  if (!apps.length) { host.replaceChildren(emptyBox("No attributed traffic yet.")); return; }
   const total = apps.reduce((a, r) => a + r.bytes_in + r.bytes_out, 0) || 1;
-  host.replaceChildren(el("table", {},
-    el("thead", {}, el("tr", {}, el("th", { text: "App" }), el("th", { text: "Share of traffic" }), el("th", { class: "num", text: "Sent" }), el("th", { class: "num", text: "Received" }), el("th", { class: "num", text: "Endpoints" }), el("th", { class: "num", text: "Alerts" }), el("th", { text: "Talks to" }))),
-    el("tbody", {}, apps.map((a) => {
+  host.replaceChildren(table(["App", "Share of traffic", { label: "Sent", num: true }, { label: "Received", num: true }, { label: "Endpoints", num: true }, { label: "Alerts", num: true }, "Talks to"],
+    apps.map((a) => {
       const share = (a.bytes_in + a.bytes_out) / total;
-      return el("tr", {},
+      return el("tr", { class: "clickable", onclick: () => openApp(a.app) },
         el("td", {}, el("div", { class: "app-name", text: a.app }), a.process && a.process !== a.app ? el("div", { class: "muted", style: "font-size:12px", text: a.process }) : null),
         el("td", {}, el("div", { class: "share" }, el("div", { class: "track" }, el("div", { class: "bar", style: `width:${Math.max(2, share * 100).toFixed(1)}%` })), el("span", { class: "muted", style: "font-size:12px;min-width:38px;text-align:right", text: (share * 100).toFixed(share < 0.1 ? 1 : 0) + "%" }))),
         el("td", { class: "num", text: fmtBytes(a.bytes_out) }),
         el("td", { class: "num", text: fmtBytes(a.bytes_in) }),
         el("td", { class: "num", text: fmtNum(a.remotes) }),
-        el("td", { class: "num" }, a.alerts ? el("a", { href: "#events", text: fmtNum(a.alerts), onclick: () => { state.app = a.app; $("search").value = ""; state.q = ""; loadAlerts(); } }) : el("span", { class: "muted", text: "0" })),
-        el("td", {}, el("div", { class: "chips" }, (a.top_hosts || []).slice(0, 4).map((h) => el("span", { class: "chip", title: h, text: h })), (a.countries || []).slice(0, 3).map((c) => el("span", { class: "chip", text: c })))),
-      );
-    }))));
+        el("td", { class: "num" }, a.alerts ? el("button", { class: "link", onclick: (e) => { e.stopPropagation(); state.app = a.app; $("search").value = ""; state.q = ""; go("events"); loadAlerts(); } }, fmtNum(a.alerts)) : el("span", { class: "muted", text: "0" })),
+        el("td", {}, el("div", { class: "chips" }, (a.top_hosts || []).slice(0, 4).map((h) => el("span", { class: "chip", title: h, text: h })), (a.countries || []).slice(0, 3).map((c) => el("span", { class: "chip", text: c })))));
+    })));
 }
 
-// ---------------------------------------------------------------- events
+// ---------------------------------------------------------------- events (grouped)
 function kindCounts() { return (state.summary && state.summary.kinds) || {}; }
 function renderKindFilters() {
   const counts = kindCounts(), wrap = $("kindFilters");
@@ -864,13 +1557,13 @@ function alertMatches(a) {
   if (SEV_ORDER[a.severity] < SEV_ORDER[state.sev]) return false;
   if (state.app && (a.context || {}).app !== state.app) return false;
   if (state.q) {
-    const hay = [a.message, a.src_ip, a.dst_ip, (a.context || {}).app, (a.context || {}).remote_host, a.rule_id].join(" ").toLowerCase();
+    const hay = [a.message, a.src_ip, a.dst_ip, (a.context || {}).app, (a.context || {}).remote_host, (a.context || {}).remote_ip, a.rule_id].join(" ").toLowerCase();
     if (!state.q.toLowerCase().split(/\s+/).every((w) => hay.includes(w))) return false;
   }
   return true;
 }
 async function loadAlerts() {
-  const params = new URLSearchParams({ limit: "300", min_severity: state.sev });
+  const params = new URLSearchParams({ limit: "500", min_severity: state.sev });
   if (state.kind) params.set("kind", state.kind);
   if (state.q) params.set("q", state.q);
   if (state.app) params.set("app", state.app);
@@ -882,9 +1575,11 @@ async function loadAlerts() {
   renderKindFilters();
   renderEvents();
 }
-function eventRow(a, isNew) {
+function groupKey(a) { return [a.kind, a.rule_id, (a.context || {}).app, subjectOf(a)].join("|"); }
+function eventRow(a, isNew, count) {
   const ctx = a.context || {};
   const meta = el("div", { class: "meta" });
+  if (count > 1) meta.append(el("span", { class: "count", title: `${count} similar events`, text: "×" + fmtNum(count) }));
   if (a.about) meta.append(el("span", { class: "verdict-pill", "data-v": a.about.verdict, text: a.about.verdict }));
   if (ctx.app) meta.append(el("span", { class: "chip", text: ctx.app }));
   if (ctx.remote_host) meta.append(el("span", { class: "chip", title: ctx.remote_host, text: ctx.remote_host }));
@@ -902,153 +1597,78 @@ function eventRow(a, isNew) {
 function renderEvents() {
   const list = $("eventList");
   const rows = state.alerts.filter(alertMatches);
-  $("eventsSub").textContent = state.range === "live" ? `${rows.length} shown · live` : `${rows.length} shown`;
-  list.replaceChildren(...(rows.length ? rows.map((a) => eventRow(a)) : [el("div", { class: "empty", text: "No events match these filters yet." })]));
+  let items;
+  if (state.group) {
+    const groups = new Map();
+    for (const a of rows) { const k = groupKey(a); const g = groups.get(k); if (g) g.n++; else groups.set(k, { a, n: 1 }); }
+    items = [...groups.values()];
+  } else items = rows.map((a) => ({ a, n: 1 }));
+  $("eventsSub").textContent = `${rows.length} event${rows.length === 1 ? "" : "s"}${state.group && items.length !== rows.length ? ` in ${items.length} groups` : ""}${state.range === "live" ? " · live" : ""}`;
+  list.replaceChildren(...(items.length ? items.slice(0, 400).map(({ a, n }) => eventRow(a, false, n)) : [emptyBox("No events match these filters yet.")]));
 }
+let eventsTimer = null;
 function onLiveAlert(a) {
   state.alerts.unshift(a);
-  if (state.alerts.length > 1000) state.alerts.length = 1000;
-  if (state.range === "live" && alertMatches(a)) {
-    const list = $("eventList");
-    if (list.firstChild && list.firstChild.classList && list.firstChild.classList.contains("empty")) list.replaceChildren();
-    list.prepend(eventRow(a, true));
-    while (list.childNodes.length > 400) list.lastChild.remove();
-  }
-  if (state.openAlert == null) { /* keep drawer untouched */ }
+  if (state.alerts.length > 1500) state.alerts.length = 1500;
+  if (state.range !== "live" || !alertMatches(a) || state.tab !== "events") return;
+  if (state.group) { clearTimeout(eventsTimer); eventsTimer = setTimeout(renderEvents, 300); return; }
+  const list = $("eventList");
+  if (list.firstChild && list.firstChild.classList && list.firstChild.classList.contains("empty")) list.replaceChildren();
+  list.prepend(eventRow(a, true));
+  while (list.childNodes.length > 400) list.lastChild.remove();
 }
 let searchTimer;
 $("search").addEventListener("input", (e) => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.q = e.target.value.trim(); loadAlerts(); }, 250); });
 $("sevFilter").addEventListener("change", (e) => { state.sev = e.target.value; loadAlerts(); });
 $("rangeFilter").addEventListener("change", (e) => { state.range = e.target.value; loadAlerts(); });
+$("groupToggle").addEventListener("change", (e) => { state.group = e.target.checked; try { localStorage.setItem("pynids-group", state.group ? "1" : "0"); } catch (_) {} renderEvents(); });
+try { if (localStorage.getItem("pynids-group") === "0") { state.group = false; $("groupToggle").checked = false; } } catch (_) {}
 
-// ---------------------------------------------------------------- drawer
-function renderMarkdown(text) {
-  // Minimal, safe rendering: paragraphs, **bold**, and "- " lists. All text via textContent.
-  const out = [];
-  const blocks = text.split(/\n{2,}/);
-  for (const block of blocks) {
-    const lines = block.split("\n");
-    if (lines.every((l) => /^\s*([-*]|\d+\.)\s+/.test(l))) {
-      const ul = el("ul", { style: "margin:0 0 8px;padding-left:20px" });
-      lines.forEach((l) => ul.append(inlineMd(el("li"), l.replace(/^\s*([-*]|\d+\.)\s+/, ""))));
-      out.push(ul);
-    } else out.push(inlineMd(el("p"), lines.join(" ")));
-  }
-  return out;
+// ---------------------------------------------------------------- network: LAN devices
+async function loadDevices() {
+  let r;
+  try { r = await api("/api/devices"); } catch (e) { $("lanTable").replaceChildren(emptyBox(e.message)); return; }
+  state.devices = r.devices; state.nmap = r.nmap;
+  const own = ((state.summary || {}).status || {}).local_ips || [];
+  const self = own.find((ip) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip));
+  $("scanSelfBtn").hidden = !(r.nmap && self);
+  $("scanSelfBtn").onclick = () => scanDevice(self, "this Mac");
+  const online = r.devices.filter((d) => d.online).length;
+  $("lanSub").textContent = `${r.devices.length} known · ${online} online${r.nmap ? "" : " · install nmap (brew install nmap) to identify devices"}`;
+  if (!r.devices.length) { $("lanTable").replaceChildren(emptyBox("No devices yet: they appear as this Mac exchanges packets with them.")); return; }
+  $("lanTable").replaceChildren(table(["Device", "IP", "MAC", "Seen", "Open services", ""],
+    r.devices.map((d) => el("tr", {},
+      el("td", {}, el("div", { class: "app-name", text: d.name || d.vendor || "Unknown device" }),
+        el("div", { class: "sub2" }, [d.name && d.vendor ? d.vendor : null, d.randomized_mac ? "private Wi-Fi address" : null, d.new ? "new" : null].filter(Boolean).join(" · "))),
+      el("td", {}, ipLink(d.ip), el("div", { class: "sub2", text: d.online ? "online" : "offline" })),
+      el("td", { class: "mono", text: d.mac }),
+      el("td", { class: "muted", style: "white-space:nowrap", text: `first ${fmtAgo(d.first_seen)}` }),
+      el("td", {}, d.scan ? (d.scan.ports.length ? el("div", { class: "chips" }, d.scan.ports.slice(0, 8).map((p) => el("span", { class: "chip", title: p.product || "", text: `${p.port} ${p.service || ""}` }))) : el("span", { class: "muted", text: "no open ports" })) : el("span", { class: "muted", text: "—" })),
+      el("td", { class: "num" }, r.nmap ? el("button", { class: "btn", onclick: () => scanDevice(d.ip, d.name || d.vendor || d.ip) }, d.scan ? "Rescan" : "Scan") : null)))));
 }
-function inlineMd(node, text) {
-  text.split(/(\*\*[^*]+\*\*)/).forEach((part) => {
-    if (/^\*\*[^*]+\*\*$/.test(part)) node.append(el("strong", { text: part.slice(2, -2) }));
-    else if (part) node.append(document.createTextNode(part));
-  });
-  return node;
+async function scanDevice(ip, label) {
+  if (!confirm(`Scan ${label} (${ip}) with nmap? This probes its 200 most common ports and identifies services. Only scan devices you own.`)) return;
+  toast(`Scanning ${label}… this can take a minute`);
+  try {
+    const r = await api("/api/devices/scan", { method: "POST", body: JSON.stringify({ ip }) });
+    toast(`${label}: ${r.ports.length} open port${r.ports.length === 1 ? "" : "s"}`);
+    loadDevices();
+  } catch (e) { toast(e.message); }
 }
-function blockableIp(a) {
-  const ctx = a.context || {};
-  return ctx.remote_ip || (ctx.direction === "inbound" ? a.src_ip : a.dst_ip) || a.src_ip;
-}
-// Plain-English explanation computed by the daemon (pynids/alerts/guide.py).
-function inlineCode(text) {
-  // `command` → <code>; everything else stays plain text.
-  return String(text).split(/(`[^`]+`)/).map(part =>
-    part.startsWith("`") && part.endsWith("`") ? el("code", { text: part.slice(1, -1) }) : part);
-}
-function guideBox(g) {
-  if (!g) return el("div");
-  const box = el("section", { class: "guide", "aria-label": "What this means" },
-    el("span", { class: "verdict-pill", "data-v": g.verdict, text: g.verdict }),
-    el("div", { class: "summary", text: g.summary }),
-    el("p", { text: g.meaning }));
-  if (g.next_steps && g.next_steps.length) {
-    box.append(el("h5", { text: "What to do" }),
-      el("ul", {}, ...g.next_steps.map(t => el("li", {}, ...inlineCode(t)))));
-  }
-  if (g.details && g.details.length) {
-    const dl = el("dl", { class: "kv", style: "margin-top:10px" });
-    for (const [k, v] of g.details) dl.append(el("dt", { text: k }), el("dd", { text: String(v) }));
-    box.append(el("h5", { text: "Details" }), dl);
-  }
-  return box;
-}
-function openDrawer(a) {
-  state.openAlert = a;
-  const ctx = a.context || {};
-  $("drawerSev").replaceChildren(sevBadge(a.severity), " ", el("span", { class: "muted", style: "font-size:12px", text: (KIND_LABELS[a.kind] || a.kind) + " · " + new Date(a.timestamp * 1000).toLocaleString() }));
-  $("drawerTitle").textContent = a.message;
-  const kv = el("dl", { class: "kv" });
-  const add = (k, v) => { if (v != null && v !== "") kv.append(el("dt", { text: k }), el("dd", { text: String(v) })); };
-  add("App", ctx.app ? ctx.app + (ctx.process && ctx.process !== ctx.app ? ` (${ctx.process}, pid ${ctx.pid})` : ctx.pid ? ` (pid ${ctx.pid})` : "") : null);
-  add("Remote host", ctx.remote_host);
-  add("Remote IP", ctx.remote_ip);
-  add("Location", [ctx.city, ctx.country_name || ctx.country].filter(Boolean).join(", "));
-  add("Network", ctx.org ? `${ctx.org}${ctx.asn ? " (AS" + ctx.asn + ")" : ""}` : null);
-  add("Flow", `${a.src_ip || "?"}${a.src_port ? ":" + a.src_port : ""} → ${a.dst_ip || "?"}${a.dst_port ? ":" + a.dst_port : ""} ${a.protocol ? "(" + a.protocol.toUpperCase() + ")" : ""}`);
-  add("Direction", ctx.direction);
-  add("Rule", a.rule_id);
-  add("MITRE ATT&CK", a.mitre_technique);
-  add("Confidence", a.confidence != null ? Math.round(a.confidence * 100) + "%" : null);
-  add("Tags", (a.tags || []).join(", "));
-
-  const aiBox = el("div", { class: "ai-box", id: "aiBox" });
-  const explainBtn = el("button", { class: "btn primary" }, icon("i-spark"), "Explain with Claude");
-  explainBtn.addEventListener("click", async () => {
-    explainBtn.disabled = true;
-    aiBox.classList.add("show");
-    aiBox.replaceChildren(el("div", { style: "display:flex;gap:8px;align-items:center;color:var(--ink-2)" }, el("span", { class: "spinner" }), "Claude is analysing this alert…"));
-    try {
-      const r = await api("/api/explain/" + encodeURIComponent(a.alert_id), { method: "POST" });
-      const body = r.text.replace(/^\s*\**\s*Verdict:.*$/im, "").trim();
-      aiBox.replaceChildren(
-        r.verdict ? el("div", { class: "verdict" }, sevBadge({ Benign: "LOW", "Privacy concern": "MEDIUM", Suspicious: "HIGH", Malicious: "CRITICAL" }[r.verdict] || "LOW"), r.verdict) : null,
-        ...renderMarkdown(body),
-        el("div", { class: "foot", text: `${r.model}${r.cached ? " · cached" : ""} · AI analysis can be wrong — check the evidence.` }));
-    } catch (e) {
-      aiBox.replaceChildren(el("div", { text: e.message }));
-      explainBtn.disabled = false;
-    }
-  });
-  const ip = blockableIp(a);
-  const blockBtn = el("button", { class: "btn danger" }, icon("i-ban"), "Block " + (ip || "IP"));
-  blockBtn.disabled = !ip;
-  blockBtn.addEventListener("click", async () => {
-    if (!confirm(`Block all traffic to and from ${ip} for 1 hour?`)) return;
-    try { await api("/api/blocks", { method: "POST", body: JSON.stringify({ ip, reason: a.message, ttl: 3600, alert_id: a.alert_id }) }); toast("Blocked " + ip); loadBlocks(); }
-    catch (e) { toast(e.message); }
-  });
-
-  $("drawerBody").replaceChildren(
-    guideBox(a.about),
-    el("div", { class: "actions" }, explainBtn, blockBtn),
-    aiBox,
-    el("h4", { text: "Connection" }),
-    kv,
-    el("details", { class: "datatable" },
-      el("summary", { text: "Raw evidence (JSON)" }),
-      el("pre", { class: "json", text: JSON.stringify(a.evidence || {}, null, 2) })),
-  );
-  $("drawer").classList.add("show"); $("drawer").setAttribute("aria-hidden", "false"); $("scrim").classList.add("show");
-  $("drawerClose").focus();
-}
-function closeDrawer() { state.openAlert = null; $("drawer").classList.remove("show"); $("drawer").setAttribute("aria-hidden", "true"); $("scrim").classList.remove("show"); }
-$("drawerClose").addEventListener("click", closeDrawer);
-$("scrim").addEventListener("click", closeDrawer);
-addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
 
 // ---------------------------------------------------------------- protection
 async function loadBlocks() {
   const host = $("blocksTable");
   let blocks;
   try { blocks = await api("/api/blocks"); }
-  catch (e) { host.replaceChildren(el("div", { class: "empty", text: e.message })); $("blockAddBtn").disabled = true; return; }
+  catch (e) { host.replaceChildren(emptyBox(e.message)); $("blockAddBtn").disabled = true; return; }
   $("blockSub").textContent = state.summary && state.summary.status && state.summary.status.auto_block ? "pf firewall · auto-block on" : "pf firewall · auto-block off";
-  if (!blocks.length) { host.replaceChildren(el("div", { class: "empty", text: "No IPs are blocked." })); return; }
-  host.replaceChildren(el("table", {},
-    el("thead", {}, el("tr", {}, el("th", { text: "IP" }), el("th", { text: "Reason" }), el("th", { text: "Expires" }), el("th", {}))),
-    el("tbody", {}, blocks.map((b) => el("tr", {},
-      el("td", { class: "mono", text: b.ip }),
-      el("td", {}, el("div", { text: b.reason }), el("div", { class: "muted", style: "font-size:12px", text: (b.source === "auto" ? "Auto-blocked " : "Blocked ") + fmtAgo(b.created) })),
-      el("td", { class: "muted", style: "white-space:nowrap", text: b.expires ? new Date(b.expires * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "never" }),
-      el("td", { class: "num" }, el("button", { class: "btn", onclick: async () => { try { await api("/api/blocks/" + encodeURIComponent(b.ip), { method: "DELETE" }); toast("Unblocked " + b.ip); loadBlocks(); } catch (e) { toast(e.message); } } }, "Unblock")))))));
+  if (!blocks.length) { host.replaceChildren(emptyBox("No IPs are blocked.")); return; }
+  host.replaceChildren(table(["IP", "Reason", "Expires", ""], blocks.map((b) => el("tr", {},
+    el("td", {}, ipLink(b.ip)),
+    el("td", {}, el("div", { text: b.reason }), el("div", { class: "muted", style: "font-size:12px", text: (b.source === "auto" ? "Auto-blocked " : "Blocked ") + fmtAgo(b.created) })),
+    el("td", { class: "muted", style: "white-space:nowrap", text: b.expires ? new Date(b.expires * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "never" }),
+    el("td", { class: "num" }, el("button", { class: "btn", onclick: async () => { try { await api("/api/blocks/" + encodeURIComponent(b.ip), { method: "DELETE" }); toast("Unblocked " + b.ip); loadBlocks(); } catch (e) { toast(e.message); } } }, "Unblock"))))));
 }
 $("blockAddBtn").addEventListener("click", async () => {
   const ip = (prompt("IP address to block for 1 hour:") || "").trim();
@@ -1056,14 +1676,47 @@ $("blockAddBtn").addEventListener("click", async () => {
   try { await api("/api/blocks", { method: "POST", body: JSON.stringify({ ip, reason: "Blocked manually from the dashboard", ttl: 3600 }) }); toast("Blocked " + ip); loadBlocks(); }
   catch (e) { toast(e.message); }
 });
+async function loadAllowlist() {
+  const host = $("allowTable");
+  try { state.allow = await api("/api/allowlist"); } catch (e) { host.replaceChildren(emptyBox(e.message)); return; }
+  if (!state.allow.length) { host.replaceChildren(emptyBox("Nothing yet. Use “Mark as expected” on an event to stop hearing about it.")); return; }
+  host.replaceChildren(table(["Rule", { label: "Silenced", num: true }, ""], state.allow.map((r) => el("tr", {},
+    el("td", {}, el("div", { class: "chips" },
+      r.kind ? el("span", { class: "chip", text: KIND_LABELS[r.kind] || r.kind }) : null, r.rule_id ? el("span", { class: "chip", text: r.rule_id }) : null,
+      r.app ? el("span", { class: "chip", text: "app: " + r.app }) : null, r.host ? el("span", { class: "chip", text: "host: " + r.host }) : null, r.ip ? el("span", { class: "chip", text: "ip: " + r.ip }) : null),
+      el("div", { class: "sub2", text: `added ${fmtAgo(r.created)}${r.last_hit ? " · last match " + fmtAgo(r.last_hit) : ""}` })),
+    el("td", { class: "num", text: fmtNum(r.hits || 0) }),
+    el("td", { class: "num" }, el("button", { class: "btn", onclick: async () => { try { await api("/api/allowlist/" + r.id, { method: "DELETE" }); toast("Rule removed"); loadAllowlist(); } catch (e) { toast(e.message); } } }, "Remove"))))));
+}
+async function loadLaunchItems(refresh) {
+  const host = $("launchTable");
+  try { state.launch = await api("/api/launch-items" + (refresh ? "?refresh=1" : "")); } catch (e) { host.replaceChildren(emptyBox(e.message)); return; }
+  renderLaunchItems();
+  // Signatures are checked in the background; fill them in once they're ready.
+  if (state.launch.some((j) => j.program && !j.signature) && (loadLaunchItems.retries = (loadLaunchItems.retries || 0) + 1) <= 3)
+    setTimeout(() => { if (state.tab === "protection") loadLaunchItems(); }, 3000);
+}
+function renderLaunchItems() {
+  const host = $("launchTable");
+  let items = state.launch || [];
+  if ($("launchFlagged").checked) items = items.filter((j) => j.risk >= 1 || j.flags.includes("missing_program"));
+  if (!items.length) { host.replaceChildren(emptyBox($("launchFlagged").checked ? "No flagged launch items." : "No launch items found.")); return; }
+  host.replaceChildren(table(["Risk", "Launch item", "Program", "Signature", "Flags", "Changed"], items.map((j) => el("tr", {},
+    el("td", {}, riskBadge(j.risk)),
+    el("td", {}, el("div", { class: "app-name", text: j.label }), el("div", { class: "sub2", text: `${j.kind === "daemon" ? "LaunchDaemon" : "LaunchAgent"} · ${j.scope}${j.run_at_load ? " · at load" : ""}${j.keep_alive ? " · kept alive" : ""}` }), el("div", { class: "path", text: j.plist })),
+    el("td", {}, j.program ? progLink(j.program.split("/").pop(), j.program) : el("span", { class: "muted", text: "—" }), j.program ? el("div", { class: "path", text: j.program }) : null),
+    el("td", {}, sigBadge(j.signature, j.program), j.authority ? el("div", { class: "sub2", text: j.authority.replace(/^Developer ID Application: /, "") }) : null),
+    el("td", {}, flagChips(j.flags)),
+    el("td", { class: "muted", style: "white-space:nowrap", text: fmtAgo(j.modified) })))));
+}
+$("launchFlagged").addEventListener("change", renderLaunchItems);
+$("launchRefresh").addEventListener("click", () => loadLaunchItems(true));
 async function loadIntel() {
   const feeds = await api("/api/intel");
-  $("intelTable").replaceChildren(el("table", {},
-    el("thead", {}, el("tr", {}, el("th", { text: "Feed" }), el("th", { class: "num", text: "Entries" }), el("th", { text: "Updated" }))),
-    el("tbody", {}, feeds.map((f) => el("tr", {},
-      el("td", {}, el("div", { class: "app-name", text: f.name }), el("div", { class: "muted", style: "font-size:12px", text: f.description })),
-      el("td", { class: "num", text: f.entries ? fmtNum(f.entries) : "—" }),
-      el("td", { class: "muted", style: "white-space:nowrap", text: fmtAgo(f.fetched) }))))));
+  $("intelTable").replaceChildren(table(["Feed", { label: "Entries", num: true }, "Updated"], feeds.map((f) => el("tr", {},
+    el("td", {}, el("div", { class: "app-name", text: f.name }), el("div", { class: "muted", style: "font-size:12px", text: f.description })),
+    el("td", { class: "num", text: f.entries ? fmtNum(f.entries) : "—" }),
+    el("td", { class: "muted", style: "white-space:nowrap", text: fmtAgo(f.fetched) })))));
 }
 $("intelBtn").addEventListener("click", async () => {
   const b = $("intelBtn"); b.disabled = true; toast("Downloading feeds…");
@@ -1073,23 +1726,30 @@ $("intelBtn").addEventListener("click", async () => {
 });
 
 // ---------------------------------------------------------------- refresh loop + live stream
-function renderAllCharts() { renderRate(); renderTimeline(); renderKinds(); renderMap(); }
+function renderAllCharts() { if (state.tab === "overview") { renderRate(); renderTimeline(); renderKinds(); } if (state.tab === "network") renderMap(); }
 async function refreshSummary() {
   try {
     const s = await api("/api/summary");
     state.summary = s; state.rates = s.rates;
-    renderStatus(s); renderKpis(s); renderKinds(); renderRate(); renderKindFilters();
+    renderStatus(s); renderAskAvailability(s.status || {});
+    if (state.tab === "overview") { renderKpis(s); renderKinds(); renderRate(); }
+    renderKindFilters();
     $("liveRate").replaceChildren(el("b", { text: fmtNum(s.rates.pps) }), " pkt/s · ", el("b", { text: fmtBits(s.rates.bps) }));
   } catch (e) {
     $("statusDot").className = "dot bad"; $("statusText").textContent = "Daemon unreachable";
   }
 }
+let slowTick = 0;
 async function refreshSlow() {
+  slowTick++;
   try {
     const [timeline, remotes] = await Promise.all([api("/api/timeline"), api("/api/remotes?limit=600")]);
     state.timeline = timeline; state.remotes = remotes;
-    renderTimeline(); renderMap();
-    loadApps();
+    if (state.tab === "overview") { renderTimeline(); loadAttention(); }
+    if (state.tab === "network") { renderMap(); if (slowTick % 5 === 0) loadDevices(); }
+    if (state.tab === "apps") loadApps();
+    if (state.tab === "connections") loadConnections();
+    else if (slowTick % 5 === 1) api("/api/connections").then((c) => { state.conns = c; updateConnBadge(c.summary.flagged_programs); }).catch(() => {});
   } catch (_) { /* surfaced by summary */ }
 }
 function connectStream() {
@@ -1097,20 +1757,22 @@ function connectStream() {
   es.addEventListener("alert", (e) => { try { onLiveAlert(JSON.parse(e.data)); } catch (_) {} });
   es.addEventListener("tick", (e) => {
     try {
-      const t = JSON.parse(e.data); state.rates = t.rates; renderRate();
+      const t = JSON.parse(e.data); state.rates = t.rates; if (state.tab === "overview") renderRate();
       $("liveRate").replaceChildren(el("b", { text: fmtNum(t.rates.pps) }), " pkt/s · ", el("b", { text: fmtBits(t.rates.bps) }));
     } catch (_) {}
   });
   es.addEventListener("block", loadBlocks);
   es.addEventListener("unblock", loadBlocks);
-  es.addEventListener("intel", loadIntel);
+  es.addEventListener("intel", () => loadIntel().catch(() => {}));
+  es.addEventListener("allowlist", () => { if (state.tab === "protection") loadAllowlist(); });
 }
 let resizeTimer;
 addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderAllCharts, 120); });
 
 (async function boot() {
   await refreshSummary();
-  await Promise.all([refreshSlow(), loadAlerts(), loadBlocks(), loadIntel().catch(() => {})]);
+  go(location.hash.slice(1) || "overview", { noscroll: true });
+  await Promise.all([refreshSlow(), loadAlerts(), loadBlocks()]);
   loadWorld();
   connectStream();
   setInterval(refreshSummary, 3000);

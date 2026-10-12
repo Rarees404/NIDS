@@ -38,11 +38,13 @@ final class Monitor: ObservableObject {
     @Published var summary: Summary?
     @Published var snapshot: WidgetSnapshot?
     @Published var alerts: [AlertItem] = []
+    @Published var attention: AttentionResponse?
     @Published var error: String?
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
     @Published var busy = false
 
     private var timer: Timer?
+    private var ticks = 0
     private var lastEventTotal = -1
     private var lastWidgetReload = Date.distantPast
 
@@ -54,18 +56,25 @@ final class Monitor: ObservableObject {
     }
 
     var level: Level { Level(summary?.level ?? "ok") }
-    /// High-severity alerts in the last hour — what the menu bar badge shows.
-    var threats: Int { snapshot?.recentHigh ?? 0 }
+    /// High-severity alerts in the last hour plus untrusted programs — the menu bar badge.
+    var threats: Int { (snapshot?.recentHigh ?? 0) + (attention?.host?.flaggedPrograms ?? 0) }
+    var host: HostSummary? { attention?.host }
     var needsRoot: Bool { summary?.status.state == "needs-root" }
     var paused: Bool { summary?.status.paused ?? false }
     var daemonInstalled: Bool { FileManager.default.fileExists(atPath: Daemon.plist) }
 
-    func refresh() {
+    func refresh(full: Bool = false) {
+        ticks += 1
+        // The attention summary reads the live socket table; every ~15 s is plenty.
+        let wantAttention = full || attention == nil || ticks % 5 == 0
         Task {
             do {
                 let s = try await PyNIDSClient.get("/api/summary", as: Summary.self)
                 let a = try await PyNIDSClient.get("/api/alerts?limit=8&min_severity=MEDIUM", as: [AlertItem].self)
                 snapshot = try? await PyNIDSClient.widgetSnapshot()
+                if wantAttention {
+                    attention = try? await PyNIDSClient.get("/api/attention", as: AttentionResponse.self)
+                }
                 summary = s
                 alerts = a
                 error = nil
@@ -78,6 +87,7 @@ final class Monitor: ObservableObject {
             } catch {
                 summary = nil
                 alerts = []
+                attention = nil
                 self.error = error.localizedDescription
             }
         }
@@ -101,13 +111,17 @@ final class Monitor: ObservableObject {
     /// Stop: the daemon keeps running but stops capturing, so nothing is
     /// detected and no alerts pop up.  Persists across restarts until resumed.
     func setDetection(_ enabled: Bool) {
+        busy = true
         Task {
             do {
                 _ = try await PyNIDSClient.request("/api/detection", method: "POST", body: ["enabled": enabled])
             } catch {
                 self.error = error.localizedDescription
             }
-            refresh()
+            busy = false
+            refresh(full: true)
+            // The widget should say "Stopped" / come back right away, not in 5 minutes.
+            WidgetCenter.shared.reloadAllTimelines()
         }
     }
 
@@ -122,10 +136,35 @@ final class Monitor: ObservableObject {
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // disable: launchd won't start it at boot.  bootout: stop it now (launchd
+        // waits for a clean exit, then kills the whole process group, so no
+        // helper — nettop, codesign, nmap — survives).  pkill: a daemon started
+        // by hand with `sudo pynids daemon run`.
         runPrivileged("/bin/launchctl disable \(Daemon.target); "
-                      + "/bin/launchctl bootout \(Daemon.target) || true") { ok in
-            if ok { NSApp.terminate(nil) }
+                      + "/bin/launchctl bootout \(Daemon.target) 2>/dev/null; "
+                      + "/usr/bin/pkill -TERM -f '\(Daemon.manualPattern)'; true") { [weak self] ok in
+            guard ok, let self else { return }
+            Task { @MainActor in
+                if await self.waitUntilStopped() {
+                    self.timer?.invalidate()
+                    // Repaint the widget as "Not running" before we disappear.
+                    WidgetCenter.shared.reloadAllTimelines()
+                    NSApp.terminate(nil)
+                } else {
+                    self.error = "PyNIDS is still running. Try again, or run: sudo pynids daemon uninstall"
+                    self.refresh(full: true)
+                }
+            }
         }
+    }
+
+    /// True once the daemon's API stops answering (up to ~10 s).
+    private func waitUntilStopped() async -> Bool {
+        for _ in 0..<20 {
+            if (try? await PyNIDSClient.request("/api/health", authenticated: false)) == nil { return true }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        return false
     }
 
     /// Start the daemon again after a Quit.
@@ -133,7 +172,10 @@ final class Monitor: ObservableObject {
         runPrivileged("/bin/launchctl enable \(Daemon.target); "
                       + "/bin/launchctl bootstrap system '\(Daemon.plist)' || "
                       + "/bin/launchctl kickstart \(Daemon.target)") { [weak self] _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.refresh() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                self?.refresh(full: true)
+                WidgetCenter.shared.reloadAllTimelines()
+            }
         }
     }
 
@@ -191,6 +233,10 @@ enum Daemon {
     static let label = "com.pynids.daemon"
     static let target = "system/\(label)"
     static let plist = "/Library/LaunchDaemons/\(label).plist"
+    /// `pkill -f` pattern for a daemon started by hand (`pynids daemon run`).
+    /// "[p]" keeps the pattern from matching the shell that runs pkill, whose
+    /// own command line contains this text.
+    static let manualPattern = "[p]ynids.* daemon run"
 }
 
 // MARK: - Menu bar icon
@@ -226,8 +272,8 @@ struct MenuContent: View {
                     Notice(text: "Packet capture needs root. Run: sudo pynids daemon install")
                 }
                 stats(s)
+                attentionList
                 throughput(s)
-                alertList
                 apps(s)
             } else {
                 offline
@@ -250,7 +296,7 @@ struct MenuContent: View {
                 Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
-            Button { monitor.refresh() } label: { Image(systemName: "arrow.clockwise") }
+            Button { monitor.refresh(full: true) } label: { Image(systemName: "arrow.clockwise") }
                 .buttonStyle(.borderless)
                 .help("Refresh")
             powerMenu
@@ -263,7 +309,8 @@ struct MenuContent: View {
                 if monitor.paused {
                     Button("Resume Detection") { monitor.setDetection(true) }
                 } else {
-                    Button("Stop Detection") { monitor.setDetection(false) }
+                    // Pause: capture and every scan stop; the daemon stays up so Resume is instant.
+                    Button("Stop Detection (pause)") { monitor.setDetection(false) }
                 }
             } else if monitor.daemonInstalled {
                 Button("Start PyNIDS…") { monitor.startDaemon() }
@@ -290,17 +337,24 @@ struct MenuContent: View {
     }
 
     private func stats(_ s: Summary) -> some View {
-        Grid(horizontalSpacing: 8, verticalSpacing: 8) {
+        let flagged = monitor.host?.flaggedPrograms ?? 0
+        return Grid(horizontalSpacing: 8, verticalSpacing: 8) {
             GridRow {
                 StatTile(title: "Notable · last hour", value: monitor.snapshot?.attention ?? 0,
                          symbol: "exclamationmark.shield",
                          tint: (monitor.snapshot?.recentHigh ?? 0) > 0 ? Palette.critical : .secondary)
-                StatTile(title: "Trackers & beacons", value: s.count("tracker", "beacon"), symbol: "eye", tint: .secondary)
+                    .onTapGesture { monitor.openDashboard("#events") }
+                StatTile(title: "Untrusted programs", value: flagged, symbol: "app.badge.checkmark",
+                         tint: flagged > 0 ? Palette.serious : .secondary,
+                         placeholder: monitor.host == nil)
+                    .onTapGesture { monitor.openDashboard("#connections") }
             }
             GridRow {
-                StatTile(title: "IP leaks & probes", value: s.count("webrtc", "localhost"),
-                         symbol: "network.badge.shield.half.filled", tint: .secondary)
-                StatTile(title: "Encrypted DNS", value: s.count("doh"), symbol: "lock.shield", tint: .secondary)
+                StatTile(title: "Exposed ports", value: monitor.host?.exposedPorts ?? 0,
+                         symbol: "door.left.hand.open", tint: .secondary, placeholder: monitor.host == nil)
+                    .onTapGesture { monitor.openDashboard("#connections") }
+                StatTile(title: "Trackers & beacons", value: s.count("tracker", "beacon"), symbol: "eye", tint: .secondary)
+                    .onTapGesture { monitor.openDashboard("#events") }
             }
         }
     }
@@ -336,17 +390,34 @@ struct MenuContent: View {
         }
     }
 
+    /// "Needs your attention" — the same list as the dashboard's Overview:
+    /// serious alerts from the last hour, untrusted programs, exposed ports,
+    /// new LAN devices.  Alerts keep their hover-to-block button.
     @ViewBuilder
-    private var alertList: some View {
+    private var attentionList: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Recent alerts").font(.caption).foregroundStyle(.secondary)
-            if monitor.alerts.isEmpty {
-                Text("Nothing notable yet.").font(.callout).foregroundStyle(.secondary)
-            } else {
-                ForEach(monitor.alerts.prefix(5)) { a in
+            Text("Needs your attention").font(.caption).foregroundStyle(.secondary)
+            if monitor.paused {
+                Text("Nothing is checked while detection is stopped.").font(.callout).foregroundStyle(.secondary)
+            } else if let items = monitor.attention?.items, !items.isEmpty {
+                ForEach(items.prefix(4)) { item in
+                    if item.action?.type == "alert", let a = monitor.alerts.first(where: { $0.alertId == item.action?.id }) {
+                        AlertRow(alert: a, onBlock: { ip in monitor.block(ip, reason: a.message) })
+                            .onTapGesture { monitor.openDashboard("#events") }
+                    } else {
+                        AttentionRow(item: item)
+                            .onTapGesture { monitor.openDashboard(item.anchor) }
+                    }
+                }
+            } else if monitor.attention == nil && !monitor.alerts.isEmpty {
+                // Older daemon without /api/attention: fall back to recent alerts.
+                ForEach(monitor.alerts.prefix(4)) { a in
                     AlertRow(alert: a, onBlock: { ip in monitor.block(ip, reason: a.message) })
                         .onTapGesture { monitor.openDashboard("#events") }
                 }
+            } else {
+                Label("All clear — nothing needs a look right now.", systemImage: "checkmark.circle")
+                    .font(.callout).foregroundStyle(.secondary)
             }
         }
     }
@@ -412,6 +483,10 @@ struct MenuContent: View {
             }
             .keyboardShortcut("d")
             .disabled(monitor.summary == nil)
+            Button { monitor.openDashboard("#overview") } label: { Image(systemName: "sparkles") }
+                .buttonStyle(.borderless)
+                .disabled(monitor.summary == nil)
+                .help("Ask Claude about your Mac (opens the dashboard)")
             Spacer()
             if let s = monitor.summary {
                 let on = s.status.notifications ?? false
@@ -441,6 +516,7 @@ struct StatTile: View {
     let value: Int
     let symbol: String
     let tint: Color
+    var placeholder = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -448,12 +524,13 @@ struct StatTile: View {
                 .font(.caption)
                 .foregroundStyle(tint)
                 .lineLimit(1)
-            Text(Format.count(value))
+            Text(placeholder ? "—" : Format.count(value))
                 .font(.system(size: 22, weight: .semibold))
                 .monospacedDigit()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
+        .contentShape(Rectangle())
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
         .accessibilityElement(children: .combine)
     }
@@ -498,6 +575,34 @@ struct AlertRow: View {
         .padding(.vertical, 3)
         .padding(.horizontal, 4)
         .background(hovering ? Color.primary.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .onHover { hover.on = $0 }
+    }
+}
+
+/// A non-alert attention item (untrusted program, exposed ports, new device).
+struct AttentionRow: View {
+    let item: AttentionItem
+    @StateObject private var hover = HoverState()
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: Severity.symbol(item.level))
+                .foregroundStyle(Severity.color(item.level))
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title).font(.callout).lineLimit(2)
+                if let detail = item.detail, !detail.isEmpty {
+                    Text(detail).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                }
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+                .opacity(hover.on ? 1 : 0)
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 4)
+        .background(hover.on ? Color.primary.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
         .onHover { hover.on = $0 }
     }

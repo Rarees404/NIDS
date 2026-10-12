@@ -275,13 +275,15 @@ class TestExplain:
         class Messages:
             def create(self, **kw):
                 captured.update(kw)
-                return SimpleNamespace(stop_reason="end_turn", model="claude-opus-5",
+                return SimpleNamespace(stop_reason="end_turn", model="claude-opus-5-5",
                                        content=[SimpleNamespace(type="text", text="Verdict: Benign\n\nFine.")])
 
         client = SimpleNamespace(beta=SimpleNamespace(messages=Messages()))
-        out = ai.explain_alert(alert().to_dict(), client=client)
+        out = ai.explain_alert(alert().to_dict(), client=client, extra={"signature": {"status": "unsigned"}})
         assert out["verdict"] == "Benign"
-        assert captured["model"] == "claude-opus-5"
+        assert captured["model"] == "claude-opus-5-5"
+        assert captured["output_config"] == {"effort": "high"}
+        assert '"host_context"' in captured["messages"][0]["content"]
         assert captured["fallbacks"] == "default"
         assert captured["betas"] == ["server-side-fallback-2026-07-01"]
         assert "untrusted" in captured["system"]

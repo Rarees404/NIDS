@@ -261,6 +261,31 @@ class LiveState(BaseOutput):
             return [{**{k: v for k, v in r.items() if k != "apps"}, "apps": sorted(r["apps"])}
                     for r in rows]
 
+    def remote(self, ip: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            r = self._remotes.get(ip)
+            return {**{k: v for k, v in r.items() if k != "apps"}, "apps": sorted(r["apps"])} if r else None
+
+    def remote_index(self) -> Dict[str, Dict[str, Any]]:
+        """ip → {remote_host, country, org, bytes, alerts} (no copies of app sets)."""
+        keep = ("remote_host", "country", "country_name", "city", "org", "asn", "bytes", "alerts", "last_seen")
+        with self._lock:
+            return {ip: {k: r.get(k) for k in keep} for ip, r in self._remotes.items()}
+
+    def app(self, name: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            a = self._apps.get(name)
+            if a is None:
+                return None
+            return {
+                "app": a["app"], "process": a.get("process"),
+                "bytes_out": a["bytes_out"], "bytes_in": a["bytes_in"], "packets": a["packets"],
+                "alerts": a["alerts"], "remotes": sorted(a["remotes"])[:200],
+                "hosts": [{"host": h, "bytes": b} for h, b in a["hosts"].most_common(40)],
+                "countries": [{"country": c, "bytes": b} for c, b in a["countries"].most_common(40)],
+                "first_seen": a.get("first_seen"), "last_seen": a.get("last_seen"),
+            }
+
     def recent_alerts(self, limit: int = 100) -> List[Dict[str, Any]]:
         with self._lock:
             return list(self.recent)[-limit:][::-1]

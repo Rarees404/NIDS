@@ -10,7 +10,7 @@ from .model import Alert
 
 KINDS = (
     "threat", "attack", "webrtc", "localhost", "doh", "tracker",
-    "beacon", "websocket", "quic", "prefetch", "other",
+    "beacon", "websocket", "quic", "prefetch", "host", "other",
 )
 
 KIND_LABELS: Dict[str, str] = {
@@ -24,6 +24,7 @@ KIND_LABELS: Dict[str, str] = {
     "websocket": "WebSockets",
     "quic": "QUIC / HTTP-3",
     "prefetch": "DNS prefetch",
+    "host": "Programs & devices",
     "other": "Other",
 }
 
@@ -31,7 +32,7 @@ KIND_LABELS: Dict[str, str] = {
 def classify_parts(rule_id: str, tags: Iterable[str], alert_type: str) -> str:
     rid = (rule_id or "").upper()
     tags = set(tags or ())
-    if alert_type == "threat_intel":
+    if alert_type == "threat_intel" or "likely_c2" in tags:
         return "threat"
     if "webrtc" in tags or rid.startswith("STEALTH-WEBRTC"):
         return "webrtc"
@@ -49,6 +50,8 @@ def classify_parts(rule_id: str, tags: Iterable[str], alert_type: str) -> str:
         return "beacon"
     if "dns_prefetch" in tags or rid.startswith("STEALTH-DNS-PREFETCH"):
         return "prefetch"
+    if tags & {"host_risk", "new_program", "baseline", "new_device"}:
+        return "host"
     if alert_type in ("signature", "anomaly", "behavioral", "correlation"):
         return "attack"
     return "other"
