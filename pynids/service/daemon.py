@@ -174,7 +174,7 @@ def build_config(options: DaemonOptions) -> Dict[str, Any]:
     cfg.setdefault("intel", {})["feeds_dir"] = str(intel_dir())
     if options.interface:
         cfg["daemon"]["interface"] = options.interface
-    if options.api_port:
+    if options.api_port is not None:
         cfg["daemon"]["api_port"] = options.api_port
     if options.auto_block is not None:
         cfg["response"]["auto_block"] = options.auto_block

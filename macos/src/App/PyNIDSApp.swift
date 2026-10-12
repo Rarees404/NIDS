@@ -262,9 +262,12 @@ final class Monitor: ObservableObject {
         return false
     }
 
-    /// Start the daemon again after a Quit.
+    /// Start the daemon again after a Quit.  Starting means *running*: clear
+    /// a "Stop Detection" left over from before, which otherwise survives
+    /// restarts and would bring the daemon back paused.
     func startDaemon() {
-        runPrivileged("/bin/launchctl enable \(Daemon.target); "
+        runPrivileged("/bin/rm -f '\(Daemon.pausedFlag)'; "
+                      + "/bin/launchctl enable \(Daemon.target); "
                       + "/bin/launchctl bootstrap system '\(Daemon.plist)' || "
                       + "/bin/launchctl kickstart \(Daemon.target)") { [weak self] _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
@@ -328,6 +331,8 @@ enum Daemon {
     static let label = "com.pynids.daemon"
     static let target = "system/\(label)"
     static let plist = "/Library/LaunchDaemons/\(label).plist"
+    /// Present while detection is stopped (pynids/paths.py: paused_flag_path).
+    static let pausedFlag = "/Library/Application Support/PyNIDS/paused"
     /// `pkill -f` pattern for a daemon started by hand (`pynids daemon run`).
     /// "[p]" keeps the pattern from matching the shell that runs pkill, whose
     /// own command line contains this text.

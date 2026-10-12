@@ -110,6 +110,9 @@ def daemon_install(rules: Optional[str], record: bool) -> None:
         args += ["--rules", str(Path(rules).resolve())]
     if record:
         args.append("--record")
+    # Installing means "start monitoring": drop a leftover Stop Detection.
+    from .paths import paused_flag_path
+    paused_flag_path().unlink(missing_ok=True)
     path = launchd.install(extra_args=args)
     console.print(f"[green]✓[/green] Installed [bold]{path}[/bold] and started the daemon")
     from .service.client import ApiClient
