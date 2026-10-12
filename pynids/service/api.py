@@ -69,6 +69,7 @@ class ServiceContext:
         allowlist: Any = None,
         investigate: Optional[Callable[[str], Dict[str, Any]]] = None,
         baseline: Any = None,
+        updater: Any = None,
     ) -> None:
         self.live = live
         self.token = token
@@ -84,6 +85,7 @@ class ServiceContext:
         self.allowlist = allowlist
         self.investigate = investigate
         self.baseline = baseline
+        self.updater = updater
         self._explain_lock = threading.Lock()
         self._investigate_lock = threading.Lock()
         if self.db_path:
@@ -313,6 +315,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._investigate()
         elif method == "GET" and path == "/api/baseline":
             self._send_json(ctx.baseline.status() if ctx.baseline is not None else {"enabled": False})
+        elif path in ("/api/update", "/api/update/check"):
+            self._update(method, path)
         elif method == "POST" and path == "/api/detection":
             if not ctx.set_detection:
                 self._error(HTTPStatus.NOT_IMPLEMENTED, "pausing detection is unavailable")
@@ -575,6 +579,25 @@ class _Handler(BaseHTTPRequestHandler):
             removed = al.remove(unquote(path[len("/api/allowlist/"):]))
             self.ctx.live.broadcast("allowlist", {"removed": removed})
             self._send_json({"removed": removed})
+        else:
+            self._error(HTTPStatus.NOT_FOUND, "not found")
+
+    def _update(self, method: str, path: str) -> None:
+        upd = self.ctx.updater
+        if upd is None:
+            self._error(HTTPStatus.NOT_IMPLEMENTED, "updates are unavailable")
+            return
+        from .updater import UpdateError
+
+        if method == "GET" and path == "/api/update":
+            self._send_json(upd.status())
+        elif method == "POST" and path == "/api/update/check":
+            self._send_json(upd.check())
+        elif method == "POST" and path == "/api/update":
+            try:
+                self._send_json(upd.apply(), HTTPStatus.ACCEPTED)
+            except UpdateError as exc:
+                self._error(HTTPStatus.CONFLICT, str(exc))
         else:
             self._error(HTTPStatus.NOT_FOUND, "not found")
 

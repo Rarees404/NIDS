@@ -54,6 +54,7 @@ from ..paths import (
 from ..sniffer import sniff_live
 from .api import ServiceContext, make_server
 from .live import LiveState
+from .updater import Updater
 
 logger = logging.getLogger("pynids.daemon")
 
@@ -107,6 +108,13 @@ DAEMON_DEFAULTS: Dict[str, Any] = {
     "lookups": {
         "mode": "alerts",
         "min_severity": "MEDIUM",
+    },
+    # In-app updates: check GitHub for new commits; the dashboard / menu bar
+    # app shows an Update button.  Nothing is installed without a click.
+    "updates": {
+        "check": True,
+        "interval_hours": 6,
+        "extras": "all",
     },
 }
 
@@ -305,6 +313,16 @@ class Daemon:
             from ..ai.investigate import Toolbox, investigate as ai_investigate
             explain = lambda alert: ai_explain.explain_alert(alert, extra=self.explain_context(alert))  # noqa: E731
             investigate = lambda q: ai_investigate(q, Toolbox(self.inspector, self.live))  # noqa: E731
+        ucfg = self.cfg["updates"]
+        self.updater = Updater(
+            state_file=data_dir() / "last-update.json",
+            # Under launchd an exit is followed by a restart into the new code;
+            # started by hand, the user has to start it again.
+            on_restart=self.restart_for_update if _under_launchd() else None,
+            broadcast=self.live.broadcast,
+            interval_hours=float(ucfg.get("interval_hours", 6)) if ucfg.get("check", True) else 0,
+            extras=str(ucfg.get("extras", "all")),
+        )
         self.token = ensure_token()
         self.api_ctx = ServiceContext(
             live=self.live,
@@ -321,6 +339,7 @@ class Daemon:
             allowlist=self.allowlist,
             investigate=investigate,
             baseline=self.baseline,
+            updater=self.updater,
         )
         self.server = make_server(self.api_ctx, dcfg["api_host"], int(dcfg["api_port"]))
 
@@ -357,6 +376,7 @@ class Daemon:
             "local_ips": sorted(ip for ip in self.enricher.local_ips
                                 if ":" not in ip and not ip.startswith("127.")),
             "allowlisted": self.allowlist.hits,
+            "update": self.updater.brief(),
         }
 
     def explain_context(self, alert: Dict[str, Any]) -> Dict[str, Any]:
@@ -390,6 +410,12 @@ class Daemon:
         self.engine.reload_intel(intel, feeds_mod.load_trackers(intel_dir()), doh_hosts, doh_ips)
         self.live.broadcast("intel", {"updated": time.time()})
         return [r.__dict__ for r in results]
+
+    def restart_for_update(self) -> None:
+        """Exit with 75 so launchd starts the freshly updated code."""
+        self._restart_requested = True
+        self.capture_stop.set()
+        self.stop_event.set()
 
     # ------------------------------------------------------------------
 
@@ -512,6 +538,7 @@ class Daemon:
             threading.Thread(target=self.refresh_feeds, name="feeds", daemon=True).start()
 
         threading.Thread(target=self._periodic, name="periodic", daemon=True).start()
+        self.updater.start()
 
         if not self.options.no_capture and not self.root and not os.access("/dev/bpf0", os.R_OK):
             # Packet capture needs root (or ChmodBPF); keep the API up so the
@@ -558,6 +585,7 @@ class Daemon:
         except Exception:  # noqa: BLE001
             pass
         self.capture_stop.set()
+        self.updater.stop()
         if self.processes:
             self.processes.stop()
         if self.signatures:
@@ -578,6 +606,11 @@ class Daemon:
                 logger.error("Could not unload pf rules: %s", exc)
         self.alerts.close()
         logger.info("Stopped cleanly")
+
+
+def _under_launchd() -> bool:
+    from .launchd import LABEL
+    return os.environ.get("XPC_SERVICE_NAME") == LABEL or os.getppid() == 1
 
 
 def _hours(seconds: float) -> Optional[float]:

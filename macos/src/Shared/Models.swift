@@ -111,6 +111,41 @@ struct DaemonStatus: Codable, Hashable {
     let ai: Bool?
     let geoip: Bool?
     let version: String?
+    // Added in 2.1 — in-app updates (nil on an older daemon).
+    let update: UpdateBrief?
+}
+
+/// In-app update state, folded into `/api/summary` → `status.update`.
+struct UpdateBrief: Codable, Hashable {
+    let supported: Bool?
+    let state: String?
+    let available: Bool?
+    let latestVersion: String?
+    let behind: Int?
+    let step: String?
+    let error: String?
+    let blocked: String?
+
+    var busy: Bool { state == "updating" || state == "restarting" }
+}
+
+/// `/api/update` — the full picture, including what the menu bar app needs to
+/// decide whether it must rebuild itself after an update.
+struct UpdateInfo: Codable, Hashable {
+    struct LastUpdate: Codable, Hashable {
+        let from: String?
+        let to: String?
+        let at: Double?
+        let version: String?
+        let appChanged: Bool?
+    }
+
+    let state: String?
+    let available: Bool?
+    let currentVersion: String?
+    let appTree: String?
+    let repo: String?
+    let lastUpdate: LastUpdate?
 }
 
 /// `/api/summary`

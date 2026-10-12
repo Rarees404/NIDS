@@ -264,6 +264,28 @@ trackers, and a rolling event stream, each tagged with its app.
 
 ## 🔄 Updating & restarting
 
+### One-click updates (no terminal)
+
+PyNIDS checks GitHub for new commits every 6 hours. When there is one:
+
+* the **dashboard** shows an **Update** button in the top bar (or use *Check for updates* in the footer), and
+* the **menu bar app** shows *"PyNIDS x.y is available"* with an **Update** button (or ⚙︎ → **Check for Updates**).
+
+Pressing **Update** downloads the new code, installs any new dependencies, checks that it
+starts, and restarts PyNIDS (monitoring pauses for a few seconds). If the menu bar app
+itself changed, it rebuilds and relaunches itself. If anything fails, the previous version
+is restored and the error is shown. From a terminal: `pynids update`.
+
+Updates are only applied as a fast-forward of your checkout. If you have local commits, or
+unsaved edits to files the update changes, PyNIDS says so and leaves the folder alone.
+Turn the periodic check off with `updates: {check: false}` in the [config](#-configuration).
+
+> **Releasing:** bump `version` in `pyproject.toml` **and** `__version__` in
+> `pynids/__init__.py` before pushing, so users see "PyNIDS 2.1.0 is available" rather
+> than just "a new version".
+
+### Manually
+
 After pulling new code, or whenever you want to be sure everything is current:
 
 ```bash

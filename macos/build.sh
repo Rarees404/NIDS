@@ -25,6 +25,9 @@ VERSION="$(grep -m1 '^version' "$HERE/../pyproject.toml" | cut -d'"' -f2)"
 # Monotonic build number that fits in 32 bits (minutes since the Unix epoch);
 # WidgetKit compares it against LaunchServices' record of the installed app.
 BUILD="$(( $(date +%s) / 60 ))"
+# Git tree of macos/ this was built from: after an in-app update the menu bar
+# app compares it with the checkout and rebuilds itself when they differ.
+SOURCE_TREE="$(git -C "$HERE/.." rev-parse HEAD:macos 2>/dev/null || true)"
 SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
 SDK_BUILD="$(xcrun --sdk macosx --show-sdk-build-version 2>/dev/null || echo "")"
 SWIFTC=(xcrun --sdk macosx swiftc -sdk "$SDK" -target "$TARGET" -swift-version 5 -O -parse-as-library)
@@ -48,6 +51,7 @@ for pair in "App-Info.plist:$APP/Contents/Info.plist" "Widget-Info.plist:$APPEX/
   src="${pair%%:*}"; dst="${pair#*:}"
   sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD/" \
       -e "s/__SDK_VERSION__/$SDK_VERSION/g" -e "s/__SDK_BUILD__/$SDK_BUILD/g" \
+      -e "s/__SOURCE_TREE__/$SOURCE_TREE/" \
       "$SRC/Resources/$src" > "$dst"
 done
 printf 'APPL????' > "$APP/Contents/PkgInfo"

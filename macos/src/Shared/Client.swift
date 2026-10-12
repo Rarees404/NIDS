@@ -41,6 +41,14 @@ enum PyNIDSClient {
         return URLSession(configuration: config)
     }()
 
+    /// For the few calls that wait on the network (checking GitHub for updates).
+    private static let slowSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForResource = 180
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }()
+
     private static let decoder: JSONDecoder = {
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase
@@ -48,9 +56,10 @@ enum PyNIDSClient {
     }()
 
     static func request(_ path: String, method: String = "GET", body: [String: Any]? = nil,
-                        authenticated: Bool = true) async throws -> Data {
+                        authenticated: Bool = true, timeout: TimeInterval? = nil) async throws -> Data {
         var req = URLRequest(url: URL(string: path, relativeTo: base)!)
         req.httpMethod = method
+        if let timeout { req.timeoutInterval = timeout }
         if authenticated { req.setValue(token(), forHTTPHeaderField: "X-PyNIDS-Token") }
         if let body {
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -59,7 +68,7 @@ enum PyNIDSClient {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: req)
+            (data, response) = try await (timeout == nil ? session : slowSession).data(for: req)
         } catch {
             throw ClientError.offline
         }
@@ -70,8 +79,10 @@ enum PyNIDSClient {
         return data
     }
 
-    static func get<T: Decodable>(_ path: String, as type: T.Type, authenticated: Bool = true) async throws -> T {
-        try decoder.decode(T.self, from: try await request(path, authenticated: authenticated))
+    static func get<T: Decodable>(_ path: String, as type: T.Type, method: String = "GET",
+                                  authenticated: Bool = true, timeout: TimeInterval? = nil) async throws -> T {
+        try decoder.decode(T.self, from: try await request(path, method: method,
+                                                           authenticated: authenticated, timeout: timeout))
     }
 
     static func widgetSnapshot() async throws -> WidgetSnapshot {

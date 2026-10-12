@@ -42,6 +42,12 @@ final class Monitor: ObservableObject {
     @Published var error: String?
     @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
     @Published var busy = false
+    /// Set from pressing Update until the restarted daemon answers again.
+    @Published var updating = false
+    /// The menu bar app is rebuilding itself after an update.
+    @Published var rebuilding = false
+    /// Short-lived result of "Check for Updates" / a failed rebuild.
+    @Published var updateMessage: String?
 
     private var timer: Timer?
     private var ticks = 0
@@ -62,6 +68,7 @@ final class Monitor: ObservableObject {
     var needsRoot: Bool { summary?.status.state == "needs-root" }
     var paused: Bool { summary?.status.paused ?? false }
     var daemonInstalled: Bool { FileManager.default.fileExists(atPath: Daemon.plist) }
+    var update: UpdateBrief? { summary?.status.update }
 
     func refresh(full: Bool = false) {
         ticks += 1
@@ -78,6 +85,8 @@ final class Monitor: ObservableObject {
                 summary = s
                 alerts = a
                 error = nil
+                if updating, !(s.status.update?.busy ?? false) { updating = false }
+                if ticks % 10 == 1 { await rebuildIfOutdated() }
                 // Keep the desktop widget in step, without burning its refresh budget.
                 if s.eventsTotal != lastEventTotal, Date().timeIntervalSince(lastWidgetReload) > 60 {
                     lastEventTotal = s.eventsTotal
@@ -90,6 +99,92 @@ final class Monitor: ObservableObject {
                 attention = nil
                 self.error = error.localizedDescription
             }
+        }
+    }
+
+    // MARK: Updates
+
+    func installUpdate() {
+        updating = true
+        Task {
+            do {
+                _ = try await PyNIDSClient.request("/api/update", method: "POST")
+            } catch {
+                updating = false
+                say(error.localizedDescription)
+            }
+            refresh(full: true)
+        }
+    }
+
+    func checkForUpdates() {
+        Task {
+            do {
+                let info = try await PyNIDSClient.get("/api/update/check", as: UpdateInfo.self, method: "POST", timeout: 120)
+                if info.available != true { say("PyNIDS is up to date (\(info.currentVersion ?? "?")).") }
+            } catch {
+                say(error.localizedDescription)
+            }
+            refresh(full: true)
+        }
+    }
+
+    private func say(_ message: String, for seconds: Double = 8) {
+        updateMessage = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            if self?.updateMessage == message { self?.updateMessage = nil }
+        }
+    }
+
+    private static let failedTreeKey = "rebuildFailedTree"
+    static var buildLog: String { NSHomeDirectory() + "/Library/Logs/PyNIDS-app-build.log" }
+
+    /// After an in-app update changed macos/, rebuild and relaunch this app
+    /// from the updated checkout.  build.sh quits this process and opens the
+    /// new copy, so on success we never see the script finish.
+    private func rebuildIfOutdated() async {
+        guard !rebuilding, let info = try? await PyNIDSClient.get("/api/update", as: UpdateInfo.self),
+              let repo = info.repo, let tree = info.appTree, let last = info.lastUpdate,
+              last.appChanged == true, let updatedAt = last.at else { return }
+        let bundle = Bundle.main.infoDictionary ?? [:]
+        let myTree = bundle["PyNIDSSourceTree"] as? String ?? ""
+        let myVersion = bundle["CFBundleShortVersionString"] as? String ?? ""
+        // CFBundleVersion is minutes since the epoch (see build.sh).
+        let builtAt = (Double(bundle["CFBundleVersion"] as? String ?? "") ?? 0) * 60
+        let outdated = myTree != tree || (info.currentVersion.map { $0 != myVersion } ?? false)
+        guard outdated, updatedAt > builtAt,
+              UserDefaults.standard.string(forKey: Self.failedTreeKey) != tree else { return }
+        let script = repo + "/macos/build.sh"
+        guard FileManager.default.isExecutableFile(atPath: script) else { return }
+
+        rebuilding = true
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = [script, "--install"]
+        proc.currentDirectoryURL = URL(fileURLWithPath: repo)
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+        proc.environment = env
+        FileManager.default.createFile(atPath: Self.buildLog, contents: nil)
+        if let log = FileHandle(forWritingAtPath: Self.buildLog) {
+            proc.standardOutput = log
+            proc.standardError = log
+        }
+        proc.terminationHandler = { p in
+            let ok = p.terminationStatus == 0
+            Task { @MainActor in
+                self.rebuilding = false
+                if !ok {
+                    UserDefaults.standard.set(tree, forKey: Self.failedTreeKey)
+                    self.say("Couldn't rebuild the menu bar app — see \(Self.buildLog)", for: 30)
+                }
+            }
+        }
+        do {
+            try proc.run()
+        } catch {
+            rebuilding = false
+            say("Couldn't rebuild the menu bar app: \(error.localizedDescription)", for: 30)
         }
     }
 
@@ -265,6 +360,7 @@ struct MenuContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            updateBanner
             if let s = monitor.summary {
                 if monitor.paused {
                     Notice(text: "Detection is stopped — no traffic is analysed and no alerts are shown.")
@@ -303,6 +399,40 @@ struct MenuContent: View {
         }
     }
 
+    @ViewBuilder
+    private var updateBanner: some View {
+        if monitor.rebuilding {
+            UpdateNotice(symbol: nil, text: "Updating the menu bar app…")
+        } else if monitor.updating || (monitor.update?.busy ?? false) {
+            UpdateNotice(symbol: nil, text: monitor.update?.step ?? "Restarting into the new version…")
+        } else if let u = monitor.update, u.state == "error" || u.state == "restart-needed" {
+            UpdateNotice(symbol: "exclamationmark.triangle.fill",
+                         text: u.state == "error" ? "The update didn't install" : (u.step ?? "Restart PyNIDS to finish updating"),
+                         detail: u.error) {
+                Button("Details") { monitor.openDashboard("#update") }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+            }
+        } else if let u = monitor.update, u.available == true {
+            UpdateNotice(symbol: "arrow.down.circle.fill",
+                         text: (u.latestVersion.map { "PyNIDS \($0) is available" } ?? "A new version of PyNIDS is available")
+                             + (u.behind.map { " · \($0) change\($0 == 1 ? "" : "s")" } ?? ""),
+                         detail: u.blocked) {
+                if u.blocked == nil {
+                    Button("Update") { monitor.installUpdate() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                }
+                Button("What's new") { monitor.openDashboard("#update") }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+            }
+        }
+        if let message = monitor.updateMessage {
+            Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+        }
+    }
+
     private var powerMenu: some View {
         Menu {
             if monitor.summary != nil {
@@ -330,7 +460,7 @@ struct MenuContent: View {
     }
 
     private var subtitle: String {
-        guard let s = monitor.summary else { return "Daemon offline" }
+        guard let s = monitor.summary else { return monitor.updating ? "Restarting…" : "Daemon offline" }
         if monitor.paused { return "Stopped · not detecting" }
         let ifaces = (s.status.interfaces ?? []).joined(separator: " + ")
         return "\(monitor.level.title) · \(ifaces.isEmpty ? "—" : ifaces) · \(Format.bits(s.rates.bps))"
@@ -444,7 +574,9 @@ struct MenuContent: View {
 
     @ViewBuilder
     private var offline: some View {
-        if monitor.daemonInstalled {
+        if monitor.updating {
+            Text("PyNIDS is restarting into the new version…").font(.callout).foregroundStyle(.secondary)
+        } else if monitor.daemonInstalled {
             VStack(alignment: .leading, spacing: 8) {
                 Text("PyNIDS is shut down.").font(.callout)
                 Button {
@@ -497,6 +629,8 @@ struct MenuContent: View {
                 .help(on ? "Pause notifications" : "Resume notifications")
             }
             Menu {
+                Button("Check for Updates") { monitor.checkForUpdates() }
+                    .disabled(monitor.summary == nil || monitor.updating)
                 Button("Refresh widget") { WidgetCenter.shared.reloadAllTimelines() }
                 Divider()
                 Toggle("Launch at login", isOn: Binding(
@@ -605,6 +739,41 @@ struct AttentionRow: View {
         .background(hover.on ? Color.primary.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
         .onHover { hover.on = $0 }
+    }
+}
+
+/// The "update available" / "updating…" strip under the header.
+struct UpdateNotice<Actions: View>: View {
+    let symbol: String?
+    let text: String
+    var detail: String? = nil
+    @ViewBuilder var actions: () -> Actions
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                if let symbol {
+                    Image(systemName: symbol).foregroundStyle(Palette.series)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+                Text(text).font(.callout).lineLimit(2)
+                Spacer(minLength: 0)
+                actions()
+            }
+            if let detail {
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(4)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.series.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+extension UpdateNotice where Actions == EmptyView {
+    init(symbol: String?, text: String) {
+        self.init(symbol: symbol, text: text, detail: nil) { EmptyView() }
     }
 }
 

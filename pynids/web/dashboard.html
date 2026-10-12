@@ -124,6 +124,16 @@ button, input, select { font: inherit; color: inherit; }
 .icon-btn:hover { background: var(--surface-2); }
 .icon-btn svg { width: 16px; height: 16px; }
 .icon-btn[aria-pressed="false"] { color: var(--muted); }
+.update-btn {
+  color: var(--accent); font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.update-btn:hover { background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }
+.update-btn[hidden] { display: none; }
+.update-btn.failed { color: var(--critical); background: var(--surface); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
+.changes { margin: 6px 0 0; padding-left: 18px; color: var(--ink-2); line-height: 1.5; font-size: 13px; }
+.changes code { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 
 /* ---------- layout ---------- */
 main { max-width: 1440px; margin: 0 auto; padding: 20px 24px 64px; }
@@ -412,6 +422,7 @@ a.ext::after { content: " ↗"; }
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 2l2.2 6.3L20.5 10l-6.3 2.2L12 18.5l-2.2-6.3L3.5 10l6.3-1.7z" fill="currentColor"/></symbol>
     <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5.7 5.7l12.6 12.6" stroke="currentColor" stroke-width="2"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
   </defs>
 </svg>
@@ -433,6 +444,7 @@ a.ext::after { content: " ↗"; }
       <option value="apps">Apps</option><option value="network">Network</option><option value="protection">Protection</option>
     </select>
     <div class="spacer"></div>
+    <button class="icon-btn update-btn" id="updateBtn" hidden title="A new version of PyNIDS is available"><svg><use href="#i-download"/></svg><span id="updateBtnText">Update</span></button>
     <span class="live-rate" id="liveRate">— pkt/s · —</span>
     <button class="icon-btn" id="notifyBtn" aria-pressed="true" title="Notifications"><svg><use href="#i-bell"/></svg></button>
     <button class="icon-btn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme"><svg><use href="#i-sun"/></svg></button>
@@ -614,7 +626,7 @@ a.ext::after { content: " ↗"; }
   </section>
 
   <footer>
-    PyNIDS <span id="ver"></span> · data stays on this Mac unless you look up an IP or ask Claude · IP geolocation by <a href="https://db-ip.com" rel="noreferrer">DB-IP</a>
+    PyNIDS <span id="ver"></span> · <button class="link" id="checkUpdateBtn">Check for updates</button> · data stays on this Mac unless you look up an IP or ask Claude · IP geolocation by <a href="https://db-ip.com" rel="noreferrer">DB-IP</a>
   </footer>
 </main>
 
@@ -775,6 +787,7 @@ function renderStatus(s) {
   txt.textContent = label + (st.uptime != null ? " · up " + fmtDuration(st.uptime) : "");
   $("ver").textContent = st.version ? "v" + st.version : "";
   $("notifyBtn").setAttribute("aria-pressed", String(!!st.notifications));
+  renderUpdate(st.update, st.version);
 
   const banner = $("banner");
   banner.replaceChildren();
@@ -1725,6 +1738,96 @@ $("intelBtn").addEventListener("click", async () => {
   b.disabled = false;
 });
 
+// ---------------------------------------------------------------- updates (from GitHub)
+const UPDATE_BUSY = ["updating", "restarting"];
+function renderUpdate(u, version) {
+  const btn = $("updateBtn");
+  if (!u || !u.supported) { btn.hidden = true; return; }
+  const busy = UPDATE_BUSY.includes(u.state);
+  btn.hidden = !(u.available || busy || u.state === "error" || u.state === "restart-needed");
+  btn.classList.toggle("failed", u.state === "error");
+  $("updateBtnText").textContent = busy ? "Updating…" : u.state === "error" ? "Update failed"
+    : u.state === "restart-needed" ? "Restart to finish"
+    : "Update" + (u.latest_version && u.latest_version !== version ? " to " + u.latest_version : "");
+  // Repaint an open update drawer only when something it shows changed.
+  const cur = updateView.info || {};
+  if (isOpen() && drawerStack[drawerStack.length - 1] === updateView.view
+      && ["state", "step", "error", "available", "blocked"].some((k) => (cur[k] ?? null) !== (u[k] ?? null))) {
+    updateView.info = { ...cur, ...u }; paintDrawer();
+  }
+}
+const updateView = { info: null, view: null };
+function updateBody() {
+  const u = updateView.info || {};
+  const busy = UPDATE_BUSY.includes(u.state);
+  const out = [];
+  if (u.error) out.push(el("div", { class: "guide" }, el("b", { text: u.error })));
+  if (busy || u.state === "restart-needed") {
+    out.push(el("div", { style: "display:flex;gap:8px;align-items:center;color:var(--ink-2);margin-bottom:12px" },
+      busy ? el("span", { class: "spinner" }) : null, u.step || "Updating…"));
+    if (busy) out.push(el("p", { class: "muted", text: "PyNIDS restarts by itself when it's done, and this page reloads. Monitoring pauses for a few seconds." }));
+  } else if (u.available) {
+    out.push(el("div", { class: "guide" },
+      el("div", { class: "summary", text: (u.latest_version && u.latest_version !== u.current_version ? "PyNIDS " + u.latest_version : "A new version of PyNIDS") + " is available." }),
+      el("p", { text: `${u.behind} new change${u.behind > 1 ? "s" : ""} on GitHub. Updating downloads them, installs any new dependencies, and restarts PyNIDS. The menu bar app rebuilds itself if it changed.` })));
+    if (u.blocked) out.push(el("div", { class: "guide" }, el("b", { text: "Can't update automatically. " }), u.blocked));
+  } else {
+    out.push(el("p", { text: "You're running the latest version." }));
+  }
+  out.push(kvList([
+    ["Installed", (u.current_version || "") + (u.current_commit ? " (" + u.current_commit + ")" : "")],
+    ["Latest", u.latest_commit ? (u.latest_version || "") + " (" + u.latest_commit + ")" : null],
+    ["Source", u.remote ? u.remote + (u.branch ? " · " + u.branch : "") : null],
+    ["Last checked", u.checked_at ? fmtAgo(u.checked_at) : "never"],
+  ]));
+  if ((u.commits || []).length && !busy) {
+    out.push(el("h4", { text: "What's new" }), el("ul", { class: "changes" },
+      u.commits.map((c) => el("li", {}, el("code", { text: c.sha }), " ", c.subject, el("span", { class: "muted", text: " · " + fmtAgo(c.time) })))));
+  }
+  const installBtn = el("button", { class: "btn primary", disabled: busy || !u.available || !!u.blocked, onclick: startUpdate }, icon("i-download"), "Update now");
+  const checkBtn = el("button", { class: "btn", disabled: busy, onclick: async () => {
+    checkBtn.disabled = true; checkBtn.textContent = "Checking…";
+    try { updateView.info = await api("/api/update/check", { method: "POST" }); } catch (e) { toast(e.message); }
+    paintDrawer();
+  } }, icon("i-refresh"), "Check again");
+  out.push(el("div", { class: "actions" }, u.available ? installBtn : null, checkBtn));
+  return out;
+}
+async function openUpdate(check) {
+  updateView.view = { title: "Software update", head: [], body: updateBody };
+  showDrawer(loadingView("Software update"));
+  try { updateView.info = await api(check ? "/api/update/check" : "/api/update", check ? { method: "POST" } : {}); }
+  catch (e) { closeDrawer(); toast(e.message); return; }
+  drawerStack[drawerStack.length - 1] = updateView.view;
+  paintDrawer();
+}
+async function startUpdate() {
+  try { updateView.info = await api("/api/update", { method: "POST" }); }
+  catch (e) { toast(e.message); return; }
+  paintDrawer();
+  watchUpdate();
+}
+function watchUpdate() {
+  let wentAway = false;
+  const timer = setInterval(async () => {
+    try {
+      const u = await api("/api/update");
+      if (wentAway) {
+        clearInterval(timer);
+        toast("PyNIDS updated to " + u.current_version + " — reloading");
+        setTimeout(() => location.reload(), 1200);
+        return;
+      }
+      updateView.info = u;
+      if (isOpen() && drawerStack[drawerStack.length - 1] === updateView.view) paintDrawer();
+      renderUpdate(u, u.current_version);
+      if (!UPDATE_BUSY.includes(u.state)) clearInterval(timer);
+    } catch (_) { wentAway = true; }  // the daemon is restarting into the new version
+  }, 1500);
+}
+$("updateBtn").addEventListener("click", () => openUpdate(false));
+$("checkUpdateBtn").addEventListener("click", () => openUpdate(true));
+
 // ---------------------------------------------------------------- refresh loop + live stream
 function renderAllCharts() { if (state.tab === "overview") { renderRate(); renderTimeline(); renderKinds(); } if (state.tab === "network") renderMap(); }
 async function refreshSummary() {
@@ -1764,14 +1867,17 @@ function connectStream() {
   es.addEventListener("block", loadBlocks);
   es.addEventListener("unblock", loadBlocks);
   es.addEventListener("intel", () => loadIntel().catch(() => {}));
+  es.addEventListener("update", (e) => { try { renderUpdate(JSON.parse(e.data), state.summary && state.summary.status && state.summary.status.version); } catch (_) {} });
   es.addEventListener("allowlist", () => { if (state.tab === "protection") loadAllowlist(); });
 }
 let resizeTimer;
 addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderAllCharts, 120); });
 
 (async function boot() {
+  const wantUpdate = location.hash === "#update";  // "What's new" in the menu bar app
   await refreshSummary();
   go(location.hash.slice(1) || "overview", { noscroll: true });
+  if (wantUpdate) openUpdate(false);
   await Promise.all([refreshSlow(), loadAlerts(), loadBlocks()]);
   loadWorld();
   connectStream();

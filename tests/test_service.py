@@ -258,6 +258,42 @@ class TestApi:
     def test_blocks_unavailable_without_blocker(self, api):
         assert call(api.port, "/api/blocks")[0] == 501
 
+    def test_update_routes(self, tmp_path):
+        from pynids.service.updater import UpdateError
+
+        class FakeUpdater:
+            applied = 0
+
+            def status(self):
+                return {"supported": True, "state": "idle", "available": True}
+
+            def check(self):
+                return {**self.status(), "checked_at": 1}
+
+            def apply(self):
+                self.applied += 1
+                if self.applied > 1:
+                    raise UpdateError("already running")
+                return {**self.status(), "state": "updating"}
+
+        upd = FakeUpdater()
+        ctx = ServiceContext(live=LiveState(), token="t0ken", updater=upd)
+        server = make_server(ctx, "127.0.0.1", 0)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            assert call(port, "/api/update", token=None)[0] == 401
+            assert call(port, "/api/update")[1]["available"] is True
+            assert call(port, "/api/update/check", method="POST", body={})[1]["checked_at"] == 1
+            assert call(port, "/api/update", method="POST", body={},
+                        headers={"Origin": "https://attacker.test"})[0] == 403
+            code, r = call(port, "/api/update", method="POST", body={})
+            assert code == 202 and r["state"] == "updating"
+            assert call(port, "/api/update", method="POST", body={})[0] == 409
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 # ---------------------------------------------------------------------------
 # Claude explanations

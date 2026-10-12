@@ -11,6 +11,7 @@
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>__VERSION__</string>
 	<key>CFBundleVersion</key><string>__BUILD__</string>
+	<key>PyNIDSSourceTree</key><string>__SOURCE_TREE__</string>
 	<key>LSMinimumSystemVersion</key><string>14.0</string>
 	<key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array>
 	<key>DTPlatformName</key><string>macosx</string>

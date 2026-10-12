@@ -14,6 +14,7 @@ allow     list / add / remove "expected" alert rules
 keylog    launch a browser that logs TLS keys (for decryption)
 decrypt   decrypt recorded traffic with tshark + a TLS key log
 app       build and install the menu bar app + widget
+update    check GitHub for a new version and install it
 """
 from __future__ import annotations
 
@@ -290,6 +291,62 @@ def intel_status() -> None:
         fetched = datetime.fromtimestamp(row["fetched"]).strftime("%Y-%m-%d %H:%M") if row["fetched"] else "never"
         t.add_row(row["name"], row["description"], f"{row['entries']:,}", fetched)
     console.print(t)
+
+
+# ---------------------------------------------------------------------------
+# update
+# ---------------------------------------------------------------------------
+
+@main.command("update")
+@click.option("--check", "check_only", is_flag=True, help="Only check; don't install.")
+@click.option("--yes", "-y", is_flag=True, help="Install without asking.")
+def update_cmd(check_only: bool, yes: bool) -> None:
+    """Check GitHub for a new version and install it (through the running daemon)."""
+    from .service.client import DaemonUnavailable
+
+    client = _client()
+    try:
+        info = client.post("/api/update/check", timeout=120)
+    except (DaemonUnavailable, RuntimeError) as exc:
+        _fail(str(exc))
+    if info.get("error"):
+        _fail(info["error"])
+    if not info.get("available"):
+        console.print(f"[green]PyNIDS is up to date[/green] ({info.get('current_version')}, {info.get('current_commit')}).")
+        return
+    latest = info.get("latest_version") or info.get("latest_commit")
+    console.print(f"[bold]Update available:[/bold] {info.get('current_version')} → {latest} "
+                  f"({info['behind']} new change{'s' if info['behind'] > 1 else ''})")
+    for c in info.get("commits") or []:
+        console.print(f"  [dim]{c['sha']}[/dim] {c['subject']}")
+    if info.get("blocked"):
+        _fail(info["blocked"])
+    if check_only or not (yes or click.confirm("Install it now?", default=True)):
+        return
+    try:
+        client.post("/api/update")
+    except (DaemonUnavailable, RuntimeError) as exc:
+        _fail(str(exc))
+    step = None
+    with console.status("Updating…") as spinner:
+        for _ in range(900):
+            time.sleep(1)
+            try:
+                info = client.get("/api/update", timeout=3)
+            except (DaemonUnavailable, RuntimeError):
+                continue  # restarting
+            if info.get("step") and info["step"] != step:
+                step = info["step"]
+                spinner.update(step)
+            if info.get("state") == "error":
+                _fail(info.get("error") or "Update failed")
+            if info.get("state") in ("idle", "restart-needed") and not info.get("available"):
+                break
+    console.print(f"[green]Updated to {info.get('current_version')}[/green] ({info.get('current_commit')}).")
+    if info.get("state") == "restart-needed":
+        console.print("Restart the daemon to finish: sudo .venv/bin/pynids daemon restart")
+    if (info.get("last_update") or {}).get("app_changed"):
+        console.print("The menu bar app rebuilds itself on its next refresh (or run: pynids app).")
 
 
 # ---------------------------------------------------------------------------
