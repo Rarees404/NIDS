@@ -2,7 +2,7 @@
 
 # 🛡️ PyNIDS
 
-### Network intrusion detection and privacy X-Ray for your Mac
+### Network intrusion detection, privacy X-Ray, and a SOC analyst toolkit for your Mac
 
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#-license)
@@ -22,12 +22,18 @@ usually harmless, and what to do. It runs as an always-on background service, wi
 widget**, **native notifications**, one-click **blocking**, and optional
 **"Explain with Claude"** for a deeper look at any alert.
 
+For analysts, it adds an **investigation workbench** and a **forensic email analyser**.
+Look up any IP, domain, URL or hash across a dozen threat-intel sources and pivot through
+the results. Take a phishing email apart safely, where every finding points to the exact
+raw lines it is based on. A **Thunderbird add-on** sends messages in one click.
+
 </div>
 
 ---
 
 ## Contents
 
+0. [Quick start](#-quick-start)
 1. [What you get](#-what-you-get)
 2. [Requirements](#-requirements)
 3. [Installation (step by step)](#-installation-step-by-step)
@@ -43,6 +49,24 @@ widget**, **native notifications**, one-click **blocking**, and optional
 13. [Troubleshooting](#-troubleshooting)
 14. [Uninstall](#-uninstall)
 15. [For developers](#-for-developers)
+
+---
+
+## ⚡ Quick start
+
+Already have Python 3.9+ and git? These five commands get you a running PyNIDS:
+
+```bash
+git clone https://github.com/Rarees404/NIDS.git ~/NIDS && cd ~/NIDS
+python3 -m venv .venv && source .venv/bin/activate
+pip install --upgrade pip && pip install -e ".[all]"
+sudo .venv/bin/pynids daemon install      # background service (asks for your password)
+pynids open                               # dashboard at http://127.0.0.1:8787
+```
+
+Then open the **Investigate** or **Email** tab in the dashboard's top bar. The full
+walkthrough, with what each step does and how to check it worked, is in
+[Installation](#-installation-step-by-step).
 
 ---
 
@@ -107,6 +131,19 @@ Every alert carries a short guide, written from that alert's own evidence (which
 
 It's generated locally and instantly, with no network calls. The dashboard, menu bar, widget, and notifications all show it.
 
+### SOC analyst toolkit
+
+| | |
+|---|---|
+| **Investigate** | One search box for IPs, domains, URLs, file hashes, email addresses, ASNs and CVEs (defanged input welcome). Up to 13 sources answer in parallel: VirusTotal, AbuseIPDB, AlienVault OTX, GreyNoise, urlscan.io, URLhaus, ThreatFox, MalwareBazaar, Shodan InternetDB, RDAP/WHOIS, DNS, Certificate Transparency, and what *this Mac* saw. Each source shows a verdict, a summary, pivots, and its untouched raw response |
+| **Bulk extraction** | Paste a whole alert, ticket or threat report. Every indicator is extracted, de-duplicated, and ready to copy defanged, export as CSV, or investigate |
+| **Pivoting** | Click any value in any result (resolved IP, name server, payload hash, certificate name) to investigate it. Your pivot trail stays visible |
+| **Email forensics** | Drop an `.eml`, paste raw source, or send from Thunderbird. The original is stored unchanged and identified by its SHA-256. A lossless MIME parser decodes every part and records the raw lines behind each header, part and finding |
+| **Phishing checks** | SPF/DKIM/DMARC and alignment, a display name hiding another address, Reply-To mismatches, look-alike and punycode domains, link text that lies about the target (SafeLinks/Proofpoint unwrapped), hidden HTML, forms, tracking pixels, invisible characters |
+| **Attachment triage** | Real file type vs. extension, double extensions, right-to-left-override names, macros, encrypted archives (with contents), PDF active content, RTF exploits, HTML smuggling, plus hashes, hex and strings. Nothing is ever executed |
+| **Raw viewer** | The exact message source with colour-coded header groups, MIME boundaries, hidden zones, folded base64, clickable indicators, and invisible characters made visible |
+| **Integrations** | Thunderbird add-on ("Analyze in PyNIDS"), VS Code `.eml` highlighting, and `pynids investigate` / `pynids mail analyze` in the terminal |
+
 ### Response
 
 * **Blocking** through macOS's built-in `pf` firewall, from the dashboard, menu bar, or CLI. Optionally automatic for confirmed threats, with guard rails and expiry.
@@ -130,17 +167,37 @@ It's generated locally and instantly, with no network calls. The dashboard, menu
 
 ## 🚀 Installation (step by step)
 
+Open **Terminal** (Applications → Utilities → Terminal) and follow the steps in order.
+Lines starting with `#` are comments; you don't type them.
+
+### 0. Check the prerequisites
+
+```bash
+python3 --version        # needs 3.9 or newer
+git --version            # if macOS offers to install the developer tools, accept
+xcode-select -p          # prints a path if the Command Line Tools are installed
+```
+
+If `xcode-select -p` prints an error, run `xcode-select --install` and wait for the
+installer to finish. It provides `git`, and the compiler for the menu bar app.
+
 ### 1. Get the code and install it
 
 ```bash
-git clone https://github.com/Rarees404/NIDS.git ~/NIDS
-cd ~/NIDS
+git clone https://github.com/Rarees404/NIDS.git ~/NIDS   # download the project
+cd ~/NIDS                                                # go into it
 
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip     # macOS ships an old pip that can't install this project
-pip install -e ".[all]"       # core + GeoIP + Claude support
+python3 -m venv .venv          # create a private Python environment in ~/NIDS/.venv
+source .venv/bin/activate      # use it in this Terminal window (your prompt shows "(.venv)")
+pip install --upgrade pip      # macOS ships an old pip that can't install this project
+pip install -e ".[all]"        # PyNIDS + GeoIP + Claude support
 ```
+
+Check it worked: `pynids --help` lists the commands.
+
+> **Every new Terminal window** needs `cd ~/NIDS && source .venv/bin/activate` before
+> plain `pynids …` commands work. With `sudo`, always use the full path
+> `sudo .venv/bin/pynids …` instead.
 
 ### 2. Start the background service
 
@@ -200,9 +257,62 @@ outside the project folder, so it is never committed to git.
 ### 7. Check everything is working
 
 ```bash
-pynids status          # State should read "running on en0 + lo0"
-pynids daemon logs -n 30
+pynids status                               # State should read "running on en0 + lo0"
+curl -s http://127.0.0.1:8787/api/health    # {"ok": true, "version": "…"}
+pynids daemon logs -n 30                    # the last lines of the service log
 ```
+
+### 8. Set up the SOC tools (optional)
+
+The **Investigate** and **Email** tabs work straight away. These extras make them stronger.
+
+**Free API keys for more intel sources.** In the dashboard open **Investigate → Sources & API keys**,
+paste a key, and press **Save**. Keys are stored only on this Mac.
+
+| Source | Where to get a free key | Free limit |
+|---|---|---|
+| VirusTotal | [virustotal.com](https://www.virustotal.com) → sign up → your profile → **API key** | 4 lookups/min, 500/day |
+| AbuseIPDB | [abuseipdb.com/register](https://www.abuseipdb.com/register) → Account → **API** | 1,000 checks/day |
+| AlienVault OTX | [otx.alienvault.com](https://otx.alienvault.com) → Settings → **OTX Key** | generous |
+| abuse.ch (URLhaus, ThreatFox, MalwareBazaar) | [auth.abuse.ch](https://auth.abuse.ch/) → one **Auth-Key** for all three | generous |
+| GreyNoise *(works without a key)* | [viz.greynoise.io/signup](https://viz.greynoise.io/signup) | higher limit with a key |
+| urlscan.io *(works without a key)* | [urlscan.io/user/signup](https://urlscan.io/user/signup) | higher limit with a key |
+
+**Thunderbird add-on.**
+
+```bash
+pynids mail thunderbird     # writes ~/Downloads/pynids-thunderbird.xpi
+pynids mail token           # prints the token the add-on needs (copy it)
+```
+
+1. In Thunderbird: **☰ → Add-ons and Themes → ⚙ (gear) → Install Add-on From File…** and pick
+   `~/Downloads/pynids-thunderbird.xpi`. Accept the permissions.
+2. On the add-on's card choose **Options** (or **Preferences**), paste the token, leave the port
+   at `8787`, press **Save**, then **Test connection**. It should say *Connected ✓*.
+3. Open any message and click **Analyze in PyNIDS** in the message header toolbar, or
+   right-click one or more messages in the list. The analysis opens in your browser.
+
+**VS Code highlighting for raw emails.**
+
+```bash
+pynids mail vscode          # installs into ~/.vscode/extensions
+```
+
+Restart VS Code and open any `.eml` file. Headers are coloured by group (routing,
+authentication, identity, MIME), with boundaries, encoded words, base64 blocks, links, IPs,
+addresses and invisible characters highlighted. Boundaries are foldable.
+
+### Running without the background service
+
+The daemon is only needed for live monitoring. The analyst tools also work without it:
+
+```bash
+pynids mail analyze suspicious.eml --local      # full phishing analysis in the terminal
+sudo .venv/bin/pynids xray --iface en0          # live X-Ray view, stops when you press Ctrl-C
+pynids pcap --file capture.pcap                 # analyse a capture file
+```
+
+`pynids investigate` and the dashboard tabs do need the daemon running.
 
 ---
 
@@ -218,8 +328,50 @@ pynids daemon logs -n 30
 | **Apps** | Each app's upload and download, endpoints, alerts, hosts and countries. Click an app for its hosts, countries, remote IPs and learned "usual countries" |
 | **Network** | World map of every remote endpoint (click a dot for its IP dossier) and the devices on your LAN, with optional nmap scans |
 | **Protection** | Blocked IPs, rules you marked as expected, launch items, and threat-intel feed status |
+| **Investigate** | The analyst workbench: look up and pivot on any indicator (see below) |
+| **Email** | Forensic analysis of suspicious emails (see below) |
 
-Every IP address anywhere in the dashboard is clickable and opens its dossier.
+Every IP address anywhere in the dashboard is clickable and opens its dossier. The IP
+dossier and every alert also have an **Investigate** button that opens the indicator in
+the workbench.
+
+### Investigating an indicator: a walkthrough
+
+1. Open **Investigate**, or run `pynids investigate 185.220.101.4 --web`.
+2. Type or paste the indicator and press **Enter**. Defanged input like `hxxps://evil[.]com/x`
+   or `1.2.3[.]4` is fine. Paste a whole report to get a list of every indicator in it instead.
+3. Cards appear as each source answers. The coloured bar on top of a card is that source's
+   verdict. The banner at the top combines them, e.g. *Malicious* if any source says so.
+4. Open **Raw response** on any card to see exactly what the source returned. The summary
+   is always checkable against it.
+5. Click any value under **Pivot** to investigate it next. Use the pivot trail at the top to go back.
+6. **Copy report** puts a defanged Markdown summary on your clipboard for a ticket.
+   **Block** (for public IPs) adds a firewall block. **Open in…** links to 30+ other tools.
+
+Lookups are cached (most for 6 hours). The refresh icon on a card skips the cache.
+
+### Analysing a phishing email: a walkthrough
+
+1. **Get the original message**, not the text you see on screen:
+   * **Thunderbird:** the **Analyze in PyNIDS** button (see [step 8](#8-set-up-the-soc-tools-optional)), or *More → Save As* an `.eml`
+   * **Apple Mail:** *File → Save As…* → Format: **Raw Message Source**
+   * **Outlook (Mac):** drag the message to the Desktop (creates an `.eml`)
+   * **Gmail:** ⋮ → **Download message** (or **Show original** → copy)
+2. Drop the file on the **Email** tab, paste the source, or run `pynids mail analyze file.eml --web`.
+3. **Overview** lists the findings, most severe first. Every finding has a **lines N–M** button.
+   Click it to see the proof highlighted in the raw source. Below that are the sender details,
+   SPF/DKIM/DMARC, and the delivery path (Received hops, oldest first).
+4. **Raw source** is the message exactly as received. The left side jumps to any header or MIME
+   part. Search with the box. Click any URL, IP or address to investigate it.
+5. **Links** shows every URL found anywhere in the message, with its flags and the text it was
+   shown as. **Attachments** shows the real type, risks, hashes, hex and strings.
+6. **Body → Render safely** shows the HTML in a sandbox with every remote request blocked, so
+   the sender can't tell it was opened.
+7. **Indicators → Investigate all** sends every IP, domain, URL and hash to the workbench.
+   **Copy report** gives a defanged summary.
+
+The original `.eml` stays downloadable, byte-for-byte, under **Original .eml**. Its SHA-256
+is shown at the top so you can prove the evidence wasn't altered.
 
 ### Menu bar
 
@@ -733,6 +885,14 @@ sudo .venv/bin/pynids query --db "/Library/Application Support/PyNIDS/events.db"
 | **Explain with Claude** errors | Invalid key → `sudo .venv/bin/pynids ai set-key`. Rate limit → wait a minute. Also check your credit balance |
 | Too many alerts of one kind | Add a suppression rule (see [Configuration](#-configuration)) or raise `notifications.min_severity` |
 | `git commit` says *"Author identity unknown"* | `git config --global user.name "…"` and `git config --global user.email "…"` |
+| `pynids: command not found` | Activate the venv in this window: `cd ~/NIDS && source .venv/bin/activate` |
+| An Investigate card says **Needs an API key** | Add a free key under **Investigate → Sources & API keys** (see [step 8](#8-set-up-the-soc-tools-optional)) |
+| A card says **Rate limited** | The free tier's per-minute limit was reached. The card retries by itself when the limit resets |
+| crt.sh card **failed (HTTP 502/503)** | crt.sh is often overloaded. Press the card's refresh icon a minute later |
+| Email shows **"No headers found"** | You pasted the visible text, not the source. Save or export the raw message (see the walkthrough above) |
+| Thunderbird says **"PyNIDS isn't reachable"** | The daemon isn't running (`pynids status`), or the port in the add-on options isn't `8787` |
+| Thunderbird says **token is wrong** / HTTP 401 | Copy a fresh token with `pynids mail token` into the add-on options. Reinstalling the daemon creates a new one |
+| Dashboard doesn't show the new tabs after updating | `sudo .venv/bin/pynids daemon restart`, then reload the page |
 
 ---
 
@@ -741,8 +901,11 @@ sudo .venv/bin/pynids query --db "/Library/Application Support/PyNIDS/events.db"
 ```bash
 sudo .venv/bin/pynids daemon uninstall                 # stops the service, lifts all blocks
 rm -rf ~/Applications/PyNIDS.app                        # menu bar app + widget
-sudo rm -rf "/Library/Application Support/PyNIDS" /Library/Logs/PyNIDS   # data, keys, logs
+sudo rm -rf "/Library/Application Support/PyNIDS" /Library/Logs/PyNIDS   # data, keys, analysed emails, logs
+rm -rf ~/.vscode/extensions/pynids.pynids-eml-1.0.0      # VS Code .eml highlighting
 ```
+
+Remove the Thunderbird add-on from **Add-ons and Themes → PyNIDS Email Analysis → Remove**.
 
 ---
 
@@ -752,9 +915,15 @@ sudo rm -rf "/Library/Application Support/PyNIDS" /Library/Logs/PyNIDS   # data,
 
 ```bash
 pip install -e ".[dev,all]"
-pytest                                    # 268 tests
+pytest                                    # 372 tests
+pytest tests/test_soc.py tests/test_mail.py   # just the SOC workbench and email analyser
 pytest --cov=pynids --cov-report=term-missing
 ```
+
+The email tests include a corpus of deliberately broken and malicious messages. A
+cross-check builds varied messages with Python's own `email` package and asserts that every
+part decodes to identical bytes. Investigate sources are tested against recorded responses, so
+the suite never needs network access or API keys.
 
 Tests use real protocol test vectors (for example the RFC 9001 QUIC keys) and cover every
 detector, the raw-frame decoder, the plain-English guides, pausing detection, the
