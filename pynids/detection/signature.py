@@ -58,7 +58,6 @@ import logging
 import re
 import time
 from collections import defaultdict, deque
-from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 import yaml
@@ -197,6 +196,13 @@ class SignatureDetector(BaseDetector):
     def name(self) -> str:
         return "signature"
 
+    def prune(self, now: float) -> None:
+        windows = {r.get("id", "unknown"): float((r.get("threshold") or {}).get("seconds", 60))
+                   for r in self._rules if isinstance(r.get("threshold"), dict)}
+        for key in [k for k, b in self._threshold_hits.items()
+                    if not b or now - b[-1] > windows.get(k[0], 60.0)]:
+            del self._threshold_hits[key]
+
     def update_rules(self, rules: List[Dict[str, Any]]) -> None:
         """Hot-reload rules without restarting the detector."""
         self._rules = rules
@@ -243,7 +249,7 @@ class SignatureDetector(BaseDetector):
             window = float(thresh.get("seconds", 60))
             key = (rule_id, src_ip)
             bucket = self._threshold_hits[key]
-            now = time.time()
+            now = meta.get("timestamp") or time.time()
             # Expire old entries
             while bucket and (now - bucket[0]) > window:
                 bucket.popleft()

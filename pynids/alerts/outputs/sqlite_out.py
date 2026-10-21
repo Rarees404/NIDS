@@ -74,6 +74,12 @@ CREATE TRIGGER IF NOT EXISTS alerts_ai AFTER INSERT ON alerts BEGIN
     INSERT INTO alerts_fts (rowid, alert_id, message, src_ip, dst_ip, tags)
     VALUES (new.rowid, new.alert_id, new.message, new.src_ip, new.dst_ip, new.tags);
 END;
+
+-- External-content FTS tables must be told about deletions (retention).
+CREATE TRIGGER IF NOT EXISTS alerts_ad AFTER DELETE ON alerts BEGIN
+    INSERT INTO alerts_fts (alerts_fts, rowid, alert_id, message, src_ip, dst_ip, tags)
+    VALUES ('delete', old.rowid, old.alert_id, old.message, old.src_ip, old.dst_ip, old.tags);
+END;
 """
 
 # Columns added after the first release — added in place to older databases.
@@ -185,6 +191,30 @@ class SQLiteOutput(BaseOutput):
         with self._lock:
             self._flush()
 
+    def prune(self, max_age_days: float) -> int:
+        """Delete alerts older than *max_age_days* (0 keeps everything).  Returns rows deleted."""
+        if not max_age_days or max_age_days <= 0:
+            return 0
+        cutoff = time.time() - max_age_days * 86400
+        with self._lock:
+            self._flush()
+            try:
+                cur = self._conn.execute("DELETE FROM alerts WHERE timestamp < ?", (cutoff,))
+                deleted = cur.rowcount
+                # Explanations (created by the API) belong to deleted alerts.
+                has_expl = self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='explanations'"
+                ).fetchone()
+                if has_expl:
+                    self._conn.execute("DELETE FROM explanations WHERE created < ?", (cutoff,))
+                self._conn.commit()
+            except sqlite3.Error as exc:
+                logger.error("SQLiteOutput prune error: %s", exc)
+                return 0
+        if deleted:
+            logger.info("Pruned %d alerts older than %g days", deleted, max_age_days)
+        return deleted
+
     def close(self) -> None:
         self.flush()
         try:
@@ -217,9 +247,10 @@ class SQLiteOutput(BaseOutput):
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
         sql = f"SELECT * FROM alerts {where} ORDER BY timestamp DESC LIMIT ?"
         params.append(limit)
-        cur = self._conn.execute(sql, params)
-        cols = [c[0] for c in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        with self._lock:
+            cur = self._conn.execute(sql, params)
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def _flush(self) -> None:
         self._last_flush = time.monotonic()

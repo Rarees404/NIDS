@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import threading
 import time
 from collections import defaultdict, deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
@@ -116,6 +117,12 @@ class AlertManager:
         # Correlation: {src_ip → deque[(timestamp, rule_id)]}
         self._corr_window: Dict[str, Deque[Tuple[float, str]]] = defaultdict(deque)
         self._corr_alerted: Dict[str, float] = {}  # src_ip → last correlation alert ts
+        self._last_prune: float = time.time()
+
+        # Alerts arrive from several threads (one capture thread per
+        # interface, the LAN inventory, the C2 correlator).  Re-entrant
+        # because an output may add an alert of its own while being emitted.
+        self._lock = threading.RLock()
 
         # Statistics
         self.total_seen: int = 0
@@ -142,6 +149,10 @@ class AlertManager:
         Returns True if the alert was emitted to outputs, False if it was
         suppressed or deduplicated.
         """
+        with self._lock:
+            return self._add(alert)
+
+    def _add(self, alert: Alert) -> bool:
         self.total_seen += 1
 
         # Severity gate
@@ -167,6 +178,8 @@ class AlertManager:
         # Deduplication
         key = alert.dedup_key
         now = time.time()
+        if now - self._last_prune >= 60.0:
+            self._prune(now)
         if key in self._dedup:
             last_ts, count = self._dedup[key]
             if (now - last_ts) < self.dedup_window:
@@ -207,6 +220,16 @@ class AlertManager:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _prune(self, now: float) -> None:
+        """Forget dedup / correlation state that has aged out (bounds memory)."""
+        self._last_prune = now
+        self._dedup = {k: v for k, v in self._dedup.items() if now - v[0] < self.dedup_window}
+        for src in [s for s, w in self._corr_window.items()
+                    if not w or now - w[-1][0] > self.correlation_window]:
+            del self._corr_window[src]
+        self._corr_alerted = {s: t for s, t in self._corr_alerted.items()
+                              if now - t < self.correlation_window}
 
     def _emit(self, alert: Alert) -> None:
         self.total_emitted += 1

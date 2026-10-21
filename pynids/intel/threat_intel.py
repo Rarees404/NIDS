@@ -177,6 +177,7 @@ class ThreatIntel:
         except ValueError as exc:
             logger.warning("ThreatIntel: invalid CIDR %r — %s", cidr, exc)
             return False
+        severity = _normalise_severity(severity)
         bucket = self._ip_index[network.version].setdefault(network.prefixlen, {})
         self._ip_cache.clear()
         key = int(network.network_address)
@@ -196,7 +197,7 @@ class ThreatIntel:
         if not domain:
             return
         entry = ThreatEntry(
-            category=category, severity=severity,
+            category=category, severity=_normalise_severity(severity),
             description=description, indicator=domain,
         )
         if domain.startswith("."):
@@ -243,3 +244,15 @@ class ThreatIntel:
                 )
         except Exception as exc:
             logger.error("ThreatIntel: failed to load %s — %s", path, exc)
+
+
+_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+
+def _normalise_severity(value: object) -> str:
+    """``"high"`` → ``"HIGH"``; anything unrecognised becomes ``"MEDIUM"``."""
+    sev = str(value or "").strip().upper()
+    if sev not in _SEVERITIES:
+        logger.warning("ThreatIntel: unknown severity %r, using MEDIUM", value)
+        return "MEDIUM"
+    return sev

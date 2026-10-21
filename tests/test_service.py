@@ -392,3 +392,13 @@ def test_process_resolver_refreshes_on_unknown_ports_and_idles_otherwise():
         assert len(calls) <= n + 1
     finally:
         res.stop()
+
+
+def test_api_rejects_malformed_numbers_with_400(api):
+    assert call(api.port, "/api/alerts?limit=abc")[0] == 400
+    assert call(api.port, "/api/alerts?since=yesterday")[0] == 400
+    assert call(api.port, "/api/apps?limit=x")[0] == 400
+    assert call(api.port, "/api/apps?limit=99999999")[0] == 200
+    # A JSON body that isn't an object is treated as empty, not a crash.
+    code, _ = call(api.port, "/api/allowlist", method="POST", body=[1, 2])
+    assert code in (400, 501)

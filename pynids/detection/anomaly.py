@@ -30,7 +30,7 @@ import logging
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Deque, Dict, Iterable, Optional, Set, Tuple
 
 from .base import BaseDetector
 from ..alerts.model import Alert, AlertType, Severity
@@ -120,6 +120,14 @@ class AnomalyDetector(BaseDetector):
     @property
     def name(self) -> str:
         return "anomaly_volumetric"
+
+    def prune(self, now: float) -> None:
+        # The rate history covers 60 windows; a source silent for longer
+        # starts from scratch anyway.
+        horizon = now - 60 * self.window_seconds
+        for src in [s for s, st in self._per_source.items()
+                    if not st.counts_window or st.counts_window[-1][0] < horizon]:
+            del self._per_source[src]
 
     def analyze(
         self,
@@ -234,6 +242,17 @@ class PortScanDetector(BaseDetector):
     @property
     def name(self) -> str:
         return "port_scan"
+
+    def prune(self, now: float) -> None:
+        for src, st in list(self._state.items()):
+            for port in [p for p, t in st.horiz_first_seen.items() if now - t > self.horizontal_window]:
+                del st.horiz[port], st.horiz_first_seen[port]
+                st.horiz_alerted.discard(port)
+            for ip in [d for d, t in st.vert_first_seen.items() if now - t > self.vertical_window]:
+                del st.vert[ip], st.vert_first_seen[ip]
+                st.vert_alerted.discard(ip)
+            if not st.horiz and not st.vert:
+                del self._state[src]
 
     def analyze(
         self,
@@ -393,6 +412,11 @@ class BruteForceDetector(BaseDetector):
     @property
     def name(self) -> str:
         return "brute_force"
+
+    def prune(self, now: float) -> None:
+        for key in [k for k, b in self._attempts.items() if not b or now - b[-1] > self.window]:
+            del self._attempts[key]
+            self._alerted.discard(key)
 
     def analyze(
         self,

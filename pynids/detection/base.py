@@ -47,3 +47,12 @@ class BaseDetector(ABC):
         This method **must not raise**; unexpected exceptions should be
         caught internally and logged, not propagated to the engine.
         """
+
+    def prune(self, now: float) -> None:
+        """
+        Drop per-source state that is too old to matter any more.
+
+        Called by the engine about once a minute (of packet time) so the
+        state of a daemon that runs for weeks stays bounded.  *now* is the
+        timestamp of the packet being processed.
+        """

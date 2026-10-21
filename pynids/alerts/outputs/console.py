@@ -11,11 +11,9 @@ Severity levels map to distinct terminal colours for fast visual triage:
 """
 from __future__ import annotations
 
-import time
 from datetime import datetime
 
 from rich.console import Console
-from rich.table import Table
 from rich.text import Text
 
 from ..manager import BaseOutput

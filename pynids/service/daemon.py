@@ -73,6 +73,7 @@ DAEMON_DEFAULTS: Dict[str, Any] = {
         "record_pcap": False,
         "record_max_mb": 50,
         "record_files": 10,
+        "retention_days": 30,   # delete stored alerts older than this (0 = keep forever)
     },
     "notifications": {
         "enabled": True,
@@ -210,6 +211,8 @@ class Daemon:
         # (detection paused from the menu bar app or dashboard).
         self.capture_stop = threading.Event()
         self._capture_lock = threading.Lock()
+        self._feeds_lock = threading.Lock()
+        self._feeds_attempt = 0.0  # monotonic time of the last feed refresh attempt
         self.paused = paused_flag_path().exists()
 
         dcfg = self.cfg["daemon"]
@@ -404,10 +407,14 @@ class Daemon:
         return extra
 
     def refresh_feeds(self) -> List[Dict[str, Any]]:
-        results = feeds_mod.update_feeds(intel_dir())
-        intel = _build_intel(self.cfg)
-        doh_hosts, doh_ips = feeds_mod.load_doh(intel_dir())
-        self.engine.reload_intel(intel, feeds_mod.load_trackers(intel_dir()), doh_hosts, doh_ips)
+        # One refresh at a time: the API button, the startup fetch, and the
+        # periodic refresh would otherwise download and rebuild in parallel.
+        with self._feeds_lock:
+            self._feeds_attempt = time.monotonic()
+            results = feeds_mod.update_feeds(intel_dir())
+            intel = _build_intel(self.cfg)
+            doh_hosts, doh_ips = feeds_mod.load_doh(intel_dir())
+            self.engine.reload_intel(intel, feeds_mod.load_trackers(intel_dir()), doh_hosts, doh_ips)
         self.live.broadcast("intel", {"updated": time.time()})
         return [r.__dict__ for r in results]
 
@@ -460,12 +467,25 @@ class Daemon:
                 if current and current != self.interfaces[0]:
                     logger.warning("Default interface changed %s → %s; restarting capture",
                                    self.interfaces[0], current)
-                    self._restart_requested = True
-                    self.capture_stop.set()
-                    self.stop_event.set()
+                    if _under_launchd():
+                        # launchd restarts us into a clean process (exit 75).
+                        self._restart_requested = True
+                        self.capture_stop.set()
+                        self.stop_event.set()
+                    else:
+                        # Started by hand: nothing would bring us back, so
+                        # move the capture over in place.
+                        self._restart_capture()
             if refresh_s > 0 and tick % 300 == 0 and not self.paused:
-                if feeds_mod.oldest_fetch_age(intel_dir()) > refresh_s:
+                # A feed that keeps failing leaves the cache "stale" forever;
+                # don't re-download every feed every 10 minutes because of it.
+                retry_s = min(refresh_s, 3600.0)
+                if (feeds_mod.oldest_fetch_age(intel_dir()) > refresh_s
+                        and time.monotonic() - self._feeds_attempt > retry_s
+                        and not self._feeds_lock.locked()):
                     threading.Thread(target=self.refresh_feeds, daemon=True).start()
+            if tick % 1800 == 0:  # hourly
+                self.store.prune(float(self.cfg["daemon"].get("retention_days") or 0))
 
     def _start_capture(self) -> None:
         dcfg = self.cfg["daemon"]
@@ -483,6 +503,14 @@ class Daemon:
             threading.Thread(target=self._capture, args=(lo, False, stop),
                              name=f"capture-{lo}", daemon=True).start()
         self.state = "running"
+
+    def _restart_capture(self) -> None:
+        """Stop the capture threads and start them on the current default interface."""
+        with self._capture_lock:
+            if self.paused or self.state != "running":
+                return
+            self.capture_stop.set()
+            self._start_capture()
 
     def set_detection(self, enabled: bool) -> Dict[str, Any]:
         """Pause or resume capture + detection.  The choice survives restarts."""

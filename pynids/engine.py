@@ -116,6 +116,9 @@ class DetectionEngine:
         if rules_path and Path(rules_path).exists():
             self._rules_mtime = Path(rules_path).stat().st_mtime
 
+        # Detector state pruning, driven by packet time (works for replay too)
+        self._last_prune: float = 0.0
+
         # Statistics
         self._packets_processed: int = 0
         self._start_time: float = time.time()
@@ -156,8 +159,10 @@ class DetectionEngine:
             flow = self._flow_tracker.update(meta)
 
             # 3. Threat intelligence checks
-            ti_alerts = self._run_threat_intel(meta, layer7)
-            alerts.extend(ti_alerts)
+            try:
+                alerts.extend(self._run_threat_intel(meta, layer7))
+            except Exception as exc:
+                logger.error("Threat-intel check raised: %s", exc)
 
             # 4. Run all detectors
             for detector in self._detectors:
@@ -166,6 +171,8 @@ class DetectionEngine:
                         alerts.append(alert)
                 except Exception as exc:
                     logger.error("Detector %s raised: %s", detector.name, exc)
+
+            self._maybe_prune(meta.get("timestamp") or time.time())
 
             if context:
                 for alert in alerts:
@@ -268,6 +275,20 @@ class DetectionEngine:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _maybe_prune(self, now: float) -> None:
+        """Let every detector drop stale state about once a minute."""
+        if self._last_prune == 0.0:
+            self._last_prune = now
+            return
+        if now - self._last_prune < 60.0:
+            return
+        self._last_prune = now
+        for detector in self._detectors:
+            try:
+                detector.prune(now)
+            except Exception as exc:
+                logger.error("Detector %s prune raised: %s", detector.name, exc)
 
     def _init_detectors(
         self, config: Dict[str, Any], rules_path: Optional[str]

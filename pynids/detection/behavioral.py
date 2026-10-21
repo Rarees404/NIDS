@@ -39,7 +39,7 @@ import logging
 import math
 import time
 from collections import defaultdict, deque
-from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
+from typing import Deque, Dict, Iterable, List, Optional, Tuple
 
 from .base import BaseDetector
 from ..alerts.model import Alert, AlertType, Severity
@@ -289,6 +289,11 @@ class DataExfiltrationDetector(BaseDetector):
     def name(self) -> str:
         return "data_exfiltration"
 
+    def prune(self, now: float) -> None:
+        # Flow IDs of long-finished uploads; a re-alert after this is harmless.
+        if len(self._alerted_flows) > 50_000:
+            self._alerted_flows.clear()
+
     def analyze(
         self,
         meta: dict,
@@ -324,7 +329,7 @@ class DataExfiltrationDetector(BaseDetector):
             tags=["exfiltration", "data_transfer"],
             confidence=0.70,
             evidence={
-                "bytes_transferred": flow.byte_count,
+                "bytes_transferred": flow.bytes_from_src,
                 "megabytes": round(mb, 2),
                 "packet_count": flow.packet_count,
                 "duration_seconds": round(flow.duration, 2),
@@ -371,6 +376,14 @@ class BeaconingDetector(BaseDetector):
     @property
     def name(self) -> str:
         return "beaconing"
+
+    def prune(self, now: float) -> None:
+        # Gaps longer than max_interval_seconds are ignored by the analysis,
+        # so a pair silent for that long holds nothing worth keeping.
+        for key in [k for k, h in self._history.items()
+                    if not h or now - h[-1] > self.max_interval_seconds]:
+            del self._history[key]
+            self._alerted.discard(key)
 
     def analyze(
         self,

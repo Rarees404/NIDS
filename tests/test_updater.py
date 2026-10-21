@@ -152,3 +152,13 @@ def test_not_a_checkout(tmp_path, monkeypatch):
     assert upd.status()["supported"] is False
     with pytest.raises(UpdateError):
         upd.apply()
+
+
+def test_apply_when_up_to_date_releases_the_lock(repos):
+    local, _ = repos
+    upd = Updater(repo=local)
+    upd.apply()
+    wait(upd, "idle")
+    # A second check must actually run, not report "already running" forever.
+    assert upd._lock.acquire(blocking=False)
+    upd._lock.release()

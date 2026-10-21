@@ -13,9 +13,7 @@ stream.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
-from typing import Optional
 
 from ..manager import BaseOutput
 from ..model import Alert, Severity

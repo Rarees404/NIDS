@@ -15,6 +15,7 @@ daemon:
   record_pcap: false       # keep a rolling window of raw traffic (for `pynids decrypt`)
   record_max_mb: 50
   record_files: 10
+  retention_days: 30       # delete stored alerts older than this (0 = keep forever)
 
 notifications:
   enabled: true
@@ -48,6 +49,13 @@ lookups:
   #   manual — only when you click "Look up" in the dashboard or run `pynids lookup`
   mode: alerts
   min_severity: MEDIUM
+
+updates:
+  # Check GitHub for new commits; the dashboard / menu bar app shows an
+  # Update button.  Nothing is installed without a click.
+  check: true
+  interval_hours: 6
+  extras: all              # pip extras installed when dependencies change
 
 alert_manager:
   dedup_window: 60

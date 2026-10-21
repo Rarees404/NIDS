@@ -165,7 +165,7 @@ class Updater:
             self._set(state="checking", error=None)
             self._check_locked()
             self._set(state="idle")
-        except (UpdateError, OSError, subprocess.SubprocessError) as exc:
+        except Exception as exc:  # noqa: BLE001 — report it; never leave state "checking"
             logger.warning("Update check failed: %s", exc)
             self._set(state="idle", error=f"Couldn't check for updates: {exc}")
         finally:
@@ -226,6 +226,7 @@ class Updater:
             self._check_locked()
             if not self._info.get("behind"):
                 self._set(state="idle", step=None, available=False)
+                self._lock.release()
                 return
             if self._info.get("blocked"):
                 raise UpdateError(self._info["blocked"])
@@ -244,7 +245,7 @@ class Updater:
 
             self._set(step="Verifying the new version…")
             self._run(self.python, "-I", "-c", "import pynids.cli, pynids.service.daemon", timeout=120)
-        except (UpdateError, OSError, subprocess.SubprocessError) as exc:
+        except Exception as exc:  # noqa: BLE001 — roll back and release the lock on anything
             logger.error("Update failed: %s", exc)
             rolled = ""
             if old:

@@ -48,7 +48,6 @@ Detectors in this file
 """
 from __future__ import annotations
 
-import ipaddress
 import logging
 import time
 from collections import defaultdict, deque
@@ -258,6 +257,10 @@ class LocalhostProbeDetector(BaseDetector):
     @property
     def name(self) -> str:
         return "stealth_localhost"
+
+    def prune(self, now: float) -> None:
+        for key in [k for k, h in self._history.items() if not h or now - h[-1][0] > self.scan_window]:
+            del self._history[key]
 
     def _is_local_ipc(self, src_port: int, dst_port: int) -> bool:
         """A process connecting to a socket it opened a moment earlier."""
@@ -622,6 +625,11 @@ class DnsPrefetchDetector(BaseDetector):
     def name(self) -> str:
         return "stealth_dns_prefetch"
 
+    def prune(self, now: float) -> None:
+        for src in [s for s, h in self._history.items() if not h or now - h[-1][0] > self.window_seconds]:
+            del self._history[src]
+        self._last_alert = {s: t for s, t in self._last_alert.items() if now - t < self.window_seconds}
+
     def analyze(
         self,
         meta: dict,
@@ -779,6 +787,10 @@ class TrackerDetector(BaseDetector):
     def name(self) -> str:
         return "stealth_trackers"
 
+    def prune(self, now: float) -> None:
+        if len(self._reported) > 50_000:
+            self._reported.clear()
+
     def analyze(
         self,
         meta: dict,
@@ -906,6 +918,10 @@ class DohDetector(BaseDetector):
     @property
     def name(self) -> str:
         return "stealth_doh"
+
+    def prune(self, now: float) -> None:
+        if len(self._reported) > 50_000:
+            self._reported.clear()
 
     def analyze(
         self,

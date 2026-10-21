@@ -145,6 +145,27 @@ def _row_to_alert(row: sqlite3.Row) -> Dict[str, Any]:
     return d
 
 
+class _BadRequest(ValueError):
+    """A malformed request parameter (answered with 400, not 500)."""
+
+
+def _num(query: Dict[str, List[str]], name: str, default: Any = None, cast: Callable = int,
+         lo: Optional[float] = None, hi: Optional[float] = None) -> Any:
+    """Read a numeric query parameter, clamped to [lo, hi]."""
+    raw = (query.get(name) or [None])[0]
+    if raw in (None, ""):
+        return default
+    try:
+        value = cast(raw)
+    except (TypeError, ValueError):
+        raise _BadRequest(f"{name} must be a number") from None
+    if lo is not None:
+        value = max(lo, value)
+    if hi is not None:
+        value = min(hi, value)
+    return value
+
+
 def _fts_query(text: str) -> str:
     """Turn free text into a safe FTS5 query (each word quoted, AND-ed)."""
     words = re.findall(r"[\w.:\-]+", text)
@@ -175,7 +196,8 @@ class _Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if not origin:
             return True
-        return origin.lower() in {f"http://127.0.0.1:{self.port}", f"http://localhost:{self.port}"}
+        return origin.lower() in {f"http://127.0.0.1:{self.port}", f"http://localhost:{self.port}",
+                                  f"http://[::1]:{self.port}"}
 
     def _authorized(self, query: Dict[str, List[str]]) -> bool:
         supplied = self.headers.get("X-PyNIDS-Token") or (query.get("token") or [""])[0]
@@ -199,9 +221,10 @@ class _Handler(BaseHTTPRequestHandler):
         if length <= 0 or length > 65536:
             return {}
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8")) or {}
+            data = json.loads(self.rfile.read(length).decode("utf-8"))
         except ValueError:
             return {}
+        return data if isinstance(data, dict) else {}
 
     def _route(self, method: str) -> None:
         if not self._allowed_host():
@@ -237,6 +260,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._dispatch(method, path, query)
         except BrokenPipeError:
             pass
+        except _BadRequest as exc:
+            self._error(HTTPStatus.BAD_REQUEST, str(exc))
         except Exception as exc:  # noqa: BLE001 — never kill the server thread
             logger.exception("API error on %s %s", method, path)
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
@@ -254,7 +279,6 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str, path: str, query: Dict[str, List[str]]) -> None:
         ctx = self.ctx
-        q1 = lambda name, default=None: (query.get(name) or [default])[0]  # noqa: E731
 
         if method == "GET" and path == "/api/summary":
             data = ctx.live.summary()
@@ -265,9 +289,9 @@ class _Handler(BaseHTTPRequestHandler):
         elif method == "GET" and path == "/api/alerts":
             self._send_json(self._alerts(query))
         elif method == "GET" and path == "/api/apps":
-            self._send_json(ctx.live.apps(limit=int(q1("limit", 100))))
+            self._send_json(ctx.live.apps(limit=_num(query, "limit", 100, lo=1, hi=1000)))
         elif method == "GET" and path == "/api/remotes":
-            self._send_json(ctx.live.remotes(limit=int(q1("limit", 500))))
+            self._send_json(ctx.live.remotes(limit=_num(query, "limit", 500, lo=1, hi=5000)))
         elif method == "GET" and path == "/api/timeline":
             self._send_json(ctx.live.timeline())
         elif method == "GET" and path == "/api/stream":
@@ -387,7 +411,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _alerts(self, query: Dict[str, List[str]]) -> List[Dict[str, Any]]:
         q1 = lambda name, default=None: (query.get(name) or [default])[0]  # noqa: E731
-        limit = max(1, min(int(q1("limit", 200)), 1000))
+        limit = _num(query, "limit", 200, lo=1, hi=1000)
         kind = q1("kind")
         conn = self.ctx.db()
         if conn is None:
@@ -398,12 +422,14 @@ class _Handler(BaseHTTPRequestHandler):
         if _SEV_NUM.get(min_sev, 1) > 1:
             clauses.append("severity_numeric >= ?")
             params.append(_SEV_NUM[min_sev])
-        if q1("since"):
+        since = _num(query, "since", cast=float)
+        if since is not None:
             clauses.append("timestamp >= ?")
-            params.append(float(q1("since")))
-        if q1("until"):
+            params.append(since)
+        until = _num(query, "until", cast=float)
+        if until is not None:
             clauses.append("timestamp < ?")
-            params.append(float(q1("until")))
+            params.append(until)
         if q1("app"):
             clauses.append("app = ?")
             params.append(q1("app"))

@@ -33,7 +33,6 @@ import functools
 import ipaddress
 
 import socket
-import struct
 from typing import Any, Dict, List, Optional
 
 from .quic_crypto import long_packet_type_name

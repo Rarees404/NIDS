@@ -99,6 +99,7 @@ class FlowTracker:
         self.idle_timeout = idle_timeout
         self._flows: Dict[str, Flow] = {}
         self._last_gc: float = time.time()
+        self._newest: float = 0.0  # latest packet timestamp seen (packet clock)
 
     # ------------------------------------------------------------------
     # Public API
@@ -121,6 +122,10 @@ class FlowTracker:
         flow_id = self._make_key(proto, src_ip, src_port, dst_ip, dst_port)
 
         if flow_id not in self._flows:
+            # A flood of new flows (SYN flood, scan) must not outgrow the
+            # table between the periodic GC passes.
+            if len(self._flows) >= self.max_flows:
+                self._gc(force_evict=True)
             flow = Flow(
                 flow_id=flow_id,
                 protocol=proto,
@@ -135,6 +140,8 @@ class FlowTracker:
             flow = self._flows[flow_id]
 
         flow.last_seen = meta.get("timestamp", time.time())
+        if flow.last_seen > self._newest:
+            self._newest = flow.last_seen
         flow.packet_count += 1
         payload_len = len(meta.get("payload_bytes", b""))
         flow.byte_count += payload_len
@@ -201,21 +208,27 @@ class FlowTracker:
 
     def _maybe_gc(self) -> None:
         """Periodically remove idle flows to bound memory."""
-        now = time.time()
-        if now - self._last_gc < 30.0:
+        if time.time() - self._last_gc < 30.0:
             return
+        self._gc()
+
+    def _gc(self, force_evict: bool = False) -> None:
+        self._last_gc = time.time()
+        # Idle is measured on the packet clock, so a PCAP replay of old
+        # traffic doesn't expire every flow as soon as it is created.
+        now = self._newest or time.time()
         expired = [
             fid
             for fid, f in self._flows.items()
-            if f.is_idle(self.idle_timeout)
+            if now - f.last_seen > self.idle_timeout
         ]
         for fid in expired:
             del self._flows[fid]
 
-        # If still over capacity, evict oldest-seen entries
-        if len(self._flows) > self.max_flows:
+        # Still at capacity: evict the least recently seen, down to 90% so
+        # the next new flow doesn't immediately trigger another sort.
+        limit = int(self.max_flows * 0.9) if force_evict else self.max_flows
+        if len(self._flows) > limit:
             oldest = sorted(self._flows.items(), key=lambda kv: kv[1].last_seen)
-            for fid, _ in oldest[: len(self._flows) - self.max_flows]:
+            for fid, _ in oldest[: len(self._flows) - limit]:
                 del self._flows[fid]
-
-        self._last_gc = now
