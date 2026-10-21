@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#-license)
 [![Version](https://img.shields.io/badge/version-2.0.0-orange.svg)]()
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)]()
-[![Tests](https://img.shields.io/badge/tests-230%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-372%20passing-brightgreen.svg)]()
 
 PyNIDS watches your Mac's real network traffic and tells you, in plain language, what is
 going on. It catches attacks and connections to known-malicious servers. It also shows
@@ -36,12 +36,13 @@ widget**, **native notifications**, one-click **blocking**, and optional
 6. [Understanding the alerts](#-understanding-the-alerts)
 7. [How it works](#-how-it-works)
 8. [Blocking, Claude & decryption](#-blocking-claude--decryption)
-9. [Configuration](#-configuration)
-10. [Command reference](#-command-reference)
-11. [Privacy & security](#-privacy--security)
-12. [Troubleshooting](#-troubleshooting)
-13. [Uninstall](#-uninstall)
-14. [For developers](#-for-developers)
+9. [SOC analyst tools: Investigate & Email](#-soc-analyst-tools-investigate--email)
+10. [Configuration](#-configuration)
+11. [Command reference](#-command-reference)
+12. [Privacy & security](#-privacy--security)
+13. [Troubleshooting](#-troubleshooting)
+14. [Uninstall](#-uninstall)
+15. [For developers](#-for-developers)
 
 ---
 
@@ -499,6 +500,66 @@ you. Delete it when you're done. Needs `tshark` (`brew install --cask wireshark`
 
 ---
 
+## 🕵️ SOC analyst tools: Investigate & Email
+
+Two dashboard tabs for day-to-day analyst work. Both are passive: nothing is scanned, opened or executed.
+
+### Investigate: IPs, domains, URLs, hashes
+
+Paste one indicator (defanged is fine: `hxxps://evil[.]com`, `1.2.3[.]4`) or a whole alert, ticket or report. A report gets every indicator extracted into a list you can filter, copy defanged, or export as CSV.
+
+For one indicator, every source that understands its type is asked **in parallel**, and each answers in its own card:
+
+| Source | Key | Types |
+|---|---|---|
+| PyNIDS (this Mac): your feeds, traffic seen, alerts | — | all |
+| RDAP (WHOIS): owner, registrar, **domain age** | — | IP, domain, ASN |
+| DNS records via Google DNS-over-HTTPS (A, MX, NS, TXT/SPF, PTR) | — | IP, domain |
+| Shodan InternetDB: ports, tags, CVEs | — | IP |
+| GreyNoise: internet noise vs targeted | optional | IP |
+| urlscan.io search (existing scans only) | optional | IP, domain, URL, SHA-256 |
+| Certificate Transparency (crt.sh): certs and subdomains | — | domain |
+| VirusTotal | free key | IP, domain, URL, hash |
+| AbuseIPDB | free key | IP |
+| AlienVault OTX | free key | IP, domain, URL, hash |
+| URLhaus · ThreatFox · MalwareBazaar (abuse.ch) | one free key | URL, domain, IP, hash |
+
+* Every card shows a verdict, a summary, tags, and the **raw response exactly as received** (copyable), so you can always check the summary against the source.
+* **Pivot** from any value in a result (a resolved IP, a name server, a payload hash). The trail of pivots is kept at the top.
+* **Open in…** links go to 30+ web tools (Talos, X-Force, Shodan, Censys, Hybrid Analysis, Joe Sandbox, NVD …). Nothing is sent until you click.
+* **Copy report** puts a defanged Markdown summary on the clipboard for a ticket.
+* Results are cached (6 h for most sources), and free-tier rate limits are respected with automatic retry.
+* Add keys under **Sources & API keys**. They are stored in the data folder (0600), and the dashboard can only see whether a key is set.
+
+From the terminal: `pynids investigate 'hxxps://evil[.]com/login'` (add `--web` to open it in the dashboard, or `--json`).
+
+### Email: phishing analysis that keeps the evidence
+
+Drop an `.eml` file, paste the raw source, or click **Analyze in PyNIDS** in Thunderbird.
+
+* **Nothing is lost.** The original is stored unchanged, read-only and named by its SHA-256, and every view is computed from it. Every header, MIME part and finding records its exact raw lines, so **every finding has a "lines 7–9" button** that jumps to the evidence.
+* **Raw source viewer.** Headers are colored by group (routing, authentication, identity, MIME) and boundaries are marked. Hidden preamble/epilogue text is shaded red. Base64 blocks are folded until you expand them. URLs, IPs and addresses are clickable (they open Investigate). Invisible characters are shown as `⟨RLO⟩`, `⟨ZWSP⟩`, and bad bytes as `\xNN`. You can search inside it.
+* **Decoding.** Handles base64 (and reports junk, padding problems and appended data), quoted-printable, uuencode, RFC 2047 encoded headers, RFC 2231 file names and every charset. Defects are reported, never silently repaired. Decoding is cross-checked against Python's email library in the tests.
+* **Sender & authentication.** Shows the SPF/DKIM/DMARC verdicts and DKIM alignment. It flags a display name that hides another address, Reply-To or Return-Path mismatches, look-alike and punycode domains (`paypa1`, Cyrillic `а`), and invisible characters. The Received chain is shown as a hop table with delays and time anomalies.
+* **Links from everywhere:** text, HTML attributes, CSS, PDFs and HTML attachments. SafeLinks, Proofpoint and Google redirects are unwrapped. Links are flagged for text that shows one site but goes to another, bare IPs, `user@host` tricks, shorteners, free hosting abused for phishing, and brand look-alikes.
+* **Attachments, triaged in memory.** Real type from the file's bytes vs. its extension, double extensions, right-to-left override names, macros, password-protected archives (with contents), PDF active content (including hex-escaped keywords), RTF objects, HTML smuggling, plus hashes, hex view and strings. Downloads are saved as `.bin` only after a warning.
+* **HTML preview** only on request, in a sandbox with scripts, forms, links and *all* remote content blocked, so tracking pixels never tell the sender you looked.
+* **Indicators** found anywhere in the message can be investigated together in one click.
+
+From the terminal: `pynids mail analyze message.eml` (`--local` works without the daemon).
+
+### Thunderbird and VS Code
+
+```bash
+pynids mail thunderbird     # builds ~/Downloads/pynids-thunderbird.xpi
+pynids mail token           # the token to paste into the add-on's options
+pynids mail vscode          # .eml syntax highlighting for VS Code
+```
+
+Install the `.xpi` in Thunderbird from **Add-ons and Themes → ⚙ → Install Add-on From File…**. It adds **Analyze in PyNIDS** above each message and to the message-list context menu. It sends the message exactly as Thunderbird stored it, only to `127.0.0.1`.
+
+---
+
 ## 🔧 Configuration
 
 The daemon reads `/Library/Application Support/PyNIDS/config.yaml`, which is created on
@@ -576,6 +637,9 @@ The foreground CLI tools (`live`, `xray`, `pcap`) take `--config`. See
 | `pynids program PATH` | Signature, SHA-256, launch items and sockets of one executable |
 | `pynids launch-items [--flagged]` | LaunchAgents / LaunchDaemons and the programs they start |
 | `pynids lookup IP [--local]` | IP dossier: what PyNIDS saw, plus RDAP / reverse DNS / InternetDB |
+| `pynids investigate VALUE [--web] [--json]` | Look up an IP / domain / URL / hash / email / ASN / CVE across all intel sources |
+| `pynids mail analyze FILE.eml [--web] [--local]` | Phishing analysis of a raw email |
+| `pynids mail thunderbird` / `token` / `vscode` | Thunderbird add-on, its token, VS Code .eml highlighting |
 | `pynids devices [--scan IP]` | Devices on your LAN; identify one with nmap |
 | `pynids allow list/add/remove` | Manage "Mark as expected" rules |
 | `pynids keylog [--browser …]` | Launch a browser that logs TLS keys |
@@ -626,6 +690,8 @@ sudo .venv/bin/pynids query --db "/Library/Application Support/PyNIDS/events.db"
   * an **Origin check** protects every action that changes something
   * **no CORS headers** are sent, so other origins can't read responses
 * **`/api/widget`** is the only open route, because the sandboxed widget can't read the token. It returns counts and alert headlines only.
+* **Investigate and Email are passive.** Lookups go only to the sources listed in the dashboard (private IPs are never sent), and only when you investigate. Emails are parsed in memory. Nothing in them is opened, rendered, fetched or run unless you click **Render safely** (sandboxed, no network) or **Download .bin**.
+* **The Thunderbird add-on** is the only non-dashboard origin the API accepts, only for submitting a message, and it still needs the token.
 * **Secrets live outside the repo**, in `/Library/Application Support/PyNIDS/`, and `.gitignore` also blocks keys, key logs, captures, and databases.
 
 ### Files on disk
@@ -640,6 +706,8 @@ sudo .venv/bin/pynids query --db "/Library/Application Support/PyNIDS/events.db"
 | `…/blocklist.json` | Active blocks and why |
 | `…/allowlist.json` | Rules you marked as expected |
 | `…/paused` | Present while detection is stopped from the menu bar |
+| `…/soc-keys.json` | API keys for Investigate sources (0600) |
+| `…/evidence/email/` | Analysed emails, stored unchanged and read-only, named by SHA-256 |
 | `…/captures/` | Rolling capture (only with `--record`) |
 | `/Library/Logs/PyNIDS/daemon.log` | Daemon log |
 | `~/Applications/PyNIDS.app` | Menu bar app + widget |
@@ -707,8 +775,10 @@ pynids/
 ├── alerts/              alert model, manager, plain-English guide, outputs (SQLite, JSON, syslog, terminal)
 ├── response/            pf blocking, macOS notifications
 ├── ai/                  Explain with Claude, Ask Claude (investigation agent)
+├── soc/                 Investigate (indicators, sources, workbench) and mail/ (lossless MIME parser, phishing analysis, evidence store)
+├── integrations/        Thunderbird add-on, VS Code .eml grammar
 ├── service/             daemon, local API, live stats, launchd, PCAP recorder
-├── web/dashboard.html   web dashboard (vendor/: offline map libraries)
+├── web/dashboard.html   web dashboard (app/: Investigate + Email tabs, vendor/: offline map libraries)
 ├── cli.py, cli_service.py
 macos/
 ├── src/                 SwiftUI menu bar app + WidgetKit widget

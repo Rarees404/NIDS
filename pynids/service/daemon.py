@@ -49,7 +49,7 @@ from ..intel import feeds as feeds_mod
 from ..intel.threat_intel import ThreatIntel
 from ..paths import (
     DEFAULT_API_HOST, DEFAULT_API_PORT, daemon_config_path, data_dir, db_path,
-    intel_dir, is_root, paused_flag_path, token_path,
+    evidence_dir, intel_dir, is_root, paused_flag_path, soc_keys_path, token_path,
 )
 from ..sniffer import sniff_live
 from .api import ServiceContext, make_server
@@ -326,6 +326,15 @@ class Daemon:
             interval_hours=float(ucfg.get("interval_hours", 6)) if ucfg.get("check", True) else 0,
             extras=str(ucfg.get("extras", "all")),
         )
+        from ..soc.keys import KeyStore
+        from ..soc.workbench import LocalSource, Workbench
+        self.workbench = Workbench(
+            db_path(), keys=KeyStore(soc_keys_path()),
+            local=LocalSource(intel=lambda: self.engine.intel, inspector=self.inspector,
+                              live=self.live, db_path=db_path()),
+        )
+        from ..soc.mail.store import EmailStore
+        self.emails = EmailStore(evidence_dir() / "email", db_path())
         self.token = ensure_token()
         self.api_ctx = ServiceContext(
             live=self.live,
@@ -343,6 +352,8 @@ class Daemon:
             investigate=investigate,
             baseline=self.baseline,
             updater=self.updater,
+            workbench=self.workbench,
+            emails=self.emails,
         )
         self.server = make_server(self.api_ctx, dcfg["api_host"], int(dcfg["api_port"]))
 

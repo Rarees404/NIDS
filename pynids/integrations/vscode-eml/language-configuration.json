@@ -1,0 +1,7 @@
+{
+  "brackets": [["<", ">"], ["(", ")"], ["[", "]"]],
+  "autoClosingPairs": [],
+  "folding": {
+    "markers": { "start": "^--[^\\s-][^\\s]*\\s*$", "end": "^--[^\\s]+--\\s*$" }
+  }
+}

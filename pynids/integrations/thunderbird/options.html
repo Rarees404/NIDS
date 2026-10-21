@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 13px/1.5 system-ui, -apple-system, sans-serif; padding: 12px 16px; max-width: 520px; }
+  label { display: block; margin: 12px 0 4px; font-weight: 600; }
+  input { width: 100%; box-sizing: border-box; padding: 6px 8px; font: 12px ui-monospace, Menlo, monospace; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
+  .muted { color: #777; font-size: 12px; }
+  code { background: #f1f1f1; padding: 1px 4px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <p>Connects Thunderbird to the PyNIDS service on this Mac. Messages go only to <code>127.0.0.1</code>.</p>
+  <label for="token">API token</label>
+  <input id="token" type="password" autocomplete="off" placeholder="paste the output of: pynids mail token">
+  <label for="port">Port</label>
+  <input id="port" type="number" min="1" max="65535">
+  <div class="row"><button id="save">Save</button><button id="test">Test connection</button><span id="status" class="muted"></span></div>
+  <p class="muted">Get the token by running <code>pynids mail token</code> in Terminal.</p>
+  <script src="options.js"></script>
+</body>
+</html>

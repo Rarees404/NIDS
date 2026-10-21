@@ -25,12 +25,16 @@ class ApiClient:
         return self.base + "/"
 
     def request(self, method: str, path: str, body: Optional[Dict[str, Any]] = None,
-                timeout: Optional[float] = None) -> Any:
-        data = json.dumps(body).encode() if body is not None else None
+                timeout: Optional[float] = None, raw: Optional[bytes] = None,
+                headers: Optional[Dict[str, str]] = None) -> Any:
+        """JSON request; or send *raw* bytes as the body (with your own *headers*)."""
+        data = raw if raw is not None else json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.base + path, data=data, method=method)
         req.add_header("X-PyNIDS-Token", self.token)
-        if data is not None:
+        if raw is None and data is not None:
             req.add_header("Content-Type", "application/json")
+        for k, v in (headers or {}).items():
+            req.add_header(k, v)
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:  # noqa: S310
                 return json.loads(resp.read() or b"null")

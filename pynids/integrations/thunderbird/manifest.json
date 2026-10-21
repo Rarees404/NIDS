@@ -1,0 +1,35 @@
+{
+  "manifest_version": 2,
+  "name": "PyNIDS Email Analysis",
+  "description": "Send the original source of a message to your local PyNIDS for safe phishing analysis.",
+  "version": "1.0.0",
+  "author": "PyNIDS",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "email-analysis@pynids.local",
+      "strict_min_version": "115.0"
+    }
+  },
+  "icons": {
+    "32": "icon.svg",
+    "64": "icon.svg"
+  },
+  "permissions": [
+    "messagesRead",
+    "menus",
+    "storage",
+    "notifications",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "message_display_action": {
+    "default_title": "Analyze in PyNIDS",
+    "default_icon": "icon.svg"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  }
+}

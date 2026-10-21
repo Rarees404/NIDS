@@ -89,6 +89,16 @@ def anthropic_key_path() -> Path:
     return data_dir() / "anthropic-key"
 
 
+def evidence_dir() -> Path:
+    """Original emails / files submitted for analysis (stored unchanged)."""
+    return data_dir() / "evidence"
+
+
+def soc_keys_path() -> Path:
+    """API keys for the investigation workbench's sources (0600)."""
+    return data_dir() / "soc-keys.json"
+
+
 def daemon_config_path() -> Path:
     return data_dir() / "config.yaml"
 

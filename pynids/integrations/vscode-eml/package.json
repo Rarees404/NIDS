@@ -1,0 +1,24 @@
+{
+  "name": "pynids-eml",
+  "displayName": "PyNIDS Email Source (.eml)",
+  "description": "Readable raw email: header groups (routing, authentication, identity, MIME), boundaries, encoded words, base64 blocks, URLs, IPs and addresses highlighted.",
+  "version": "1.0.0",
+  "publisher": "pynids",
+  "license": "MIT",
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [{
+      "id": "eml",
+      "aliases": ["Email source", "eml"],
+      "extensions": [".eml", ".mbox", ".msg.txt"],
+      "firstLine": "^(Return-Path|Received|Delivered-To|X-[\\w-]+|From|Message-ID|MIME-Version|Authentication-Results|ARC-Seal):",
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "eml",
+      "scopeName": "text.eml.pynids",
+      "path": "./syntaxes/eml.tmLanguage.json"
+    }]
+  }
+}

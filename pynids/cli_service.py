@@ -641,6 +641,178 @@ def lookup_cmd(ip: str, external: bool) -> None:
         console.print(f"  [{_SEV_STYLE.get(a['severity'], '')}]{a['severity']:<8}[/] {a['message'][:100]}")
 
 
+_VERDICT_STYLE = {"malicious": "bold red", "suspicious": "yellow", "clean": "green", "info": "cyan", "unknown": "dim"}
+
+
+@main.command("investigate")
+@click.argument("indicator", nargs=-1, required=True)
+@click.option("--web", is_flag=True, help="Open the investigation in the dashboard instead.")
+@click.option("--refresh", is_flag=True, help="Skip cached results.")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw results as JSON.")
+def investigate_cmd(indicator: tuple, web: bool, refresh: bool, as_json: bool) -> None:
+    """Look up an IP, domain, URL, hash, email, ASN or CVE across intel sources.
+
+    Defanged input works:  pynids investigate 'hxxps://evil[.]com/login'
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from urllib.parse import quote
+
+    text = " ".join(indicator)
+    client = _client()
+    if web:
+        subprocess.run(["open", client.dashboard_url + "#investigate/" + quote(text, safe="")], check=False)
+        return
+    parsed = _client().post("/api/soc/parse", {"text": text}, timeout=30) if client.alive() else None
+    if parsed is None:
+        _fail("The daemon is not running. Start it with:  sudo pynids daemon install")
+    if not parsed["iocs"]:
+        _fail("No indicator recognised.")
+    if not parsed["single"]:
+        t = Table(title=f"{len(parsed['iocs'])} indicators found")
+        t.add_column("Type")
+        t.add_column("Indicator")
+        t.add_column("Defanged", style="dim")
+        for i in parsed["iocs"]:
+            t.add_row(i["type"], i["value"], i["defanged"])
+        console.print(t)
+        return
+    ioc = parsed["iocs"][0]
+    sources = {s["name"]: s for s in _get("/api/soc/sources")}
+
+    def one(name: str):
+        return _client().post("/api/soc/lookup", {"source": name, "type": ioc["type"], "value": ioc["value"],
+                                                  "refresh": refresh}, timeout=90)
+
+    with console.status(f"Asking {len(ioc['sources'])} sources about {ioc['defanged']}…"):
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(one, ioc["sources"]))
+    if as_json:
+        click.echo(json.dumps({"indicator": ioc, "results": results}, indent=2, default=str))
+        return
+    rank = {"unknown": 0, "info": 1, "clean": 2, "suspicious": 3, "malicious": 4}
+    worst = max((r["verdict"] for r in results if r["status"] == "ok"), key=lambda v: rank.get(v, 0), default="unknown")
+    console.print(Panel(f"[bold]{ioc['value']}[/bold]  [dim]{ioc['type']} · {ioc['defanged']}[/dim]\n"
+                        f"Overall: [{_VERDICT_STYLE[worst]}]{worst}[/]", expand=False))
+    for r in sorted(results, key=lambda r: -rank.get(r["verdict"], 0) if r["status"] == "ok" else 1):
+        label = sources.get(r["source"], {}).get("label", r["source"])
+        if r["status"] != "ok":
+            console.print(f"[dim]{label}: {r['status'].replace('_', ' ')}{' — ' + r['message'] if r.get('message') else ''}[/dim]")
+            continue
+        t = Table(show_header=False, box=None, title=f"{label} · [{_VERDICT_STYLE.get(r['verdict'], '')}]{r['verdict']}[/]",
+                  title_justify="left")
+        for k, v in r["summary"]:
+            if isinstance(v, list):
+                n = 5 if v and isinstance(v[0], dict) else 8
+                v = "\n".join(str(x if not isinstance(x, dict) else
+                                  " · ".join(str(x[k]) for k in ("time", "url", "ip", "country") if x.get(k)))
+                              for x in v[:n]) + (f"\n… {len(v) - n} more" if len(v) > n else "")
+            t.add_row(f"[dim]{k}[/dim]", str(v))
+        if r.get("tags"):
+            t.add_row("[dim]Tags[/dim]", ", ".join(r["tags"]))
+        console.print(t)
+        console.print()
+
+
+@main.group("mail")
+def mail_group() -> None:
+    """Email forensics: analyse .eml files, set up Thunderbird / VS Code."""
+
+
+@mail_group.command("analyze")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--web", is_flag=True, help="Open the analysis in the dashboard.")
+@click.option("--json", "as_json", is_flag=True, help="Print the full analysis as JSON.")
+@click.option("--local", is_flag=True, help="Analyse in this process; don't store it in the service.")
+def mail_analyze(path: Path, web: bool, as_json: bool, local: bool) -> None:
+    """Analyse a raw email (.eml): sender, authentication, links, attachments."""
+    data = path.read_bytes()
+    if local:
+        from .soc.mail.analyze import analyze
+        result = analyze(data, path.name)
+    else:
+        client = _client()
+        if not client.alive():
+            _fail("The daemon is not running (use --local to analyse without it).")
+        try:
+            result = client.request("POST", "/api/soc/email", raw=data, timeout=120,
+                                    headers={"Content-Type": "message/rfc822", "X-Filename": path.name, "X-Source": "cli"})
+        except Exception as exc:  # noqa: BLE001
+            _fail(str(exc))
+        if web:
+            subprocess.run(["open", client.dashboard_url + "#email/" + result["sha256"]], check=False)
+            return
+    if as_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+    s = result["summary"]
+    risk_style = {"high": "bold red", "medium": "yellow", "low": "cyan", "none": "green"}[result["risk"]]
+    head = Table(show_header=False, box=None)
+    for k in ("subject", "from", "reply_to", "return_path", "to", "date"):
+        if s.get(k):
+            head.add_row(f"[dim]{k.replace('_', '-').title()}[/dim]", s[k])
+    v = result["auth"]["verdicts"]
+    head.add_row("[dim]SPF/DKIM/DMARC[/dim]", " / ".join(v.get(k, "—") for k in ("spf", "dkim", "dmarc")))
+    head.add_row("[dim]SHA-256[/dim]", result["sha256"])
+    console.print(Panel(head, title=f"[{risk_style}]{result['risk'].upper()} RISK[/]", expand=False))
+    sev = {"high": "bold red", "medium": "yellow", "low": "cyan", "info": "dim"}
+    for f in result["findings"]:
+        where = f" [dim](lines {f['lines'][0]}–{f['lines'][1]})[/dim]" if f.get("lines") else ""
+        console.print(f"  [{sev[f['severity']]}]{f['severity']:<6}[/] {f['title']}{where}")
+        if f.get("detail"):
+            console.print(f"         [dim]{f['detail'][:160]}[/dim]")
+    if result["links"]:
+        console.print("\n[bold]Links[/bold]")
+        for l in result["links"][:30]:
+            console.print(f"  {l['defanged']}  [dim]{', '.join(l['flags'])}[/dim]")
+    for a in result["attachments"]:
+        console.print(f"\n[bold]Attachment[/bold] {a['filename'] or a['part']} · {a['triage'].get('detected') or a['content_type']} · "
+                      f"{a['size']:,} bytes\n  sha256 {a['hashes']['sha256']}")
+
+
+@mail_group.command("token")
+def mail_token() -> None:
+    """Print the API token (paste it into the Thunderbird add-on options)."""
+    from .paths import read_api_token
+    token = read_api_token()
+    if not token:
+        _fail("No token yet — start the daemon first:  sudo pynids daemon install")
+    click.echo(token)
+
+
+@mail_group.command("thunderbird")
+@click.option("--out", type=click.Path(file_okay=False, path_type=Path), default=Path.home() / "Downloads",
+              show_default=True, help="Where to write the add-on.")
+def mail_thunderbird(out: Path) -> None:
+    """Build the Thunderbird add-on (.xpi) that sends messages to PyNIDS."""
+    import zipfile
+    from importlib import resources
+
+    src = resources.files("pynids.integrations").joinpath("thunderbird")
+    out.mkdir(parents=True, exist_ok=True)
+    xpi = out / "pynids-thunderbird.xpi"
+    with zipfile.ZipFile(xpi, "w", zipfile.ZIP_DEFLATED) as z:
+        for name in ("manifest.json", "background.js", "options.html", "options.js", "icon.svg"):
+            z.writestr(name, src.joinpath(name).read_bytes())
+    console.print(f"[green]Built[/green] {xpi}\n")
+    console.print("Install: Thunderbird → Tools → Add-ons and Themes → ⚙ → Install Add-on From File… → pick the .xpi")
+    console.print("Then open the add-on's options and paste the token from:  [bold]pynids mail token[/bold]")
+    console.print("Use it from the [bold]Analyze in PyNIDS[/bold] button above a message, or right-click messages in the list.")
+
+
+@mail_group.command("vscode")
+def mail_vscode() -> None:
+    """Install .eml syntax highlighting for VS Code (header groups, boundaries, links)."""
+    from importlib import resources
+
+    src = resources.files("pynids.integrations").joinpath("vscode-eml")
+    dest = Path.home() / ".vscode" / "extensions" / "pynids.pynids-eml-1.0.0"
+    for rel in ("package.json", "language-configuration.json", "syntaxes/eml.tmLanguage.json"):
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(src.joinpath(rel).read_bytes())
+    console.print(f"[green]Installed[/green] {dest}\nRestart VS Code, then open any .eml file (or pick the “Email source” language).")
+
+
 @main.command("devices")
 @click.option("--scan", "scan_ip", default=None, metavar="IP", help="Identify a LAN device with nmap.")
 def devices_cmd(scan_ip: Optional[str]) -> None:

@@ -70,6 +70,8 @@ class ServiceContext:
         investigate: Optional[Callable[[str], Dict[str, Any]]] = None,
         baseline: Any = None,
         updater: Any = None,
+        workbench: Any = None,
+        emails: Any = None,
     ) -> None:
         self.live = live
         self.token = token
@@ -86,6 +88,8 @@ class ServiceContext:
         self.investigate = investigate
         self.baseline = baseline
         self.updater = updater
+        self.workbench = workbench
+        self.emails = emails
         self._explain_lock = threading.Lock()
         self._investigate_lock = threading.Lock()
         if self.db_path:
@@ -253,8 +257,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.UNAUTHORIZED, "missing or invalid token")
             return
         if method != "GET" and not self._allowed_origin():
-            self._error(HTTPStatus.FORBIDDEN, "cross-origin request rejected")
-            return
+            # The Thunderbird add-on may submit messages; web pages can't
+            # forge a moz-extension:// origin, and the token is still required.
+            thunderbird = (method == "POST" and path == "/api/soc/email"
+                           and (self.headers.get("Origin") or "").lower().startswith("moz-extension://"))
+            if not thunderbird:
+                self._error(HTTPStatus.FORBIDDEN, "cross-origin request rejected")
+                return
 
         try:
             self._dispatch(method, path, query)
@@ -341,6 +350,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(ctx.baseline.status() if ctx.baseline is not None else {"enabled": False})
         elif path in ("/api/update", "/api/update/check"):
             self._update(method, path)
+        elif path == "/api/soc/email" or path.startswith("/api/soc/email/"):
+            self._email(method, path, query)
+        elif path.startswith("/api/soc/"):
+            self._soc(method, path, query)
         elif method == "POST" and path == "/api/detection":
             if not ctx.set_detection:
                 self._error(HTTPStatus.NOT_IMPLEMENTED, "pausing detection is unavailable")
@@ -519,24 +532,32 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._error(HTTPStatus.NOT_FOUND, "not found")
 
-    # --- static assets (vendored map libraries) -----------------------------
+    # --- static assets (vendored map libraries, dashboard modules) ------------
 
-    _STATIC_TYPES = {".js": "application/javascript; charset=utf-8", ".json": "application/json"}
+    _STATIC_TYPES = {".js": "application/javascript; charset=utf-8", ".json": "application/json",
+                     ".css": "text/css; charset=utf-8"}
 
     def _serve_static(self, name: str) -> None:
-        # Flat directory, fixed extensions: no path traversal possible.
-        if not re.fullmatch(r"[a-z0-9][a-z0-9.\-]*\.(js|json)", name):
+        # Flat directories, fixed extensions: no path traversal possible.
+        if not re.fullmatch(r"[a-z0-9][a-z0-9.\-]*\.(js|json|css)", name):
             self._error(HTTPStatus.NOT_FOUND, "not found")
             return
-        try:
-            body = resources.files("pynids.web").joinpath("vendor", name).read_bytes()
-        except (FileNotFoundError, ModuleNotFoundError, IsADirectoryError, NotADirectoryError):
+        body = None
+        # vendor/ holds pinned third-party files (cache for a day); app/ is our
+        # own code, which changes on every update (always revalidate).
+        for folder, cache in (("vendor", "public, max-age=86400"), ("app", "no-cache")):
+            try:
+                body = resources.files("pynids.web").joinpath(folder, name).read_bytes()
+                break
+            except (FileNotFoundError, ModuleNotFoundError, IsADirectoryError, NotADirectoryError):
+                continue
+        if body is None:
             self._error(HTTPStatus.NOT_FOUND, "not found")
             return
         self.send_response(200)
         self.send_header("Content-Type", self._STATIC_TYPES[name[name.rfind("."):]])
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Cache-Control", cache)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
@@ -624,6 +645,138 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(upd.apply(), HTTPStatus.ACCEPTED)
             except UpdateError as exc:
                 self._error(HTTPStatus.CONFLICT, str(exc))
+        else:
+            self._error(HTTPStatus.NOT_FOUND, "not found")
+
+    def _raw_body(self, limit: int) -> bytes:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            raise _BadRequest("empty body")
+        if length > limit:
+            raise _BadRequest(f"body larger than {limit // (1024 * 1024)} MB")
+        chunks, left = [], length
+        while left:
+            chunk = self.rfile.read(min(left, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks)
+
+    def _send_bytes(self, body: bytes, filename: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _email(self, method: str, path: str, query: Dict[str, List[str]]) -> None:
+        store = self.ctx.emails
+        if store is None:
+            self._error(HTTPStatus.NOT_IMPLEMENTED, "email analysis is unavailable")
+            return
+        from ..soc.mail.mime import visible
+        from ..soc.mail.store import MAX_EMAIL
+
+        if path == "/api/soc/email":
+            if method == "POST":
+                data = self._raw_body(MAX_EMAIL)
+                name = unquote(self.headers.get("X-Filename") or "")[:200] or None
+                source = (self.headers.get("X-Source") or "upload")[:40]
+                try:
+                    result = store.add(data, name, source)
+                except ValueError as exc:
+                    raise _BadRequest(str(exc)) from None
+                self._send_json(result, HTTPStatus.CREATED)
+            elif method == "GET":
+                self._send_json(store.list(limit=_num(query, "limit", 200, lo=1, hi=1000)))
+            else:
+                self._error(HTTPStatus.NOT_FOUND, "not found")
+            return
+        rest = path[len("/api/soc/email/"):].split("/")
+        sha = rest[0]
+        try:
+            if method == "DELETE" and len(rest) == 1:
+                self._send_json({"deleted": store.delete(sha)})
+            elif method != "GET":
+                self._error(HTTPStatus.NOT_FOUND, "not found")
+            elif len(rest) == 1:
+                self._send_json(store.analysis(sha))
+            elif rest[1] == "raw":
+                fold = 0 if (query.get("start") or query.get("end")) else 60
+                self._send_json(store.lines(sha, _num(query, "start", 1, lo=1), _num(query, "end", None, lo=1), fold))
+            elif rest[1] == "download":
+                self._send_bytes(store.raw(sha), f"{sha[:16]}.eml")
+            elif rest[1] == "part" and len(rest) == 3:
+                part = store.part(sha, unquote(rest[2]))
+                view = (query.get("view") or ["text"])[0]
+                if view == "download":
+                    self._send_bytes(part.decoded, f"{sha[:12]}-part{part.id}.bin")
+                elif view == "hex":
+                    data = part.decoded[:65536]
+                    rows = []
+                    for off in range(0, len(data), 16):
+                        row = data[off:off + 16]
+                        hx = " ".join(f"{b:02x}" for b in row)
+                        asc = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+                        rows.append(f"{off:08x}  {hx:<47}  |{asc}|")
+                    self._send_json({"hex": "\n".join(rows), "size": len(part.decoded), "truncated": len(part.decoded) > 65536})
+                elif view == "strings":
+                    from ..soc.mail.filetype import _strings
+                    self._send_json({"strings": [visible(x) for x in _strings(part.decoded, 2000)]})
+                else:
+                    self._send_json({"id": part.id, "content_type": part.content_type, "charset": part.charset,
+                                     "text": visible(part.text) if part.text is not None else None,
+                                     "source": part.text if part.content_type == "text/html" else None,
+                                     "size": len(part.decoded)})
+            else:
+                self._error(HTTPStatus.NOT_FOUND, "not found")
+        except KeyError:
+            self._error(HTTPStatus.NOT_FOUND, "email or part not found")
+        except ValueError as exc:
+            self._error(HTTPStatus.CONFLICT, str(exc))
+
+    def _soc(self, method: str, path: str, query: Dict[str, List[str]]) -> None:
+        wb = self.ctx.workbench
+        if wb is None:
+            self._error(HTTPStatus.NOT_IMPLEMENTED, "the investigation workbench is unavailable")
+            return
+        if method == "GET" and path == "/api/soc/sources":
+            self._send_json(wb.describe_sources())
+        elif method == "POST" and path == "/api/soc/parse":
+            self._send_json(wb.parse(str(self._body().get("text") or "")[:60000]))
+        elif method == "POST" and path == "/api/soc/lookup":
+            body = self._body()
+            try:
+                self._send_json(wb.lookup(str(body.get("source") or ""), str(body.get("type") or ""),
+                                          str(body.get("value") or ""), bool(body.get("refresh"))))
+            except KeyError as exc:
+                self._error(HTTPStatus.NOT_FOUND, str(exc.args[0]))
+        elif method == "GET" and path == "/api/soc/history":
+            self._send_json(wb.history(limit=_num(query, "limit", 50, lo=1, hi=500)))
+        elif method == "DELETE" and path == "/api/soc/history":
+            wb.clear_history()
+            self._send_json({"cleared": True})
+        elif path == "/api/soc/keys" or path.startswith("/api/soc/keys/"):
+            names = {s.key for s in wb.sources.values() if s.key}
+            if method == "POST" and path == "/api/soc/keys":
+                body = self._body()
+                name = str(body.get("name") or "")
+                if name not in names:
+                    raise _BadRequest(f"unknown key name: {name}")
+                wb.keys.set(name, str(body.get("value") or ""))
+                self._send_json({"name": name, "configured": wb.keys.configured(name)})
+            elif method == "DELETE":
+                name = unquote(path[len("/api/soc/keys/"):])
+                if name not in names:
+                    raise _BadRequest(f"unknown key name: {name}")
+                wb.keys.delete(name)
+                self._send_json({"name": name, "configured": wb.keys.configured(name)})
+            else:
+                self._error(HTTPStatus.NOT_FOUND, "not found")
         else:
             self._error(HTTPStatus.NOT_FOUND, "not found")
 

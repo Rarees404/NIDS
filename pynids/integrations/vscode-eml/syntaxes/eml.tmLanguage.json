@@ -1,0 +1,72 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Email source",
+  "scopeName": "text.eml.pynids",
+  "patterns": [
+    { "include": "#boundary" },
+    { "include": "#header-routing" },
+    { "include": "#header-auth" },
+    { "include": "#header-identity" },
+    { "include": "#header-mime" },
+    { "include": "#header-other" },
+    { "include": "#base64-line" },
+    { "include": "#inline" }
+  ],
+  "repository": {
+    "boundary": {
+      "match": "^--[^\\s]{4,}(--)?\\s*$",
+      "name": "markup.heading.boundary.eml"
+    },
+    "header-routing": {
+      "begin": "^(?i)(Received|Return-Path|X-Originating-IP|X-Sender-IP|Delivered-To|X-Received|Envelope-To|X-Forefront-Antispam-Report)(:)",
+      "beginCaptures": { "1": { "name": "keyword.control.header.routing.eml" }, "2": { "name": "punctuation.separator.eml" } },
+      "end": "^(?=\\S)",
+      "patterns": [{ "include": "#inline" }]
+    },
+    "header-auth": {
+      "begin": "^(?i)(Authentication-Results|ARC-Authentication-Results|ARC-Seal|ARC-Message-Signature|DKIM-Signature|Received-SPF|X-Google-DKIM-Signature)(:)",
+      "beginCaptures": { "1": { "name": "entity.name.function.header.auth.eml" }, "2": { "name": "punctuation.separator.eml" } },
+      "end": "^(?=\\S)",
+      "patterns": [
+        { "match": "\\b(spf|dkim|dmarc|arc|compauth)=(pass)\\b", "captures": { "1": { "name": "variable.parameter.eml" }, "2": { "name": "markup.inserted.pass.eml" } } },
+        { "match": "\\b(spf|dkim|dmarc|arc|compauth)=(fail|softfail|none|neutral|permerror|temperror)\\b", "captures": { "1": { "name": "variable.parameter.eml" }, "2": { "name": "invalid.illegal.fail.eml" } } },
+        { "match": "\\b([a-z]{1,2})=", "name": "variable.parameter.eml" },
+        { "include": "#inline" }
+      ]
+    },
+    "header-identity": {
+      "begin": "^(?i)(From|Sender|Reply-To|To|Cc|Bcc|Subject|Date|Message-ID|In-Reply-To|References|X-Mailer|User-Agent)(:)",
+      "beginCaptures": { "1": { "name": "entity.name.type.header.identity.eml" }, "2": { "name": "punctuation.separator.eml" } },
+      "end": "^(?=\\S)",
+      "patterns": [{ "include": "#inline" }]
+    },
+    "header-mime": {
+      "begin": "^(?i)(Content-[\\w-]+|MIME-Version)(:)",
+      "beginCaptures": { "1": { "name": "storage.type.header.mime.eml" }, "2": { "name": "punctuation.separator.eml" } },
+      "end": "^(?=\\S)",
+      "patterns": [
+        { "match": "\\b(boundary|charset|name|filename\\*?)(=)", "captures": { "1": { "name": "variable.parameter.eml" } } },
+        { "include": "#inline" }
+      ]
+    },
+    "header-other": {
+      "begin": "^([\\x21-\\x39\\x3b-\\x7e]+)(:)(?=\\s)",
+      "beginCaptures": { "1": { "name": "comment.header.other.eml" }, "2": { "name": "punctuation.separator.eml" } },
+      "end": "^(?=\\S)",
+      "patterns": [{ "include": "#inline" }]
+    },
+    "base64-line": {
+      "match": "^[A-Za-z0-9+/]{60,}={0,2}\\s*$",
+      "name": "comment.block.base64.eml"
+    },
+    "inline": {
+      "patterns": [
+        { "match": "=\\?[^?\\s]+\\?[bBqQ]\\?[^?\\s]*\\?=", "name": "string.other.encoded-word.eml" },
+        { "match": "\\bhttps?://[^\\s\"'<>()]+", "name": "markup.underline.link.eml" },
+        { "match": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b", "name": "constant.numeric.ip.eml" },
+        { "match": "[\\w.+-]+@[\\w-]+(?:\\.[\\w-]+)+", "name": "string.unquoted.address.eml" },
+        { "match": "[\\x{200B}-\\x{200F}\\x{202A}-\\x{202E}\\x{2060}-\\x{2069}\\x{FEFF}\\x{00AD}]", "name": "invalid.illegal.invisible.eml" }
+      ]
+    }
+  }
+}

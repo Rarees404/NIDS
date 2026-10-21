@@ -407,6 +407,7 @@ a.ext::after { content: " ↗"; }
 .steps li { font-family: var(--mono); font-size: 11.5px; }
 .ai-box code, .guide code { font-family: var(--mono); }
 </style>
+<link rel="stylesheet" href="/static/soc.css">
 </head>
 <body>
 
@@ -423,6 +424,8 @@ a.ext::after { content: " ↗"; }
     <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 2l2.2 6.3L20.5 10l-6.3 2.2L12 18.5l-2.2-6.3L3.5 10l6.3-1.7z" fill="currentColor"/></symbol>
     <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5.7 5.7l12.6 12.6" stroke="currentColor" stroke-width="2"/></symbol>
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 6.5 12 13l8.5-6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
   </defs>
 </svg>
@@ -438,10 +441,13 @@ a.ext::after { content: " ↗"; }
       <a href="#apps" data-tab="apps">Apps</a>
       <a href="#network" data-tab="network">Network</a>
       <a href="#protection" data-tab="protection">Protection</a>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <a href="#investigate" data-tab="investigate" class="soc"><svg aria-hidden="true"><use href="#i-search"/></svg>Investigate</a>
+      <a href="#email" data-tab="email" class="soc"><svg aria-hidden="true"><use href="#i-mail"/></svg>Email</a>
     </nav>
     <select class="tabs-select" id="tabSelect" aria-label="Section">
       <option value="overview">Overview</option><option value="connections">Connections</option><option value="events">Events</option>
-      <option value="apps">Apps</option><option value="network">Network</option><option value="protection">Protection</option>
+      <option value="apps">Apps</option><option value="network">Network</option><option value="protection">Protection</option><option value="investigate">Investigate</option><option value="email">Email</option>
     </select>
     <div class="spacer"></div>
     <button class="icon-btn update-btn" id="updateBtn" hidden title="A new version of PyNIDS is available"><svg><use href="#i-download"/></svg><span id="updateBtnText">Update</span></button>
@@ -625,6 +631,10 @@ a.ext::after { content: " ↗"; }
     </div>
   </section>
 
+  <!-- ===================================================== investigate (pynids/web/app/soc.js) -->
+  <section data-tab="investigate" id="tab-investigate"></section>
+  <section data-tab="email" id="tab-email"></section>
+
   <footer>
     PyNIDS <span id="ver"></span> · <button class="link" id="checkUpdateBtn">Check for updates</button> · data stays on this Mac unless you look up an IP or ask Claude · IP geolocation by <a href="https://db-ip.com" rel="noreferrer">DB-IP</a>
   </footer>
@@ -659,7 +669,7 @@ const KIND_LABELS = {
   localhost: "Localhost probes", doh: "Encrypted DNS", tracker: "Trackers", beacon: "Beacons & pixels",
   websocket: "WebSockets", quic: "QUIC / HTTP-3", prefetch: "DNS prefetch", host: "Programs & devices", other: "Other",
 };
-const TABS = ["overview", "connections", "events", "apps", "network", "protection"];
+const TABS = ["overview", "connections", "events", "apps", "network", "protection", "investigate", "email"];
 const state = {
   summary: null, alerts: [], kind: null, sev: "LOW", q: "", range: "live", app: null, group: true,
   remotes: [], timeline: [], rates: null, world: null, openAlert: null, tab: "overview",
@@ -1016,6 +1026,8 @@ function renderMap() {
 
 // ---------------------------------------------------------------- tabs
 function go(tab, opts = {}) {
+  let arg = null;  // deep link: #investigate/<indicator>
+  if (tab && tab.includes("/")) { arg = decodeURIComponent(tab.slice(tab.indexOf("/") + 1)); tab = tab.slice(0, tab.indexOf("/")); }
   if (!TABS.includes(tab)) tab = "overview";
   if (location.hash !== "#" + tab) { history.replaceState(null, "", "#" + tab); }
   state.tab = tab;
@@ -1029,6 +1041,8 @@ function go(tab, opts = {}) {
   if (tab === "apps") loadApps();
   if (tab === "events") renderEvents();
   if (tab === "protection") { loadBlocks(); loadAllowlist(); loadLaunchItems(); loadIntel().catch(() => {}); }
+  if (tab === "investigate" && typeof socShow === "function") socShow(arg);
+  if (tab === "email" && typeof mailShow === "function") mailShow(arg);
 }
 addEventListener("hashchange", () => go(location.hash.slice(1), { noscroll: true }));
 $("tabSelect").addEventListener("change", (e) => go(e.target.value));
@@ -1226,7 +1240,8 @@ function openDrawer(a, push) {
       const similar = similarAlerts(a);
       return [
         guideBox(a.about),
-        el("div", { class: "actions" }, explainBtn, blockBtn, expectMenu(a)),
+        el("div", { class: "actions" }, explainBtn, blockBtn, expectMenu(a),
+          subjectOf(a) ? el("button", { class: "btn", onclick: () => { closeDrawer(); investigate(subjectOf(a)); } }, icon("i-search"), "Investigate") : null),
         aiBox,
         el("h4", { text: "Connection" }),
         kvList([
@@ -1301,6 +1316,7 @@ function dossierView(d) {
       return [
         el("div", { class: "actions", style: "margin-top:0" }, lookupBtn,
           el("button", { class: "btn danger", disabled: L.scope === "loopback", onclick: () => blockIp(d.ip, "Blocked from the IP dossier") }, icon("i-ban"), "Block"),
+          L.scope === "internet" ? el("button", { class: "btn", onclick: () => { closeDrawer(); investigate(d.ip); } }, icon("i-search"), "Investigate") : null,
           d.virustotal ? el("a", { class: "btn ext", href: d.virustotal, target: "_blank", rel: "noreferrer noopener" }, "VirusTotal") : null),
         el("h4", { text: "What PyNIDS saw" }),
         kvList([
@@ -1885,5 +1901,7 @@ addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setT
   setInterval(refreshSlow, 6000);
 })();
 </script>
+<script src="/static/soc.js"></script>
+<script src="/static/mail.js"></script>
 </body>
 </html>
