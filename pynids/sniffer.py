@@ -33,6 +33,8 @@ Meta dictionary keys
 ``ip_ttl``         int    — IP TTL / Hop Limit
 ``ip_tos``         int    — IP TOS / DSCP byte
 ``packet_len``     int    — Total captured packet length in bytes
+``malformed``      bool   — Present (True) when a header was invalid; the
+                            packet's other fields are then left empty
 """
 from __future__ import annotations
 
@@ -72,6 +74,13 @@ _LINK_OFFSETS = {
 }
 
 _IPV6_EXT_HEADERS = frozenset({0, 43, 60})  # hop-by-hop, routing, destination options
+_IPV6_AH = 51
+_IPV6_FRAGMENT = 44
+_IPV6_MAX_EXT_HEADERS = 16
+
+
+class _Malformed(ValueError):
+    """A header field that no valid packet can carry (e.g. IPv4 IHL < 5)."""
 
 
 def _empty_meta(ts: float, length: int) -> Dict[str, Any]:
@@ -114,8 +123,11 @@ def decode_frame(frame: bytes, link: str = "Ether", ts: float = 0.0) -> Dict[str
             if ethertype not in (0x0800, 0x86DD):
                 return meta
         _decode_ip(frame, offset, meta)
+    except _Malformed:
+        meta = _empty_meta(ts, len(frame))
+        meta["malformed"] = True
     except (struct.error, IndexError, ValueError, OSError):
-        pass  # truncated / malformed: keep whatever was decoded
+        pass  # truncated: keep whatever was decoded
     return meta
 
 
@@ -123,6 +135,8 @@ def _decode_ip(frame: bytes, o: int, meta: Dict[str, Any]) -> None:
     version = frame[o] >> 4
     if version == 4:
         ihl = (frame[o] & 0x0F) * 4
+        if ihl < 20:
+            raise _Malformed("IPv4 IHL < 5")
         total = _U16.unpack_from(frame, o + 2)[0]
         fragment_offset = _U16.unpack_from(frame, o + 6)[0] & 0x1FFF
         meta["ip_tos"] = frame[o + 1]
@@ -147,17 +161,23 @@ def _decode_ip(frame: bytes, o: int, meta: Dict[str, Any]) -> None:
         meta["dst_ip"] = _ntop6(frame[o + 24:o + 40])
         l4 = o + 40
         end = l4 + payload_len if payload_len else len(frame)
-        while proto in _IPV6_EXT_HEADERS:
-            proto, hdr_len = frame[l4], (frame[l4 + 1] + 1) * 8
-            l4 += hdr_len
-        if proto == 44:  # fragment header
-            proto = frame[l4]
-            fragment_offset = _U16.unpack_from(frame, l4 + 2)[0] >> 3
-            l4 += 8
-            if fragment_offset:
-                meta["protocol"] = "other"
-                meta["payload_bytes"] = frame[l4:end]
-                return
+        # Walk the extension-header chain; options may follow a fragment header.
+        for _ in range(_IPV6_MAX_EXT_HEADERS):
+            if proto in _IPV6_EXT_HEADERS:
+                proto, l4 = frame[l4], l4 + (frame[l4 + 1] + 1) * 8
+            elif proto == _IPV6_AH:  # length in 4-octet units, minus 2
+                proto, l4 = frame[l4], l4 + (frame[l4 + 1] + 2) * 4
+            elif proto == _IPV6_FRAGMENT:
+                fragment_offset = _U16.unpack_from(frame, l4 + 2)[0] >> 3
+                proto, l4 = frame[l4], l4 + 8
+                if fragment_offset:  # later fragments carry no L4 header
+                    meta["protocol"] = "other"
+                    meta["payload_bytes"] = frame[l4:end]
+                    return
+            else:
+                break
+        else:
+            raise _Malformed("IPv6 extension-header chain too long")
     else:
         return
 
@@ -165,6 +185,8 @@ def _decode_ip(frame: bytes, o: int, meta: Dict[str, Any]) -> None:
         meta["protocol"] = "tcp"
         meta["src_port"], meta["dst_port"] = _PORTS.unpack_from(frame, l4)
         data_offset = (frame[l4 + 12] >> 4) * 4
+        if data_offset < 20:
+            raise _Malformed("TCP data offset < 5")
         meta["tcp_flags"] = ((frame[l4 + 12] & 0x01) << 8) | frame[l4 + 13]
         meta["payload_bytes"] = frame[l4 + data_offset:end]
     elif proto == 17:

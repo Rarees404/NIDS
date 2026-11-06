@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import List, Optional
 
 SYSTEM_DIR = Path("/Library/Application Support/PyNIDS")
 LOG_DIR = Path("/Library/Logs/PyNIDS")
@@ -99,6 +100,11 @@ def soc_keys_path() -> Path:
     return data_dir() / "soc-keys.json"
 
 
+def notifications_off_flag_path() -> Path:
+    """Present while notifications are switched off, so the choice survives restarts."""
+    return data_dir() / "notifications-off"
+
+
 def daemon_config_path() -> Path:
     return data_dir() / "config.yaml"
 
@@ -109,3 +115,27 @@ def read_api_token() -> str:
         return token_path().read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def console_owner_uid() -> Optional[int]:
+    """
+    The non-root user the daemon works for: the owner of the git checkout it
+    runs from, else the user who ran ``sudo``, else the user at the GUI.
+    Root-only files that this user's CLI / menu bar app must read are handed
+    to them.
+    """
+    candidates: List[Optional[int]] = []
+    repo = Path(__file__).resolve().parents[1]
+    try:
+        if (repo / ".git").exists():
+            candidates.append(repo.stat().st_uid)
+    except OSError:
+        pass
+    sudo_uid = os.environ.get("SUDO_UID", "")
+    if sudo_uid.isdigit():
+        candidates.append(int(sudo_uid))
+    try:
+        candidates.append(os.stat("/dev/console").st_uid)
+    except OSError:
+        pass
+    return next((uid for uid in candidates if uid), None)

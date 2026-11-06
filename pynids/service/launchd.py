@@ -79,6 +79,14 @@ def uninstall() -> bool:
 def restart() -> None:
     if os.geteuid() != 0:
         raise PermissionError("Restarting the daemon needs root: sudo pynids daemon restart")
+    if not PLIST_PATH.exists():
+        raise RuntimeError("The daemon isn't installed. Install it with: sudo .venv/bin/pynids daemon install")
+    if launchd_state() is None:
+        # Installed but not loaded (e.g. booted out): load it again, which starts it.
+        code, out = _launchctl("bootstrap", "system", str(PLIST_PATH))
+        if code != 0:
+            raise RuntimeError(f"launchctl bootstrap failed: {out}")
+        return
     code, out = _launchctl("kickstart", "-k", f"system/{LABEL}")
     if code != 0:
         raise RuntimeError(f"launchctl kickstart failed: {out}")

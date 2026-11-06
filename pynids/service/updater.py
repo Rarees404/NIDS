@@ -12,8 +12,8 @@ The daemon does it so the dashboard and menu bar app can offer a one-click
    ``pyproject.toml`` changed, then import the new code in a fresh
    interpreter.  Any failure rolls the checkout back (``git reset --keep``,
    which never touches uncommitted edits).
-3. **Restart** — the daemon exits with code 75 and launchd starts the new
-   version a few seconds later.  The menu bar app notices that its own
+3. **Restart** — the daemon shuts down and re-executes itself, so the new
+   code is loaded.  The menu bar app notices that its own
    sources (``macos/``) changed and rebuilds itself.
 
 The daemon runs as root, but the checkout belongs to the user who cloned
@@ -26,6 +26,7 @@ reason is shown instead.
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -82,7 +83,8 @@ class Updater:
         self.broadcast = broadcast or (lambda kind, data: None)
         self.interval = max(0.0, float(interval_hours)) * 3600
         self.extras = extras
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()        # one check / install at a time
+        self._info_lock = threading.Lock()   # guards _info (read by API threads)
         self._stop = threading.Event()
         self._info: Dict[str, Any] = {
             "supported": self.repo is not None,
@@ -126,7 +128,8 @@ class Updater:
     # --- status --------------------------------------------------------------
 
     def status(self) -> Dict[str, Any]:
-        info = dict(self._info)
+        with self._info_lock:
+            info = copy.deepcopy(self._info)
         info["last_update"] = self._last_update()
         if self.repo is not None:
             try:
@@ -138,12 +141,21 @@ class Updater:
 
     def brief(self) -> Dict[str, Any]:
         """Small subset folded into /api/summary for the header / menu bar."""
-        i = self._info
-        return {k: i.get(k) for k in ("supported", "state", "available", "latest_version",
-                                      "behind", "step", "error", "blocked")}
+        with self._info_lock:
+            i = self._info
+            return {k: i.get(k) for k in ("supported", "state", "available", "latest_version",
+                                          "behind", "step", "error", "blocked")}
+
+    def _get(self, key: str) -> Any:
+        with self._info_lock:
+            return self._info.get(key)
+
+    def _update(self, **kw: Any) -> None:
+        with self._info_lock:
+            self._info.update(kw)
 
     def _set(self, **kw: Any) -> None:
-        self._info.update(kw)
+        self._update(**kw)
         self.broadcast("update", self.brief())
 
     def _last_update(self) -> Optional[Dict[str, Any]]:
@@ -202,7 +214,7 @@ class Updater:
                 blocked = ("You have unsaved edits to files this update changes: "
                            + ", ".join(clash[:5]) + (" …" if len(clash) > 5 else "")
                            + ". Commit or discard them, then update.")
-        self._info.update(
+        self._update(
             branch=branch, remote=url, current_commit=head[:7], latest_commit=latest[:7],
             latest_version=m.group(1) if m else None, behind=behind, ahead=ahead,
             commits=commits, available=behind > 0, blocked=blocked, checked_at=time.time(),
@@ -213,7 +225,7 @@ class Updater:
     def apply(self) -> Dict[str, Any]:
         """Start the update in the background; poll status() for progress."""
         if self.repo is None:
-            raise UpdateError(self._info.get("error") or "updates are unavailable")
+            raise UpdateError(self._get("error") or "updates are unavailable")
         if not self._lock.acquire(blocking=False):
             raise UpdateError("An update check or install is already running.")
         self._set(state="updating", step="Checking GitHub…", error=None)
@@ -221,17 +233,30 @@ class Updater:
         return self.status()
 
     def _apply_locked(self) -> None:
+        try:
+            self._apply()
+        except Exception as exc:  # noqa: BLE001 — a thread must never die holding the lock
+            logger.error("Update failed: %s", exc)
+            self._set(state="error", step=None, error=f"Update failed: {exc}")
+        finally:
+            self._lock.release()
+
+    def _pip_install(self) -> None:
+        spec = f".[{self.extras}]" if self.extras else "."
+        self._run(self.python, "-m", "pip", "install", "--quiet", "-e", spec, timeout=900)
+
+    def _apply(self) -> None:
         old = None
+        installed = False
         try:
             self._check_locked()
-            if not self._info.get("behind"):
+            if not self._get("behind"):
                 self._set(state="idle", step=None, available=False)
-                self._lock.release()
                 return
-            if self._info.get("blocked"):
-                raise UpdateError(self._info["blocked"])
+            if self._get("blocked"):
+                raise UpdateError(self._get("blocked"))
             old = self._git("rev-parse", "HEAD")
-            target = f"refs/remotes/origin/{self._info['branch']}"
+            target = f"refs/remotes/origin/{self._get('branch')}"
 
             self._set(step="Downloading the new version…")
             self._git("merge", "--ff-only", "--quiet", target)
@@ -240,12 +265,12 @@ class Updater:
 
             if "pyproject.toml" in changed:
                 self._set(step="Installing new dependencies…")
-                spec = f".[{self.extras}]" if self.extras else "."
-                self._run(self.python, "-m", "pip", "install", "--quiet", "-e", spec, timeout=900)
+                installed = True
+                self._pip_install()
 
             self._set(step="Verifying the new version…")
             self._run(self.python, "-I", "-c", "import pynids.cli, pynids.service.daemon", timeout=120)
-        except Exception as exc:  # noqa: BLE001 — roll back and release the lock on anything
+        except Exception as exc:  # noqa: BLE001 — roll back on anything
             logger.error("Update failed: %s", exc)
             rolled = ""
             if old:
@@ -255,12 +280,19 @@ class Updater:
                 except (UpdateError, OSError, subprocess.SubprocessError) as rb:
                     logger.error("Rollback failed: %s", rb)
                     rolled = " Rolling back failed too; run `git status` in the PyNIDS folder."
+                    installed = False
+            if installed:
+                # The new pyproject's dependencies were (partly) installed:
+                # put the environment back in line with the restored code.
+                try:
+                    self._pip_install()
+                except (UpdateError, OSError, subprocess.SubprocessError) as rb:
+                    logger.error("Reinstalling the previous version's dependencies failed: %s", rb)
             self._set(state="error", step=None, error=f"Update failed: {exc}.{rolled}")
-            self._lock.release()
             return
 
         record = {"from": old[:7], "to": new[:7], "at": time.time(),
-                  "version": self._info.get("latest_version"), "app_changed": any(
+                  "version": self._get("latest_version"), "app_changed": any(
                       p.startswith("macos/") or p == "pyproject.toml" for p in changed)}
         if self.state_file:
             try:
@@ -269,15 +301,18 @@ class Updater:
             except OSError as exc:
                 logger.debug("could not record update: %s", exc)
         logger.warning("Updated %s → %s; restarting", old[:7], new[:7])
-        self._info.update(available=False, behind=0, commits=[], current_commit=new[:7])
+        self._update(available=False, behind=0, commits=[], current_commit=new[:7])
         if self.on_restart is None:
             self._set(state="restart-needed", step="Restart PyNIDS to finish updating.")
-            self._lock.release()
             return
         self._set(state="restarting", step="Restarting PyNIDS…")
         # Give the API a moment to report "restarting" before we go away.
         time.sleep(1.5)
-        self.on_restart()
+        try:
+            self.on_restart()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Restart after update failed: %s", exc)
+            self._set(state="restart-needed", step="Restart PyNIDS to finish updating.")
 
     # --- background checks ---------------------------------------------------
 

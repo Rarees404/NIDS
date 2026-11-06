@@ -144,6 +144,9 @@ main { max-width: 1440px; margin: 0 auto; padding: 20px 24px 64px; }
   border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
 }
 .banner.show { display: flex; }
+.banner.conn.bad { background: color-mix(in srgb, var(--critical) 12%, var(--surface)); border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
+/* daemon unreachable: old data stays visible but is visibly dimmed */
+body.stale main section .card, body.stale .kpis { opacity: .55; filter: grayscale(.4); transition: opacity .2s; }
 .banner code { font-family: var(--mono); font-size: 12.5px; background: var(--surface); padding: 1px 6px; border-radius: 6px; border: 1px solid var(--border); }
 .grid { display: grid; gap: 16px; }
 .kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); }
@@ -458,6 +461,7 @@ a.ext::after { content: " ↗"; }
 </header>
 
 <main>
+  <div class="banner conn" id="connBanner" role="alert"></div>
   <div class="banner" id="banner" role="status"></div>
 
   <!-- ===================================================== overview -->
@@ -659,9 +663,8 @@ a.ext::after { content: " ↗"; }
 <script src="/static/d3-geo.min.js"></script>
 <script src="/static/topojson-client.min.js"></script>
 
-<script>
+<script nonce="__PYNIDS_NONCE__">
 "use strict";
-const TOKEN = "__PYNIDS_TOKEN__";
 const $ = (id) => document.getElementById(id);
 const SEV_ORDER = { LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
 const KIND_LABELS = {
@@ -737,12 +740,90 @@ function sevBadge(sev) {
   return el("span", { class: "sev " + sev }, icon(ids[sev] || "i-info"), names[sev] || sev);
 }
 
+/** Only http(s) links from data (source metadata, scan reports …) become hrefs. */
+function safeHref(u) {
+  if (u == null || u === "") return null;
+  try {
+    const x = new URL(String(u), location.href);
+    return x.protocol === "https:" || x.protocol === "http:" ? x.href : null;
+  } catch (_) { return null; }
+}
+
+// ---------------------------------------------------------------- API
+// Same-origin requests: the HttpOnly session cookie (set by /?auth=<token>)
+// authenticates them, so no token lives in this page.
+class ApiError extends Error {
+  constructor(message, status, offline) { super(message); this.status = status || 0; this.offline = !!offline; }
+}
+const API_TIMEOUT_MS = 8000;
+let sessionExpired = false;
+/** Calls that wait on outside services or long jobs pass `timeout` (ms, 0 = none);
+ * by default GETs give up after 8 s and other methods wait. */
 async function api(path, opts = {}) {
-  const res = await fetch(path, { ...opts, headers: { "X-PyNIDS-Token": TOKEN, "Content-Type": "application/json", ...(opts.headers || {}) } });
-  let data = null;
-  try { data = await res.json(); } catch (_) { /* empty body */ }
-  if (!res.ok) throw new Error((data && data.error) || res.statusText);
+  if (sessionExpired) throw new ApiError("Session expired", 401);
+  const { timeout, headers, ...rest } = opts;
+  const ms = timeout != null ? timeout : (!rest.method || rest.method === "GET") ? API_TIMEOUT_MS : 0;
+  const ctl = new AbortController();
+  const timer = ms ? setTimeout(() => ctl.abort(), ms) : null;
+  let res;
+  try {
+    res = await fetch(path, { ...rest, credentials: "same-origin", signal: ctl.signal,
+      headers: { "Content-Type": "application/json", ...(headers || {}) } });
+  } catch (e) {
+    throw new ApiError(ctl.signal.aborted ? "PyNIDS didn't answer in time" : "Can't reach PyNIDS — is the service running?", 0, true);
+  } finally { clearTimeout(timer); }
+  if (res.status === 401) { onSessionExpired(); throw new ApiError("Session expired", 401); }
+  const type = res.headers.get("Content-Type") || "";
+  let data = null, text = "";
+  try {
+    if (type.includes("json")) data = await res.json();
+    else text = await res.text();
+  } catch (_) { /* empty or truncated body */ }
+  if (!res.ok) {
+    const msg = (data && data.error) || (text && !/^\s*</.test(text) ? text.trim().slice(0, 200) : "") || `${res.status} ${res.statusText || "error"}`;
+    throw new ApiError(msg, res.status);
+  }
   return data;
+}
+/** Coalesce overlapping calls of a loader: a second call while one is running
+ * shares its result instead of piling another request on the daemon. */
+const _inflight = new Map();
+function once(key, fn) {
+  if (_inflight.has(key)) return _inflight.get(key);
+  const p = (async () => { try { return await fn(); } finally { _inflight.delete(key); } })();
+  _inflight.set(key, p);
+  return p;
+}
+
+let pollTimers = [], stream = null;
+function onSessionExpired() {
+  if (sessionExpired) return;
+  sessionExpired = true;
+  pollTimers.forEach(clearInterval); pollTimers = [];
+  if (stream) { stream.close(); stream = null; }
+  const b = $("connBanner");
+  b.className = "banner conn show bad";
+  b.replaceChildren(icon("i-warn"), el("div", {}, el("b", { text: "Session expired — " }),
+    "reopen the dashboard with ", el("code", { text: "pynids open" }), " or from the menu bar app."));
+  $("statusDot").className = "dot bad"; $("statusText").textContent = "Session expired";
+}
+/** The daemon stopped answering: keep the last data on screen but say it is old. */
+let staleSince = null;
+function setStale(stale) {
+  if (sessionExpired) return;
+  const b = $("connBanner");
+  if (stale) {
+    if (!staleSince) staleSince = Date.now();
+    document.body.classList.add("stale");
+    b.className = "banner conn show";
+    b.replaceChildren(icon("i-warn"), el("div", {}, el("b", { text: "Can't reach PyNIDS. " }),
+      `What you see is from ${new Date(staleSince).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} and may be out of date. Retrying…`));
+    $("statusDot").className = "dot bad"; $("statusText").textContent = "Daemon unreachable · stale";
+  } else if (staleSince) {
+    staleSince = null;
+    document.body.classList.remove("stale");
+    b.className = "banner conn"; b.replaceChildren();
+  }
 }
 
 // ---------------------------------------------------------------- tooltip
@@ -1025,11 +1106,46 @@ function renderMap() {
 
 
 // ---------------------------------------------------------------- tabs
-function go(tab, opts = {}) {
-  let arg = null;  // deep link: #investigate/<indicator>
-  if (tab && tab.includes("/")) { arg = decodeURIComponent(tab.slice(tab.indexOf("/") + 1)); tab = tab.slice(0, tab.indexOf("/")); }
-  if (!TABS.includes(tab)) tab = "overview";
-  if (location.hash !== "#" + tab) { history.replaceState(null, "", "#" + tab); }
+// Routes are "#<tab>" or "#<tab>/<arg>" (#investigate/<indicator>, #email/<sha256>).
+// In-app navigation pushes a history entry marked {pynids: 1}; entries the page
+// didn't create (a link from another site, a typed URL) carry no mark, and
+// for those Investigate only pre-fills the indicator instead of sending it to
+// outside sources by itself.
+function routeHash(tab, arg) { return "#" + tab + (arg != null && arg !== "" ? "/" + encodeURIComponent(arg) : ""); }
+function trustedEntry() { return !!(history.state && history.state.pynids); }
+/** Record an in-app navigation (pivot, opening an email …) in the URL. */
+function setRoute(route, opts = {}) {
+  const hash = "#" + route;
+  if (location.hash === hash) { if (!trustedEntry()) history.replaceState({ pynids: 1 }, "", hash); }
+  else if (opts.replace) history.replaceState({ pynids: 1 }, "", hash);
+  else history.pushState({ pynids: 1 }, "", hash);
+  shownHash = location.hash;
+}
+/** The view a tab was last showing, so clicking its nav link returns there. */
+function rememberedArg(tab) {
+  if (tab === "investigate" && typeof SOC !== "undefined" && SOC.ioc) return SOC.ioc.value;
+  if (tab === "email" && typeof MAIL !== "undefined" && MAIL.a) return MAIL.a.sha256;
+  return null;
+}
+let shownHash = null;
+function go(route, opts = {}) {
+  let tab = route || "", arg = null;
+  const cut = tab.indexOf("/");
+  if (cut >= 0) {
+    const raw = tab.slice(cut + 1);
+    try { arg = decodeURIComponent(raw); } catch (_) { arg = raw; }
+    tab = tab.slice(0, cut);
+  }
+  if (!TABS.includes(tab)) { tab = "overview"; arg = null; }
+  if (arg === "") arg = null;
+  // opts.fromHistory: the URL already changed (Back/Forward, typed URL, first load).
+  if (arg == null && !opts.fromHistory) arg = rememberedArg(tab);
+  const hash = routeHash(tab, arg);
+  if (location.hash !== hash) {
+    if (opts.fromHistory) history.replaceState(history.state, "", hash);
+    else history.pushState({ pynids: 1 }, "", hash);
+  }
+  shownHash = location.hash;
   state.tab = tab;
   document.querySelectorAll("section[data-tab]").forEach((s) => s.classList.toggle("active", s.dataset.tab === tab));
   document.querySelectorAll("#nav a").forEach((a) => { if (a.dataset.tab === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
@@ -1041,10 +1157,26 @@ function go(tab, opts = {}) {
   if (tab === "apps") loadApps();
   if (tab === "events") renderEvents();
   if (tab === "protection") { loadBlocks(); loadAllowlist(); loadLaunchItems(); loadIntel().catch(() => {}); }
-  if (tab === "investigate" && typeof socShow === "function") socShow(arg);
-  if (tab === "email" && typeof mailShow === "function") mailShow(arg);
+  // Lookups run by themselves only for navigation this page made; a deep link
+  // from elsewhere just pre-fills the indicator and waits for a click.
+  const auto = !opts.fromHistory || trustedEntry();
+  if (tab === "investigate" && typeof socShow === "function") socShow(arg, { auto, fromHistory: !!opts.fromHistory });
+  if (tab === "email" && typeof mailShow === "function") mailShow(arg, { fromHistory: !!opts.fromHistory });
 }
-addEventListener("hashchange", () => go(location.hash.slice(1), { noscroll: true }));
+function onLocationChange() {
+  if (location.hash === shownHash) return;  // popstate and hashchange both fire for one step
+  go(location.hash.slice(1), { noscroll: true, fromHistory: true });
+}
+addEventListener("popstate", onLocationChange);
+addEventListener("hashchange", onLocationChange);
+// Nav links are in-app navigation: handle them here so they push a marked
+// entry and return to the view the tab was last showing.
+$("nav").addEventListener("click", (e) => {
+  const a = e.target.closest("a[data-tab]");
+  if (!a || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+  e.preventDefault();
+  go(a.dataset.tab);
+});
 $("tabSelect").addEventListener("change", (e) => go(e.target.value));
 
 // ---------------------------------------------------------------- shared bits
@@ -1124,7 +1256,15 @@ function closeDrawer() {
 $("drawerClose").addEventListener("click", closeDrawer);
 $("drawerBack").addEventListener("click", () => { drawerStack.pop(); paintDrawer(); });
 $("scrim").addEventListener("click", closeDrawer);
-addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+function isEditable(node) {
+  return !!node && (/^(INPUT|TEXTAREA|SELECT)$/.test(node.tagName) || node.isContentEditable);
+}
+addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || !isOpen()) return;
+  // Escape while typing only leaves the field; a second Escape closes the drawer.
+  if (isEditable(document.activeElement)) { document.activeElement.blur(); return; }
+  closeDrawer();
+});
 function isOpen() { return $("drawer").classList.contains("show"); }
 function loadingView(title) { return { title, head: [], body: () => [el("div", { style: "display:flex;gap:8px;align-items:center;color:var(--ink-2)" }, el("span", { class: "spinner" }), "Loading…")] }; }
 
@@ -1277,7 +1417,7 @@ async function openDossier(ip, opts = {}) {
   const push = isOpen();
   if (!opts.replace) showDrawer(loadingView(ip), push);
   let d;
-  try { d = await api("/api/dossier/" + encodeURIComponent(ip) + (opts.external ? "?external=1" + (opts.refresh ? "&refresh=1" : "") : "")); }
+  try { d = await api("/api/dossier/" + encodeURIComponent(ip) + (opts.external ? "?external=1" + (opts.refresh ? "&refresh=1" : "") : ""), { timeout: opts.external ? 60000 : 20000 }); }
   catch (e) { drawerStack.pop(); toast(e.message); paintDrawer(); return; }
   const view = dossierView(d);
   drawerStack[drawerStack.length - 1] = view;
@@ -1344,7 +1484,7 @@ async function openProgram(exe) {
   const push = isOpen();
   showDrawer(loadingView(exe.split("/").pop()), push);
   let p;
-  try { p = await api("/api/program?exe=" + encodeURIComponent(exe)); }
+  try { p = await api("/api/program?exe=" + encodeURIComponent(exe), { timeout: 30000 }); }
   catch (e) { drawerStack.pop(); toast(e.message); paintDrawer(); return; }
   drawerStack[drawerStack.length - 1] = programView(p);
   paintDrawer();
@@ -1422,7 +1562,8 @@ async function openApp(name) {
 }
 
 // ---------------------------------------------------------------- overview: attention + Claude
-async function loadAttention() {
+function loadAttention() { return once("attention", loadAttentionNow); }
+async function loadAttentionNow() {
   let r;
   try { r = await api("/api/attention"); } catch (_) { return; }
   const host = $("attention");
@@ -1448,24 +1589,34 @@ const SUGGESTIONS = [
 $("askSuggest").replaceChildren(...SUGGESTIONS.map((q) => el("button", { onclick: () => { $("askInput").value = q; askClaude(q); } }, q)));
 $("askBtn").addEventListener("click", () => askClaude($("askInput").value));
 $("askInput").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) askClaude($("askInput").value); });
+// One investigation at a time: each is a paid API call.  The button, Cmd+Enter,
+// the suggestions and "Ask Claude about it" all go through askClaude, and the
+// 3-second summary refresh must not re-enable the button mid-run.
+const ask = { inFlight: false, available: false };
+function syncAskBtn() { $("askBtn").disabled = ask.inFlight || !ask.available; }
 async function askClaude(q) {
+  if (ask.inFlight) { toast("Claude is still working on the previous question"); return; }
+  if (!ask.available) { toast("Ask Claude needs an Anthropic API key: sudo pynids ai set-key"); return; }
   q = (q || "").trim();
   if (!q) { $("askInput").focus(); return; }
   $("askInput").value = q;
-  const out = $("askOut"), btn = $("askBtn");
-  btn.disabled = true;
+  ask.inFlight = true; syncAskBtn();
+  const out = $("askOut");
   const started = Date.now();
-  const box = el("div", { class: "ai-box show", style: "margin-top:14px" }, el("div", { style: "display:flex;gap:8px;align-items:center;color:var(--ink-2)" }, el("span", { class: "spinner" }), el("span", { id: "askTimer", text: "Claude is looking at your connections, programs and alerts…" })));
+  const label = el("span", { text: "Claude is looking at your connections, programs and alerts…" });
+  const box = el("div", { class: "ai-box show", style: "margin-top:14px" }, el("div", { style: "display:flex;gap:8px;align-items:center;color:var(--ink-2)" }, el("span", { class: "spinner" }), label));
   out.replaceChildren(box);
-  const timer = setInterval(() => { const t = $("askTimer"); if (t) t.textContent = `Claude is investigating… ${Math.round((Date.now() - started) / 1000)}s`; }, 1000);
+  const timer = setInterval(() => { label.textContent = `Claude is investigating… ${Math.round((Date.now() - started) / 1000)}s`; }, 1000);
   try { box.replaceChildren(...claudeAnswer(await api("/api/investigate", { method: "POST", body: JSON.stringify({ question: q }) }))); }
   catch (e) { box.replaceChildren(el("div", { text: e.message })); }
-  clearInterval(timer);
-  btn.disabled = false;
+  finally {
+    clearInterval(timer);
+    ask.inFlight = false; syncAskBtn();
+  }
 }
 function renderAskAvailability(st) {
   const ok = !!st.ai;
-  $("askBtn").disabled = !ok;
+  ask.available = ok; syncAskBtn();
   $("askNote").replaceChildren(ok ? "Read-only: Claude can look, not change anything." : el("span", {}, "Needs an Anthropic API key: ", el("code", { text: "sudo pynids ai set-key" })));
 }
 
@@ -1479,9 +1630,10 @@ document.querySelectorAll("#connFilter button").forEach((b) => b.addEventListene
 let connSearchTimer;
 $("connSearch").addEventListener("input", (e) => { clearTimeout(connSearchTimer); connSearchTimer = setTimeout(() => { state.connQ = e.target.value.trim().toLowerCase(); renderConnections(); }, 150); });
 $("connRefresh").addEventListener("click", () => loadConnections());
-async function loadConnections() {
+function loadConnections() { return once("connections", loadConnectionsNow); }
+async function loadConnectionsNow() {
   try { state.conns = await api("/api/connections"); }
-  catch (e) { $("progTable").replaceChildren(emptyBox(e.message)); return; }
+  catch (e) { if (!(e.offline && state.conns)) $("progTable").replaceChildren(emptyBox(e.message)); return; }  // offline: keep the (dimmed) last data
   renderConnections();
 }
 function updateConnBadge(n) { const b = $("navConnN"); b.hidden = !n; b.textContent = n || ""; }
@@ -1551,7 +1703,8 @@ function renderConnections() {
 }
 
 // ---------------------------------------------------------------- apps
-async function loadApps() {
+function loadApps() { return once("apps", loadAppsNow); }
+async function loadAppsNow() {
   let apps;
   try { apps = await api("/api/apps?limit=60"); } catch (_) { return; }
   const host = $("appsTable");
@@ -1591,6 +1744,7 @@ function alertMatches(a) {
   }
   return true;
 }
+let loadAlertsGen = 0;
 async function loadAlerts() {
   const params = new URLSearchParams({ limit: "500", min_severity: state.sev });
   if (state.kind) params.set("kind", state.kind);
@@ -1598,8 +1752,13 @@ async function loadAlerts() {
   if (state.app) params.set("app", state.app);
   if (state.range !== "live") params.set("since", String(Date.now() / 1000 - Number(state.range)));
   else if (state.summary) params.set("since", String(Date.now() / 1000 - state.summary.uptime - 5));
+  // Filters change faster than queries return: only the newest request may paint.
+  const gen = ++loadAlertsGen;
   $("eventList").style.opacity = 0.6;
-  try { state.alerts = await api("/api/alerts?" + params); } catch (e) { toast(e.message); }
+  let rows = null, err = null;
+  try { rows = await api("/api/alerts?" + params, { timeout: 20000 }); } catch (e) { err = e; }
+  if (gen !== loadAlertsGen) return;
+  if (rows) state.alerts = rows; else if (err && !sessionExpired) toast(err.message);
   $("eventList").style.opacity = 1;
   renderKindFilters();
   renderEvents();
@@ -1654,9 +1813,10 @@ $("groupToggle").addEventListener("change", (e) => { state.group = e.target.chec
 try { if (localStorage.getItem("pynids-group") === "0") { state.group = false; $("groupToggle").checked = false; } } catch (_) {}
 
 // ---------------------------------------------------------------- network: LAN devices
-async function loadDevices() {
+function loadDevices() { return once("devices", loadDevicesNow); }
+async function loadDevicesNow() {
   let r;
-  try { r = await api("/api/devices"); } catch (e) { $("lanTable").replaceChildren(emptyBox(e.message)); return; }
+  try { r = await api("/api/devices"); } catch (e) { if (!(e.offline && state.devices)) $("lanTable").replaceChildren(emptyBox(e.message)); return; }
   state.devices = r.devices; state.nmap = r.nmap;
   const own = ((state.summary || {}).status || {}).local_ips || [];
   const self = own.find((ip) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip));
@@ -1719,7 +1879,7 @@ async function loadAllowlist() {
 }
 async function loadLaunchItems(refresh) {
   const host = $("launchTable");
-  try { state.launch = await api("/api/launch-items" + (refresh ? "?refresh=1" : "")); } catch (e) { host.replaceChildren(emptyBox(e.message)); return; }
+  try { state.launch = await api("/api/launch-items" + (refresh ? "?refresh=1" : ""), { timeout: 30000 }); } catch (e) { host.replaceChildren(emptyBox(e.message)); return; }
   renderLaunchItems();
   // Signatures are checked in the background; fill them in once they're ready.
   if (state.launch.some((j) => j.program && !j.signature) && (loadLaunchItems.retries = (loadLaunchItems.retries || 0) + 1) <= 3)
@@ -1817,28 +1977,73 @@ async function openUpdate(check) {
   drawerStack[drawerStack.length - 1] = updateView.view;
   paintDrawer();
 }
+/** What identifies one run of the daemon: a restart changes the start time
+ * (and an update usually the version). */
+function daemonIdentity(s) {
+  const st = (s && s.status) || {};
+  return {
+    version: st.version || null,
+    boot: st.boot_id || st.started || null,  // used if the API exposes one
+    started: st.uptime != null ? Date.now() / 1000 - st.uptime : null,
+  };
+}
+function daemonRestarted(before, now) {
+  if (before.boot && now.boot) return before.boot !== now.boot || before.version !== now.version;
+  if (before.version && now.version && before.version !== now.version) return true;
+  // uptime is whole seconds and polls jitter: a real restart moves the start time a lot more
+  return before.started != null && now.started != null && now.started - before.started > 5;
+}
 async function startUpdate() {
+  let before;
+  try { before = daemonIdentity(await api("/api/summary")); } catch (e) { toast(e.message); return; }
   try { updateView.info = await api("/api/update", { method: "POST" }); }
   catch (e) { toast(e.message); return; }
   paintDrawer();
-  watchUpdate();
+  watchUpdate(before);
 }
-function watchUpdate() {
-  let wentAway = false;
-  const timer = setInterval(async () => {
+const UPDATE_WATCH_MS = 10 * 60 * 1000;
+let updateWatch = null;
+/** Follow an update until the daemon comes back as a new process, then reload.
+ * A failed poll alone proves nothing (it may be a hiccup), and a restart that
+ * happens between two polls is still caught by comparing the identity. */
+function watchUpdate(before) {
+  if (updateWatch) return;
+  const deadline = Date.now() + UPDATE_WATCH_MS;
+  let busy = false;
+  const stop = () => { clearInterval(updateWatch); updateWatch = null; };
+  const showStep = (step) => {
+    updateView.info = { ...(updateView.info || {}), state: "restarting", step };
+    if (isOpen() && drawerStack[drawerStack.length - 1] === updateView.view) paintDrawer();
+  };
+  updateWatch = setInterval(async () => {
+    if (busy) return;
+    busy = true;
     try {
-      const u = await api("/api/update");
-      if (wentAway) {
-        clearInterval(timer);
-        toast("PyNIDS updated to " + u.current_version + " — reloading");
+      if (sessionExpired) { stop(); return; }
+      if (Date.now() > deadline) {
+        stop();
+        updateView.info = { ...(updateView.info || {}), state: "error", error: "PyNIDS hasn't come back after the update. Reload this page, or check the service with: pynids status" };
+        if (isOpen() && drawerStack[drawerStack.length - 1] === updateView.view) paintDrawer();
+        toast("The update is taking longer than expected");
+        return;
+      }
+      let s;
+      try { s = await api("/api/summary", { timeout: 4000 }); }
+      catch (e) { if (e.status !== 401) showStep("Waiting for PyNIDS to restart…"); return; }
+      const now = daemonIdentity(s);
+      if (daemonRestarted(before, now)) {
+        stop();
+        toast(now.version && now.version !== before.version ? "PyNIDS updated to " + now.version + " — reloading" : "PyNIDS restarted — reloading");
         setTimeout(() => location.reload(), 1200);
         return;
       }
+      let u;
+      try { u = await api("/api/update", { timeout: 4000 }); } catch (_) { return; }
       updateView.info = u;
       if (isOpen() && drawerStack[drawerStack.length - 1] === updateView.view) paintDrawer();
       renderUpdate(u, u.current_version);
-      if (!UPDATE_BUSY.includes(u.state)) clearInterval(timer);
-    } catch (_) { wentAway = true; }  // the daemon is restarting into the new version
+      if (!UPDATE_BUSY.includes(u.state)) stop();  // failed, or finished without a restart
+    } finally { busy = false; }
   }, 1500);
 }
 $("updateBtn").addEventListener("click", () => openUpdate(false));
@@ -1846,20 +2051,21 @@ $("checkUpdateBtn").addEventListener("click", () => openUpdate(true));
 
 // ---------------------------------------------------------------- refresh loop + live stream
 function renderAllCharts() { if (state.tab === "overview") { renderRate(); renderTimeline(); renderKinds(); } if (state.tab === "network") renderMap(); }
-async function refreshSummary() {
-  try {
-    const s = await api("/api/summary");
-    state.summary = s; state.rates = s.rates;
-    renderStatus(s); renderAskAvailability(s.status || {});
-    if (state.tab === "overview") { renderKpis(s); renderKinds(); renderRate(); }
-    renderKindFilters();
-    $("liveRate").replaceChildren(el("b", { text: fmtNum(s.rates.pps) }), " pkt/s · ", el("b", { text: fmtBits(s.rates.bps) }));
-  } catch (e) {
-    $("statusDot").className = "dot bad"; $("statusText").textContent = "Daemon unreachable";
-  }
+function refreshSummary() { return once("summary", refreshSummaryNow); }
+async function refreshSummaryNow() {
+  let s;
+  try { s = await api("/api/summary"); }
+  catch (e) { if (!sessionExpired) setStale(true); return; }
+  setStale(false);
+  state.summary = s; state.rates = s.rates;
+  renderStatus(s); renderAskAvailability(s.status || {});
+  if (state.tab === "overview") { renderKpis(s); renderKinds(); renderRate(); }
+  renderKindFilters();
+  $("liveRate").replaceChildren(el("b", { text: fmtNum(s.rates.pps) }), " pkt/s · ", el("b", { text: fmtBits(s.rates.bps) }));
 }
 let slowTick = 0;
-async function refreshSlow() {
+function refreshSlow() { return once("slow", refreshSlowNow); }
+async function refreshSlowNow() {
   slowTick++;
   try {
     const [timeline, remotes] = await Promise.all([api("/api/timeline"), api("/api/remotes?limit=600")]);
@@ -1868,38 +2074,58 @@ async function refreshSlow() {
     if (state.tab === "network") { renderMap(); if (slowTick % 5 === 0) loadDevices(); }
     if (state.tab === "apps") loadApps();
     if (state.tab === "connections") loadConnections();
-    else if (slowTick % 5 === 1) api("/api/connections").then((c) => { state.conns = c; updateConnBadge(c.summary.flagged_programs); }).catch(() => {});
+    else if (slowTick % 5 === 1) once("connBadge", () => api("/api/connections")).then((c) => { state.conns = c; updateConnBadge(c.summary.flagged_programs); }).catch(() => {});
   } catch (_) { /* surfaced by summary */ }
 }
 function connectStream() {
-  const es = new EventSource("/api/stream?token=" + encodeURIComponent(TOKEN));
+  if (sessionExpired) return;
+  const es = stream = new EventSource("/api/stream");
   es.addEventListener("alert", (e) => { try { onLiveAlert(JSON.parse(e.data)); } catch (_) {} });
   es.addEventListener("tick", (e) => {
+    if (document.hidden) return;
     try {
       const t = JSON.parse(e.data); state.rates = t.rates; if (state.tab === "overview") renderRate();
       $("liveRate").replaceChildren(el("b", { text: fmtNum(t.rates.pps) }), " pkt/s · ", el("b", { text: fmtBits(t.rates.bps) }));
     } catch (_) {}
   });
-  es.addEventListener("block", loadBlocks);
-  es.addEventListener("unblock", loadBlocks);
+  es.addEventListener("block", () => loadBlocks());
+  es.addEventListener("unblock", () => loadBlocks());
   es.addEventListener("intel", () => loadIntel().catch(() => {}));
   es.addEventListener("update", (e) => { try { renderUpdate(JSON.parse(e.data), state.summary && state.summary.status && state.summary.status.version); } catch (_) {} });
   es.addEventListener("allowlist", () => { if (state.tab === "protection") loadAllowlist(); });
+  // The browser retries dropped streams itself; a refused one (e.g. 401) is
+  // CLOSED for good, so try again later — the summary poll reports an expired session.
+  es.addEventListener("error", () => {
+    if (es.readyState !== EventSource.CLOSED || stream !== es) return;
+    stream = null;
+    setTimeout(() => { if (!stream && !sessionExpired) connectStream(); }, 10000);
+  });
 }
+/** Poll only while the page is visible and the session is valid. */
+function poll(fn, ms) { pollTimers.push(setInterval(() => { if (!document.hidden && !sessionExpired) fn(); }, ms)); }
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || sessionExpired || !pollTimers.length) return;
+  refreshSummary(); refreshSlow();  // catch up at once instead of waiting for the next tick
+});
 let resizeTimer;
 addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderAllCharts, 120); });
 
-(async function boot() {
+async function boot() {
   const wantUpdate = location.hash === "#update";  // "What's new" in the menu bar app
   await refreshSummary();
-  go(location.hash.slice(1) || "overview", { noscroll: true });
+  if (sessionExpired) return;
+  go(location.hash.slice(1) || "overview", { noscroll: true, fromHistory: true });
   if (wantUpdate) openUpdate(false);
   await Promise.all([refreshSlow(), loadAlerts(), loadBlocks()]);
   loadWorld();
+  if (sessionExpired) return;
   connectStream();
-  setInterval(refreshSummary, 3000);
-  setInterval(refreshSlow, 6000);
-})();
+  poll(refreshSummary, 3000);
+  poll(refreshSlow, 6000);
+}
+// soc.js and mail.js load after this script; boot once they have run so a
+// deep link to Investigate / Email finds their handlers.
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot); else boot();
 </script>
 <script src="/static/soc.js"></script>
 <script src="/static/mail.js"></script>

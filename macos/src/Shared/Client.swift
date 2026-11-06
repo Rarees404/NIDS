@@ -17,7 +17,17 @@ enum PyNIDSClient {
         }
     }
 
-    /// The daemon writes a random token here (mode 0644) for local clients.
+    /// URL that signs the browser in to the dashboard (`/?auth=<token>` sets the
+    /// session cookie, see pynids/service/api.py) and opens it at *anchor* ("#events").
+    static func dashboardLink(_ anchor: String = "") -> URL {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        let token = token().addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
+        if token.isEmpty { return URL(string: dashboard.absoluteString + anchor) ?? dashboard }
+        return URL(string: dashboard.absoluteString + "?auth=" + token + anchor) ?? dashboard
+    }
+
+    /// The daemon writes a random token here (mode 0600, owned by this Mac's PyNIDS user).
     static func token() -> String {
         var paths = ["/Library/Application Support/PyNIDS/api-token"]
         if let home = ProcessInfo.processInfo.environment["PYNIDS_HOME"] {

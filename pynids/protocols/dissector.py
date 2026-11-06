@@ -23,6 +23,7 @@ import re
 import time
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote, unquote_plus
 
 from .quic_crypto import QuicClientHelloAssembler, decrypt_client_initial
 from .stealth import (
@@ -136,11 +137,16 @@ def dissect(meta: Dict[str, Any]) -> Dict[str, Any]:
                 layer7["quic"] = quic
                 return layer7
 
-    if dst_port == 53 or src_port == 53:
+    # Plaintext HTTP requests are recognised by their request line on any
+    # TCP port (dev servers, proxies, malware on 443); responses still rely
+    # on the well-known ports below.
+    http_request = proto == "tcp" and bool(_HTTP_REQUEST_LINE_RE.match(payload))
+
+    if (dst_port == 53 or src_port == 53) and not http_request:
         layer7["app_proto"] = "dns"
         layer7["dns"] = _parse_dns(payload, proto)
 
-    elif dst_port in (80, 8080, 8000, 8008) or src_port in (80, 8080, 8000, 8008):
+    elif http_request or dst_port in _HTTP_PORTS or src_port in _HTTP_PORTS:
         layer7["app_proto"] = "http"
         http_info = _parse_http(payload)
         layer7["http"] = http_info
@@ -188,15 +194,27 @@ def _decrypt_quic_sni(meta: Dict[str, Any], payload: bytes, quic: Dict[str, Any]
 # HTTP
 # ---------------------------------------------------------------------------
 
+_HTTP_PORTS = (80, 8080, 8000, 8008)
+_HTTP_REQUEST_LINE_RE = re.compile(
+    rb"(?:GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH|CONNECT|TRACE) \S+ HTTP/1\.[01]\r\n"
+)
+# Only this much of a request body is searched for attack patterns.
+_HTTP_BODY_SCAN_LIMIT = 4096
+
+# Tautologies need SQL context (a closing quote/paren or OR/AND) so query
+# strings such as ``utm_v1=1`` or ``?1=1`` cache-busters do not match.
 _SQLI_RE = re.compile(
-    r"(union\s+select|select\s+\*\s+from|drop\s+table|--\s*$|'[;\s]+or\s+|"
-    r"1\s*=\s*1|or\s+1\s*=\s*1|benchmark\s*\(|sleep\s*\(|load_file\s*\(|"
-    r"information_schema|pg_sleep|waitfor\s+delay)",
+    r"(union(?:\s+all)?\s+select\b|select\s+\*\s+from\b|drop\s+table\b|['\")]\s*--|"
+    r"'[;\s]+or\s+|(?:['\")]|\b(?:or|and))\s*\(?\s*['\"]?1['\"]?\s*=\s*['\"]?1\b|"
+    r"\bbenchmark\s*\(|\bsleep\s*\(\s*\d|\bload_file\s*\(|"
+    r"information_schema|\bpg_sleep\b|waitfor\s+delay)",
     re.IGNORECASE,
 )
+# Event-handler attributes only count inside a tag (``?onload=1`` is a
+# harmless parameter name).
 _XSS_RE = re.compile(
-    r"(<\s*script|javascript\s*:|on(?:error|load|click|mouse)\s*=|"
-    r"eval\s*\(|alert\s*\(|document\.cookie|fromCharCode)",
+    r"(<\s*script|javascript\s*:|<[^>\n]*\bon(?:error|load|click|mouse\w*)\s*=|"
+    r"\beval\s*\(|\balert\s*\(|document\.cookie|fromCharCode)",
     re.IGNORECASE,
 )
 _PATH_TRAVERSAL_RE = re.compile(r"\.\./|\.\.\\|%2e%2e", re.IGNORECASE)
@@ -251,14 +269,22 @@ def _parse_http(payload: bytes) -> Dict[str, Any]:
         info["referer"] = headers.get("referer")
         info["headers"] = headers
 
-        # Security heuristics — replace URL-encoded '+' (space) before matching
-        uri = info.get("uri", "")
-        uri_decoded = uri.replace("+", " ")
-        search_target = uri_decoded + text.replace("+", " ")
-        info["sqli_suspect"] = bool(_SQLI_RE.search(search_target))
-        info["xss_suspect"] = bool(_XSS_RE.search(search_target))
-        info["path_traversal_suspect"] = bool(_PATH_TRAVERSAL_RE.search(uri))
-        info["scanner_ua"] = bool(_SCANNER_UA_RE.search(info.get("user_agent") or ""))
+        # Security heuristics look at what a client sends — the request line,
+        # headers and the start of the body — never at server responses.
+        info["sqli_suspect"] = info["xss_suspect"] = False
+        info["path_traversal_suspect"] = info["scanner_ua"] = False
+        if info.get("direction") == "request":
+            uri = info.get("uri", "")
+            head, _, body = text.partition("\r\n\r\n")
+            header_block = head.partition("\r\n")[2]
+            search_target = "\n".join((
+                unquote_plus(uri), header_block, unquote_plus(body[:_HTTP_BODY_SCAN_LIMIT]),
+            ))
+            info["sqli_suspect"] = bool(_SQLI_RE.search(search_target))
+            info["xss_suspect"] = bool(_XSS_RE.search(search_target))
+            info["path_traversal_suspect"] = bool(
+                _PATH_TRAVERSAL_RE.search(uri) or _PATH_TRAVERSAL_RE.search(unquote(uri)))
+            info["scanner_ua"] = bool(_SCANNER_UA_RE.search(info.get("user_agent") or ""))
 
     except Exception:
         pass
@@ -344,11 +370,26 @@ _DNS_QTYPES: Dict[int, str] = {
 }
 
 
+_DNS_MAX_NAME = 255
+_DNS_MAX_JUMPS = 32
+
+
 def _dns_decode_name(data: bytes, offset: int) -> Tuple[Optional[str], int]:
-    """Decode a DNS name starting at *offset*, returning (name, end_offset)."""
+    """
+    Decode a DNS name starting at *offset*, returning (name, end_offset).
+
+    *end_offset* is where the record continues: just past the terminating
+    zero label, or past the first compression pointer.  Pointers must
+    point strictly backwards (RFC 1035 §4.1.4) and the number of jumps and
+    the name length are capped, so crafted loops cannot recurse or spin.
+    A malformed name returns what was decoded so far (or None).
+    """
     labels: List[str] = []
     pos = offset
-    visited: set = set()
+    end_offset: Optional[int] = None   # set at the first pointer
+    lowest = offset                    # every pointer must go below this
+    jumps = 0
+    total = 0
 
     while pos < len(data):
         length = data[pos]
@@ -357,24 +398,30 @@ def _dns_decode_name(data: bytes, offset: int) -> Tuple[Optional[str], int]:
             break
         if (length & 0xC0) == 0xC0:  # pointer
             if pos + 1 >= len(data):
+                pos = len(data)
                 break
             ptr = ((length & 0x3F) << 8) | data[pos + 1]
-            if ptr in visited or ptr >= len(data):
-                break
-            visited.add(ptr)
-            pointed_name, _ = _dns_decode_name(data, ptr)
-            if pointed_name:
-                labels.append(pointed_name)
-            pos += 2
+            if end_offset is None:
+                end_offset = pos + 2
+            jumps += 1
+            if ptr >= lowest or jumps > _DNS_MAX_JUMPS:
+                break  # forward / self pointer or a loop
+            lowest = ptr
+            pos = ptr
+            continue
+        if length & 0xC0:
+            break  # reserved label types (0x40 / 0x80)
+        pos += 1
+        end = pos + length
+        total += length + 1
+        if end > len(data) or total > _DNS_MAX_NAME:
+            pos = min(end, len(data))
             break
-        else:
-            pos += 1
-            end = pos + length
-            if end > len(data):
-                break
-            labels.append(data[pos:end].decode("ascii", errors="replace"))
-            pos = end
+        labels.append(data[pos:end].decode("ascii", errors="replace"))
+        pos = end
 
+    if end_offset is not None:
+        pos = end_offset
     return (".".join(labels) if labels else None), pos
 
 
@@ -393,13 +440,13 @@ def _parse_tls_client_hello(payload: bytes) -> Dict[str, Any]:
         if len(payload) < 5 or payload[0] != 0x16:
             return info
 
-        rec_version = int.from_bytes(payload[1:3], "big")
         # Handshake record
-        if payload[5] != 0x01:  # Not ClientHello
+        if len(payload) < 9 or payload[5] != 0x01:  # Not ClientHello
             return info
 
-        # Handshake header: type(1) length(3)
+        # Handshake header: type(1) length(3); never read past the handshake.
         hs_len = int.from_bytes(payload[6:9], "big")
+        payload = payload[:9 + hs_len]
         pos = 9
 
         # Client version

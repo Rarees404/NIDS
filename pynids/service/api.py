@@ -14,7 +14,13 @@ So:
   attacks, where a malicious page makes its own hostname resolve to 127.0.0.1.
 * **Token** — every ``/api/*`` route except ``/api/health`` and
   ``/api/widget`` needs the random token from the data directory, sent as the
-  ``X-PyNIDS-Token`` header (or ``?token=`` for EventSource).
+  ``X-PyNIDS-Token`` header, as ``?token=`` (older clients), or as the
+  dashboard's session cookie.
+* **Dashboard session** — the token is never put into the page.  ``pynids
+  open`` and the menu bar app open ``/?auth=<token>``, which answers with a
+  redirect to ``/`` and an HttpOnly, SameSite=Strict cookie derived from the
+  token; ``/`` without that cookie shows a "locked" page.  The page is served
+  with a strict Content-Security-Policy (per-response script nonce).
 * **Origin check** — requests that change state are rejected if they carry a
   foreign ``Origin``.
 * **No CORS headers** — other origins cannot read responses.
@@ -25,11 +31,14 @@ the latest alert headline.
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import queue
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -48,6 +57,61 @@ from .live import LiveState, _brief
 logger = logging.getLogger(__name__)
 
 _SEV_NUM = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+SESSION_COOKIE = "pynids_session"
+# Manual blocks: 0 / missing means the default; every block expires.
+BLOCK_TTL_DEFAULT, BLOCK_TTL_MIN, BLOCK_TTL_MAX = 3600.0, 60.0, 7 * 86400.0
+_WIDGET_CACHE_S = 3.0
+
+_CSP = ("default-src 'self'; script-src 'self' 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; frame-src 'self' about:; object-src 'none'; "
+        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+_INLINE_SCRIPT = re.compile(r"<script(?![^>]*\b(?:src|nonce)=)([^>]*)>", re.I)
+
+_LOCKED_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyNIDS — locked</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f7f9;--fg:#1c2330;--muted:#5d6775}
+@media (prefers-color-scheme:dark){:root{--bg:#12161c;--fg:#e6e9ee;--muted:#9aa4b2}}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);
+font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:0 16px}
+main{max-width:30rem}h1{font-size:1.3rem;margin:0 0 .5rem}p{color:var(--muted);margin:.4rem 0}
+code{font:13px ui-monospace,Menlo,monospace;color:var(--fg)}
+</style></head><body><main>
+<h1>The PyNIDS dashboard is locked</h1>
+<p>Open it with <code>pynids open</code> in a terminal, or with <b>Open Dashboard</b> in the PyNIDS menu bar app.</p>
+<p>That signs this browser in; the link only works on this Mac.</p>
+</main></body></html>
+"""
+
+
+def session_value(token: str) -> str:
+    """The dashboard cookie: hex HMAC-SHA256(key=token, msg=b"pynids-session")."""
+    return hmac.new(token.encode("utf-8"), b"pynids-session", hashlib.sha256).hexdigest()
+
+
+def _canonical_ip(raw: Any) -> str:
+    try:
+        return str(ipaddress.ip_address(str(raw or "").strip()))
+    except ValueError:
+        raise _BadRequest(f"{str(raw)[:60]!r} is not a valid IP address") from None
+
+
+def _block_ttl(raw: Any) -> float:
+    if raw in (None, "", 0):
+        return BLOCK_TTL_DEFAULT
+    if isinstance(raw, bool):
+        raise _BadRequest("ttl must be a number of seconds")
+    try:
+        ttl = float(raw)
+    except (TypeError, ValueError):
+        raise _BadRequest("ttl must be a number of seconds") from None
+    if ttl != ttl:  # NaN
+        raise _BadRequest("ttl must be a number of seconds")
+    if ttl == 0:
+        return BLOCK_TTL_DEFAULT
+    return min(BLOCK_TTL_MAX, max(BLOCK_TTL_MIN, ttl))
 
 
 class ServiceContext:
@@ -72,6 +136,7 @@ class ServiceContext:
         updater: Any = None,
         workbench: Any = None,
         emails: Any = None,
+        set_notifications: Optional[Callable[[bool], bool]] = None,
     ) -> None:
         self.live = live
         self.token = token
@@ -90,6 +155,9 @@ class ServiceContext:
         self.updater = updater
         self.workbench = workbench
         self.emails = emails
+        self.set_notifications = set_notifications
+        self._widget_lock = threading.Lock()
+        self._widget_cache: Optional[tuple] = None  # (monotonic time, payload)
         self._explain_lock = threading.Lock()
         self._investigate_lock = threading.Lock()
         if self.db_path:
@@ -203,9 +271,28 @@ class _Handler(BaseHTTPRequestHandler):
         return origin.lower() in {f"http://127.0.0.1:{self.port}", f"http://localhost:{self.port}",
                                   f"http://[::1]:{self.port}"}
 
+    def _token_ok(self, supplied: str) -> bool:
+        return bool(self.ctx.token) and hmac.compare_digest(supplied.encode("utf-8"),
+                                                            self.ctx.token.encode("utf-8"))
+
+    def _session_ok(self) -> bool:
+        if not self.ctx.token:
+            return False
+        # Not SimpleCookie: cookies are shared by every service on 127.0.0.1, and
+        # one it can't parse (a JSON value, a space) makes it drop all that follow.
+        expected = session_value(self.ctx.token).encode("utf-8")
+        for header in self.headers.get_all("Cookie") or []:
+            for pair in header.split(";"):
+                name, sep, value = pair.strip().partition("=")
+                if sep and name == SESSION_COOKIE and hmac.compare_digest(
+                        value.strip().strip('"').encode("utf-8"), expected):
+                    return True
+        return False
+
     def _authorized(self, query: Dict[str, List[str]]) -> bool:
-        supplied = self.headers.get("X-PyNIDS-Token") or (query.get("token") or [""])[0]
-        return bool(self.ctx.token) and hmac.compare_digest(supplied, self.ctx.token)
+        return (self._token_ok(self.headers.get("X-PyNIDS-Token") or "")
+                or self._token_ok((query.get("token") or [""])[0])
+                or self._session_ok())
 
     def _send_json(self, payload: Any, status: int = 200) -> None:
         body = json.dumps(payload, default=_json_default).encode("utf-8")
@@ -220,8 +307,14 @@ class _Handler(BaseHTTPRequestHandler):
     def _error(self, status: int, message: str) -> None:
         self._send_json({"error": message}, status)
 
+    def _content_length(self) -> int:
+        raw = (self.headers.get("Content-Length") or "0").strip()
+        if not (raw.isascii() and raw.isdigit()):  # isdigit() alone accepts "²", which int() rejects
+            raise _BadRequest("invalid Content-Length")
+        return int(raw)
+
     def _body(self) -> Dict[str, Any]:
-        length = int(self.headers.get("Content-Length") or 0)
+        length = self._content_length()
         if length <= 0 or length > 65536:
             return {}
         try:
@@ -239,13 +332,13 @@ class _Handler(BaseHTTPRequestHandler):
         query = parse_qs(url.query)
 
         if method == "GET" and path == "/":
-            self._serve_dashboard()
+            self._front_door(query)
             return
         if method == "GET" and path == "/api/health":
             self._send_json({"ok": True, "version": __version__})
             return
         if method == "GET" and path == "/api/widget":
-            self._send_json(self._widget())
+            self._send_json(self._widget_cached())
             return
         if method == "GET" and path.startswith("/static/"):
             self._serve_static(path[len("/static/"):])
@@ -326,8 +419,12 @@ class _Handler(BaseHTTPRequestHandler):
             if not ctx.notifier:
                 self._error(HTTPStatus.NOT_IMPLEMENTED, "notifications unavailable")
                 return
-            ctx.notifier.enabled = bool(self._body().get("enabled", True))
-            self._send_json({"enabled": ctx.notifier.enabled})
+            enabled = bool(self._body().get("enabled", True))
+            if ctx.set_notifications:
+                enabled = ctx.set_notifications(enabled)
+            else:
+                ctx.notifier.enabled = enabled
+            self._send_json({"enabled": enabled})
         elif method == "GET" and path == "/api/attention":
             self._send_json(self._attention())
         elif method == "GET" and path.startswith("/api/apps/"):
@@ -362,22 +459,64 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._error(HTTPStatus.NOT_FOUND, "not found")
 
+    def _front_door(self, query: Dict[str, List[str]]) -> None:
+        """``/?auth=<token>`` signs the browser in; ``/`` needs the session cookie."""
+        if "auth" in query:
+            if self._token_ok(query["auth"][0]):
+                self.send_response(HTTPStatus.SEE_OTHER)
+                self.send_header("Location", "/")
+                self.send_header("Set-Cookie", f"{SESSION_COOKIE}={session_value(self.ctx.token)}; "
+                                               "HttpOnly; SameSite=Strict; Path=/")
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.end_headers()
+            else:
+                self._serve_locked()
+            return
+        if self._session_ok():
+            self._serve_dashboard()
+        else:
+            self._serve_locked()
+
+    def _send_html(self, html: str, status: int, csp: str) -> None:
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy", csp)
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_locked(self) -> None:
+        self._send_html(_LOCKED_PAGE, HTTPStatus.UNAUTHORIZED,
+                        "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'")
+
     def _serve_dashboard(self) -> None:
         try:
             html = resources.files("pynids.web").joinpath("dashboard.html").read_text("utf-8")
         except (FileNotFoundError, ModuleNotFoundError):
             self._error(HTTPStatus.NOT_FOUND, "dashboard not installed")
             return
-        html = html.replace("__PYNIDS_TOKEN__", self.ctx.token)
-        body = html.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.end_headers()
-        self.wfile.write(body)
+        nonce = secrets.token_urlsafe(18)
+        html = html.replace("__PYNIDS_NONCE__", nonce)
+        html = _INLINE_SCRIPT.sub(lambda m: f'<script nonce="{nonce}"{m.group(1)}>', html)
+        self._send_html(html, HTTPStatus.OK, _CSP.format(nonce=nonce))
+
+    def _widget_cached(self) -> Dict[str, Any]:
+        # Unauthenticated, so any web page can hit it: don't rescan sockets per request.
+        ctx = self.ctx
+        with ctx._widget_lock:
+            cached = ctx._widget_cache
+            if cached and time.monotonic() - cached[0] < _WIDGET_CACHE_S:
+                return cached[1]
+            data = self._widget()
+            ctx._widget_cache = (time.monotonic(), data)
+            return data
 
     def _widget(self) -> Dict[str, Any]:
         live = self.ctx.live
@@ -475,13 +614,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
+        closed = self.ctx.live.streams_closed
         try:
             self.wfile.write(b"retry: 3000\n\n")
             self.wfile.flush()
             last_tick = 0.0
-            while True:
+            while not closed.is_set():
                 try:
                     event = q.get(timeout=1.0)
+                    if closed.is_set():
+                        break
                     payload = json.dumps(event["data"], default=_json_default)
                     self.wfile.write(f"event: {event['type']}\ndata: {payload}\n\n".encode())
                 except queue.Empty:
@@ -508,12 +650,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json([e.__dict__ for e in blocker.list()])
         elif method == "POST" and path == "/api/blocks":
             body = self._body()
-            ip = str(body.get("ip") or "").strip()
-            ttl = body.get("ttl", 3600)
+            ip = _canonical_ip(body.get("ip"))
+            ttl = _block_ttl(body.get("ttl"))
             try:
                 entry = blocker.block(
                     ip, reason=str(body.get("reason") or "Blocked from dashboard")[:300],
-                    ttl=float(ttl) if ttl else None, source="manual",
+                    ttl=ttl, source="manual",
                     alert_id=body.get("alert_id"),
                 )
             except BlockRefused as exc:
@@ -525,7 +667,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.ctx.live.broadcast("block", entry.__dict__)
             self._send_json(entry.__dict__, HTTPStatus.CREATED)
         elif method == "DELETE" and path.startswith("/api/blocks/"):
-            ip = unquote(path[len("/api/blocks/"):])
+            ip = _canonical_ip(unquote(path[len("/api/blocks/"):]))
             removed = blocker.unblock(ip)
             self.ctx.live.broadcast("unblock", {"ip": ip})
             self._send_json({"ip": ip, "removed": removed})
@@ -614,6 +756,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(al.rules())
         elif method == "POST" and path == "/api/allowlist":
             body = self._body()
+            if body.get("ip") not in (None, ""):
+                body["ip"] = _canonical_ip(body["ip"])
             try:
                 rule = al.add(note=str(body.get("note") or ""),
                               **{k: body.get(k) for k in ("kind", "rule_id", "app", "host", "ip")})
@@ -649,7 +793,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not found")
 
     def _raw_body(self, limit: int) -> bytes:
-        length = int(self.headers.get("Content-Length") or 0)
+        length = self._content_length()
         if length <= 0:
             raise _BadRequest("empty body")
         if length > limit:

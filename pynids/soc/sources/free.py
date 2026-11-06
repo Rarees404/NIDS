@@ -10,15 +10,34 @@ from urllib.parse import quote, urlsplit
 
 from ...host.dossier import parse_internetdb, parse_rdap
 from ..ioc import Ioc, is_public_ip
-from . import HASHES, IPS, Ctx, Result, Source, SourceError
+from . import HASHES, IPS, Ctx, Result, Source, SourceError, canonical_ip, seg
 
 # Second-level labels under which registries sell names (example.co.uk).
 _SLD = {"co", "com", "net", "org", "gov", "ac", "edu", "ne", "or", "go", "gob", "mil", "nic", "ltd", "plc"}
 
+# A small, hand-picked slice of the Public Suffix List's private section:
+# hosting platforms where every customer gets a subdomain, so foo.github.io
+# and bar.github.io belong to different people.  Not exhaustive — there is no
+# PSL dependency; extend when a platform shows up in investigations.
+PRIVATE_SUFFIXES = frozenset({
+    "github.io", "gitlab.io", "blogspot.com", "herokuapp.com", "azurewebsites.net", "cloudapp.net",
+    "azureedge.net", "azurestaticapps.net", "cloudfront.net", "appspot.com", "web.app", "firebaseapp.com",
+    "netlify.app", "vercel.app", "pages.dev", "workers.dev", "r2.dev", "s3.amazonaws.com",
+    "elasticbeanstalk.com", "glitch.me", "ngrok.io", "ngrok-free.app", "trycloudflare.com", "wixsite.com",
+    "weebly.com", "000webhostapp.com", "onrender.com", "fly.dev", "replit.app", "repl.co", "myshopify.com",
+    "readthedocs.io", "notion.site", "framer.app", "webflow.io", "square.site", "surge.sh", "duckdns.org",
+    "ddns.net", "hopto.org", "no-ip.org", "translate.goog",
+})
 
-def registered_domain(host: str) -> str:
-    """Best-effort registrable domain (no public-suffix list): a.b.example.co.uk → example.co.uk."""
+
+def registered_domain(host: str, private: bool = True) -> str:
+    """Best-effort registrable domain: a.b.example.co.uk → example.co.uk, foo.github.io →
+    foo.github.io.  ``private=False`` ignores hosting-platform suffixes (what WHOIS/RDAP knows)."""
     labels = host.lower().rstrip(".").split(".")
+    if private:
+        for n in (3, 2):
+            if len(labels) > n and ".".join(labels[-n:]) in PRIVATE_SUFFIXES:
+                return ".".join(labels[-n - 1:])
     if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in _SLD:
         return ".".join(labels[-3:])
     return ".".join(labels[-2:])
@@ -47,7 +66,7 @@ class Rdap(Source):
         if ioc.type in IPS:
             if not is_public_ip(ioc.value):
                 return self.result(status="unsupported", message="private or reserved address — not sent out")
-            data, res = self.get_json(ctx, f"https://rdap.org/ip/{ioc.value}")
+            data, res = self.get_json(ctx, f"https://rdap.org/ip/{seg(canonical_ip(ioc.value))}")
             if data:
                 info = parse_rdap(data)
                 for label, key in (("Network", "network"), ("Range", "cidr"), ("Owner", "owner"),
@@ -59,7 +78,7 @@ class Rdap(Source):
                 res.verdict = "info"
             return res
         if ioc.type == "asn":
-            data, res = self.get_json(ctx, f"https://rdap.org/autnum/{ioc.value[2:]}")
+            data, res = self.get_json(ctx, f"https://rdap.org/autnum/{seg(ioc.value[2:])}")
             if data:
                 info = parse_rdap(data)
                 res.row("Name", data.get("name"))
@@ -69,8 +88,8 @@ class Rdap(Source):
                 res.row("Abuse contact", info.get("abuse_email"))
                 res.verdict = "info"
             return res
-        domain = registered_domain(ioc.value)
-        data, res = self.get_json(ctx, f"https://rdap.org/domain/{domain}")
+        domain = registered_domain(ioc.value, private=False)
+        data, res = self.get_json(ctx, f"https://rdap.org/domain/{seg(domain)}")
         if not data:
             return res
         res.verdict = "info"
@@ -122,7 +141,9 @@ class DnsOverHttps(Source):
     def query(self, ioc: Ioc, ctx: Ctx) -> Result:
         res = self.result(verdict="info")
         if ioc.type in IPS:
-            ptr = ipaddress.ip_address(ioc.value).reverse_pointer
+            if not is_public_ip(ioc.value):
+                return self.result(status="unsupported", message="private or reserved address — not sent out")
+            ptr = ipaddress.ip_address(canonical_ip(ioc.value)).reverse_pointer
             data = self._ask(ctx, ptr, "PTR")
             res.raw = {"PTR": data}
             names = [a["data"].rstrip(".") for a in data.get("Answer") or [] if a.get("type") == 12]
@@ -183,7 +204,7 @@ class InternetDb(Source):
     def query(self, ioc: Ioc, ctx: Ctx) -> Result:
         if not is_public_ip(ioc.value):
             return self.result(status="unsupported", message="private or reserved address — not sent out")
-        data, res = self.get_json(ctx, f"https://internetdb.shodan.io/{ioc.value}")
+        data, res = self.get_json(ctx, f"https://internetdb.shodan.io/{seg(canonical_ip(ioc.value))}")
         if not data:
             res.message = "not seen by Shodan's scanners"
             return res
@@ -220,7 +241,8 @@ class GreyNoise(Source):
         if not is_public_ip(ioc.value):
             return self.result(status="unsupported", message="private or reserved address — not sent out")
         headers = {"key": ctx.key} if ctx.key else {}
-        data, res = self.get_json(ctx, f"https://api.greynoise.io/v3/community/{ioc.value}", headers)
+        data, res = self.get_json(ctx, f"https://api.greynoise.io/v3/community/{seg(canonical_ip(ioc.value))}",
+                                  headers)
         if not data:
             res.message = "not observed scanning the internet"
             return res

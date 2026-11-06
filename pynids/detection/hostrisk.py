@@ -335,10 +335,44 @@ class C2Correlator(BaseOutput):
         self.window = window
         self._by_app: Dict[str, Dict[str, float]] = defaultdict(dict)
         self._by_remote: Dict[str, Dict[str, float]] = defaultdict(dict)
-        self._pairs: Dict[str, Set[Tuple[str, str]]] = defaultdict(set)  # app -> {(remote, port)}
+        # app -> {(remote, port): last seen}; insertion order is oldest-first
+        self._pairs: Dict[str, Dict[Tuple[str, str], float]] = defaultdict(dict)
         self._fired: Dict[Tuple[str, str], float] = {}
+        self._last_evict = 0.0
         self._lock = threading.Lock()
         self._busy = threading.local()
+
+    MAX_KEYS = 20_000           # apps / remotes / fired pairs tracked
+    MAX_PAIRS_PER_APP = 256     # servers remembered per program
+
+    def _evict(self, now: float) -> None:
+        """Drop signals, pairs and fired markers older than the window (caller holds the lock)."""
+        if now - self._last_evict < 60.0:
+            return
+        self._last_evict = now
+        horizon = now - self.window
+        for table in (self._by_app, self._by_remote):
+            for key in list(table):
+                live = {s: ts for s, ts in table[key].items() if ts >= horizon}
+                if live:
+                    table[key] = live
+                else:
+                    del table[key]
+        for app in list(self._pairs):
+            live_pairs = {p: ts for p, ts in self._pairs[app].items() if ts >= horizon}
+            if live_pairs:
+                self._pairs[app] = live_pairs
+            else:
+                del self._pairs[app]
+        self._fired = {k: ts for k, ts in self._fired.items() if ts >= horizon}
+
+    @staticmethod
+    def _touch(table: Dict, key: Any, value: Any, cap: int) -> None:
+        """Insert *key* as newest, evicting the oldest entries above *cap*."""
+        table.pop(key, None)
+        table[key] = value
+        while len(table) > cap:
+            del table[next(iter(table))]
 
     def emit(self, alert: Alert) -> None:
         if alert.rule_id == self.RULE or getattr(self._busy, "on", False):
@@ -362,17 +396,26 @@ class C2Correlator(BaseOutput):
         if not (signals_app or signals_remote):
             return
         with self._lock:
+            self._evict(now)
             if app:
-                for s in signals_app:
-                    self._by_app[app][s] = now
+                signals = self._by_app.pop(app, {})
+                signals.update({s: now for s in signals_app})
+                self._touch(self._by_app, app, signals, self.MAX_KEYS)
             if remote:
-                for s in signals_remote:
-                    self._by_remote[remote][s] = now
+                signals = self._by_remote.pop(remote, {})
+                signals.update({s: now for s in signals_remote})
+                self._touch(self._by_remote, remote, signals, self.MAX_KEYS)
             if app and remote:
-                self._pairs[app].add((remote, str(alert.dst_port or "")))
-            candidates = [(app, r, p) for r, p in self._pairs.get(app, ())] if app else []
-            if remote and not app:
-                candidates = [(None, remote, str(alert.dst_port or ""))]
+                pairs = self._pairs.pop(app, {})
+                self._touch(pairs, (remote, str(alert.dst_port or "")), now, self.MAX_PAIRS_PER_APP)
+                self._touch(self._pairs, app, pairs, self.MAX_KEYS)
+            if app:
+                # A program-level signal can complete any of its servers; a
+                # server-level one only the pairs with that server.
+                candidates = [(app, r, p) for r, p in self._pairs.get(app, {})
+                              if signals_app or r == remote]
+            else:
+                candidates = [(None, remote, str(alert.dst_port or ""))] if remote else []
         for cand_app, cand_remote, port in candidates:
             self._evaluate(cand_app, cand_remote, port, alert, now)
 
@@ -397,7 +440,7 @@ class C2Correlator(BaseOutput):
             key = (app or "", remote)
             if now - self._fired.get(key, 0) < self.window:
                 return
-            self._fired[key] = now
+            self._touch(self._fired, key, now, self.MAX_KEYS)
         ctx = trigger.context or {}
         name = ctx.get("app") or (app.rsplit("/", 1)[-1] if app else trigger.src_ip)
         host = ctx.get("remote_host") if ctx.get("remote_ip") == remote else None

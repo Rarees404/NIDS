@@ -6,7 +6,7 @@
  * network request, so remote images and tracking pixels never load. */
 "use strict";
 
-const MAIL = { list: null, a: null, sub: "overview", raw: null, mark: null, find: "", wrap: false };
+const MAIL = { list: null, a: null, sub: "overview", raw: null, mark: null, find: "", wrap: false, gen: 0 };
 const SEV_LABEL = { high: "High", medium: "Medium", low: "Low", info: "Info" };
 const HEADER_CAT = (() => {
   const m = {};
@@ -16,7 +16,9 @@ const HEADER_CAT = (() => {
   return m;
 })();
 
-async function mailApi(path, opts) { return api("/api/soc/email" + path, opts); }
+// Re-analysing a large stored message (after a restart evicts the cache) or
+// reading its raw source can take well over api()'s 8 s default for GETs.
+async function mailApi(path, opts) { return api("/api/soc/email" + path, { timeout: 120000, ...(opts || {}) }); }
 
 // ---------------------------------------------------------------- shell
 function mailRoot() {
@@ -26,7 +28,7 @@ function mailRoot() {
   root.append(
     el("div", { class: "section-title" }, el("h1", { text: "Email analysis" }),
       el("span", { class: "sub", text: "Decode a suspicious email safely: every finding points to the exact raw lines." }),
-      el("div", { class: "right" }, el("button", { class: "btn", onclick: () => mailHome() }, "All emails"))),
+      el("div", { class: "right" }, el("button", { class: "btn", onclick: () => { setRoute("email"); mailHome(); } }, "All emails"))),
     el("div", { id: "mailMain" }));
   // Drop an .eml anywhere on the tab.
   root.addEventListener("dragover", (e) => { e.preventDefault(); const d = root.querySelector(".drop"); if (d) d.classList.add("over"); });
@@ -35,20 +37,21 @@ function mailRoot() {
   return root;
 }
 
-function mailShow(arg) {
+function mailShow(arg, opts = {}) {
   mailRoot();
   if (arg) openEmail(arg);
-  else if (!MAIL.a) mailHome();
+  else if (!MAIL.a || opts.fromHistory) mailHome();  // Back to plain #email shows the list
 }
 
 async function uploadBytes(body, name, source) {
   const main = $("mailMain");
   main.replaceChildren(el("div", { class: "card", style: "padding:24px;display:flex;gap:10px;align-items:center" }, el("span", { class: "spinner" }), "Parsing and analysing…"));
   try {
-    const res = await fetch("/api/soc/email", { method: "POST", body,
-      headers: { "X-PyNIDS-Token": TOKEN, "Content-Type": "message/rfc822", "X-Filename": encodeURIComponent(name || ""), "X-Source": source } });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
+    // api() parses defensively: an HTML or empty error page (e.g. 413 from a
+    // proxy) gives "413 Payload Too Large", not "Unexpected token <".
+    const data = await api("/api/soc/email", { method: "POST", body, timeout: 0,
+      headers: { "Content-Type": "message/rfc822", "X-Filename": encodeURIComponent(name || ""), "X-Source": source } });
+    if (!data || !data.sha256) throw new Error("PyNIDS returned an unexpected response");
     MAIL.list = null;
     go("email/" + data.sha256);
   } catch (e) { toast(e.message); mailHome(); }
@@ -60,8 +63,8 @@ function uploadFile(file) {
 
 // ---------------------------------------------------------------- home
 async function mailHome() {
+  const gen = ++MAIL.gen;
   MAIL.a = null; MAIL.raw = null;
-  if (location.hash !== "#email") history.replaceState(null, "", "#email");
   const picker = el("input", { type: "file", accept: ".eml,.txt,message/rfc822", hidden: true, onchange: (e) => e.target.files[0] && uploadFile(e.target.files[0]) });
   const paste = el("textarea", { placeholder: "…or paste the raw message source here (headers included).\nThunderbird: More → View Source · Outlook: File → Properties → Internet headers · Gmail: ⋮ → Show original", spellcheck: "false" });
   const list = el("div", { class: "mlist" }, el("div", { class: "skeleton" }), el("div", { class: "skeleton" }));
@@ -83,22 +86,27 @@ async function mailHome() {
       el("div", { class: "card-head" }, el("h2", { text: "Analysed emails" }), el("span", { class: "sub", text: "stored on this Mac" })),
       el("div", { class: "card-body" }, list))));
   try {
-    MAIL.list = await mailApi("");
+    const rows = await mailApi("");
+    if (gen !== MAIL.gen) return;
+    MAIL.list = rows;
     list.replaceChildren(...(MAIL.list.length ? MAIL.list.map((m) => el("button", { onclick: () => go("email/" + m.sha256) },
       el("span", { class: "risk-dot" }, el("span", { class: "risk-pill " + m.risk, text: m.risk })),
       el("span", { class: "s", text: m.subject || "(no subject)" }),
       el("span", { class: "when", text: fmtAgo(m.added) }),
       el("span", { class: "f", text: (m.sender || "unknown sender") + " · " + (m.name || m.source) }))) : [emptyBox("No emails analysed yet.")]));
-  } catch (e) { list.replaceChildren(emptyBox(e.message)); }
+  } catch (e) { if (gen === MAIL.gen) list.replaceChildren(emptyBox(e.message)); }
 }
 
 // ---------------------------------------------------------------- one email
 async function openEmail(sha, sub) {
   const main = $("mailMain");
   if (!MAIL.a || MAIL.a.sha256 !== sha) {
+    const gen = ++MAIL.gen;  // a newer openEmail / mailHome wins
     main.replaceChildren(el("div", { class: "card", style: "padding:24px" }, el("div", { class: "skeleton" }), el("div", { class: "skeleton", style: "width:50%" })));
-    try { MAIL.a = await mailApi("/" + sha); } catch (e) { main.replaceChildren(emptyBox(e.message)); return; }
-    MAIL.raw = null; MAIL.mark = null; MAIL.sub = "overview";
+    let a;
+    try { a = await mailApi("/" + encodeURIComponent(sha)); } catch (e) { if (gen === MAIL.gen) main.replaceChildren(emptyBox(e.message)); return; }
+    if (gen !== MAIL.gen) return;
+    MAIL.a = a; MAIL.raw = null; MAIL.mark = null; MAIL.sub = "overview";
   }
   if (sub) MAIL.sub = sub;
   renderEmail();
@@ -126,10 +134,11 @@ function renderEmail() {
         el("div", { style: "font-size:12px;color:var(--ink-2)" }, ["high", "medium", "low"].filter((k) => a.counts[k]).map((k) => `${a.counts[k]} ${k}`).join(" · ") || "nothing notable"),
         el("div", { class: "actions" },
           el("button", { class: "btn", onclick: () => copyText(mailReport(), "report") }, "Copy report"),
-          el("a", { class: "btn", href: `/api/soc/email/${a.sha256}/download?token=${TOKEN}`, title: "The original bytes, unchanged" }, icon("i-download"), "Original .eml"),
+          el("a", { class: "btn", href: `/api/soc/email/${encodeURIComponent(a.sha256)}/download`, title: "The original bytes, unchanged" }, icon("i-download"), "Original .eml"),
           el("button", { class: "btn danger", onclick: async () => {
             if (!confirm("Delete this email and its stored original?")) return;
-            await mailApi("/" + a.sha256, { method: "DELETE" }); MAIL.a = null; mailHome(); } }, "Delete")))),
+            try { await mailApi("/" + a.sha256, { method: "DELETE" }); } catch (e) { toast(e.message); return; }
+            MAIL.a = null; setRoute("email", { replace: true }); mailHome(); } }, "Delete")))),
     el("div", { class: "subtabs", role: "tablist" }, tabs.map(([id, label, n]) => el("button", { role: "tab", "aria-selected": String(MAIL.sub === id),
       onclick: () => { MAIL.sub = id; renderEmail(); } }, label, n != null ? el("span", { class: "n", text: n }) : null))),
     panel);
@@ -376,9 +385,8 @@ function renderBodies(panel) {
       const holder = el("div");
       const showSource = () => holder.replaceChildren(pre);
       const showRender = () => {
-        const csp = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'";
         const frame = el("iframe", { class: "sandbox-frame", sandbox: "", referrerpolicy: "no-referrer", title: "Sandboxed preview" });
-        frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="${csp}"><style>a,area{pointer-events:none!important;cursor:not-allowed}</style>` + p.source;
+        frame.srcdoc = safePreviewDoc(p.source || "");
         holder.replaceChildren(el("div", { class: "warnbox", text: "Sandboxed preview: scripts, forms, links and every remote image are blocked, so the sender can't tell it was opened. Layout may look broken without the images." }), frame);
       };
       box.replaceChildren(el("div", { class: "seg", style: "margin-bottom:10px" },
@@ -387,6 +395,53 @@ function renderBodies(panel) {
       showSource();
     }).catch((e) => box.replaceChildren(emptyBox(e.message)));
   }
+}
+// ---------------------------------------------------------------- safe HTML preview
+// Defence in depth for "Render safely".  The iframe is sandboxed (no scripts,
+// forms, popups or same-origin) and the document carries a CSP that blocks
+// every network request.  On top of that the HTML is rewritten here, in an
+// inert DOMParser document (its scripts never run, nothing loads), so the
+// preview contains nothing that could navigate or fetch even if one layer
+// failed or the email's own CSS fought back: every link target, form action,
+// remote source, <base>, <meta> (refresh / CSP override) and <link>
+// (stylesheets, dns-prefetch, preconnect) is removed, and remote url()s and
+// @imports are cut out of CSS.  Links keep their text; the real target is in
+// the tooltip.  pointer-events stays on the iframe itself so the email can
+// still be scrolled; with no targets left, clicking does nothing anyway.
+const PREVIEW_CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'; frame-src 'none'; child-src 'none'";
+const DROP_ELEMENTS = "script, noscript, link, base, meta, iframe, frame, frameset, object, embed, applet, portal, template";
+const URL_ATTRS = new Set(["href", "xlink:href", "action", "formaction", "ping", "src", "srcset", "lowsrc", "dynsrc",
+  "background", "poster", "data", "codebase", "archive", "manifest", "longdesc", "cite", "usemap", "icon", "profile"]);
+const DATA_OK_ATTRS = new Set(["src", "background", "poster"]);  // inline data:image is allowed by the CSP too
+function stripRemoteCss(css) {
+  return String(css)
+    .replace(/@import\b[^;]*;?/gi, "")
+    .replace(/url\(\s*(['"]?)([^'")]*)\1\s*\)/gi, (m, q, u) => /^\s*data:/i.test(u) ? m : "none")
+    .replace(/(image-set|-webkit-image-set)\(/gi, "x-blocked(");
+}
+function safePreviewDoc(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll(DROP_ELEMENTS).forEach((n) => n.remove());
+  for (const node of doc.querySelectorAll("*")) {
+    for (const attr of [...node.attributes]) {
+      const name = attr.name.toLowerCase(), value = attr.value.trim();
+      if (name.startsWith("on") || name === "target" || name === "download" || name === "http-equiv") node.removeAttribute(attr.name);
+      else if (URL_ATTRS.has(name)) {
+        if (DATA_OK_ATTRS.has(name) && /^data:image\//i.test(value)) continue;
+        node.removeAttribute(attr.name);
+        if (name === "href" || name === "xlink:href") { node.setAttribute("title", "Link (blocked): " + value.slice(0, 500)); node.setAttribute("data-blocked-link", ""); }
+      } else if (name === "style") node.setAttribute("style", stripRemoteCss(attr.value));
+    }
+  }
+  doc.querySelectorAll("style").forEach((st) => { st.textContent = stripRemoteCss(st.textContent); });
+  const head = doc.head || doc.documentElement.insertBefore(doc.createElement("head"), doc.body);
+  const csp = doc.createElement("meta");
+  csp.setAttribute("http-equiv", "Content-Security-Policy");
+  csp.setAttribute("content", PREVIEW_CSP);
+  const style = doc.createElement("style");
+  style.textContent = "[data-blocked-link]{cursor:not-allowed}";
+  head.prepend(csp, style);
+  return "<!doctype html>" + doc.documentElement.outerHTML;
 }
 function setSeg(e) { e.target.parentElement.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === e.target))); }
 
@@ -442,7 +497,7 @@ function renderAttachments(panel) {
         el("div", { class: "chips" }, Object.entries(t.pdf_keywords).map(([k, n]) => el("span", { class: "chip", text: `${k} ×${n}` })))) : null,
       el("div", { class: "actions" },
         el("button", { class: "btn", onclick: showHex }, "Hex"), el("button", { class: "btn", onclick: showStrings }, "Strings"),
-        el("a", { class: "btn danger", href: `/api/soc/email/${a.sha256}/part/${encodeURIComponent(att.part)}?view=download&token=${TOKEN}`,
+        el("a", { class: "btn danger", href: `/api/soc/email/${encodeURIComponent(a.sha256)}/part/${encodeURIComponent(att.part)}?view=download`,
           onclick: (e) => { if (!confirm("Download the decoded attachment as a .bin file? It may be malware — don't open it outside an isolated analysis machine.")) e.preventDefault(); } },
           icon("i-download"), "Download .bin")),
       extra));

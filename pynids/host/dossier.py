@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 RDAP_URL = "https://rdap.org/ip/{ip}"
 INTERNETDB_URL = "https://internetdb.shodan.io/{ip}"
 CACHE_TTL = 24 * 3600
+_STOP: Any = object()  # queue sentinel
 
 Fetcher = Callable[[str, float], Optional[Dict[str, Any]]]
 
@@ -192,6 +193,7 @@ class IpLookup:
         self._queued: set = set()
         self._auto_times: List[float] = []
         self._thread: Optional[threading.Thread] = None
+        self._stopping = threading.Event()
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="lookup")
         if self.db_path:
             self._init_db()
@@ -251,6 +253,7 @@ class IpLookup:
         """Blocking lookup (cached).  Private addresses are never sent out."""
         if not is_public(ip):
             return {"ip": ip, "external": False, "reason": "private or reserved address — not looked up"}
+        ip = str(ipaddress.ip_address(ip.split("%")[0]))  # validated, canonical form for URLs and the cache
         if not refresh:
             hit = self.cached(ip)
             if hit:
@@ -291,9 +294,22 @@ class IpLookup:
 
     def start(self) -> "IpLookup":
         if self.mode != "manual" and not self._thread:
+            self._stopping.clear()
             self._thread = threading.Thread(target=self._run, name="ip-lookups", daemon=True)
             self._thread.start()
         return self
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """End the prefetch thread (idempotent).  A lookup in flight finishes first."""
+        thread, self._thread = self._thread, None
+        if thread is None:
+            return
+        self._stopping.set()
+        try:
+            self._queue.put_nowait(_STOP)
+        except queue.Full:
+            pass  # the worker checks _stopping after each item
+        thread.join(timeout)
 
     def enqueue(self, ip: str) -> bool:
         if self.mode == "manual" or not is_public(ip) or ip in self._queued or self.cached(ip):
@@ -311,8 +327,10 @@ class IpLookup:
         return True
 
     def _run(self) -> None:
-        while True:
+        while not self._stopping.is_set():
             ip = self._queue.get()
+            if ip is _STOP or self._stopping.is_set():
+                break
             try:
                 self.lookup(ip)
             except Exception as exc:  # noqa: BLE001

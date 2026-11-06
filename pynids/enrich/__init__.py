@@ -99,6 +99,9 @@ class Enricher:
         host = self.hostnames.lookup(remote)
         if host:
             ctx["remote_host"] = host
+            if not self.hostnames.is_verified(remote):
+                # Only the client's own SNI / Host header names this IP.
+                ctx["remote_host_unverified"] = True
 
         if self.geo is not None and direction in ("outbound", "inbound", "transit"):
             geo = self.geo.lookup(remote)

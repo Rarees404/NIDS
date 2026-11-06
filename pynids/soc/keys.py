@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Dict, Optional
@@ -22,7 +23,21 @@ class KeyStore:
     def __init__(self, path: Optional[Path]) -> None:
         self.path = Path(path) if path else None
         self._lock = threading.Lock()
+        self._mtime = self._stat()
         self._keys: Dict[str, str] = self._load()
+
+    def _stat(self) -> Optional[int]:
+        try:
+            return self.path.stat().st_mtime_ns if self.path else None
+        except OSError:
+            return None
+
+    def _refresh(self) -> None:
+        """Pick up changes another process (``pynids soc key set`` vs the daemon) saved."""
+        mtime = self._stat()
+        if mtime != self._mtime:
+            self._mtime = mtime
+            self._keys = self._load()
 
     def _load(self) -> Dict[str, str]:
         if not self.path:
@@ -37,22 +52,32 @@ class KeyStore:
         if not self.path:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(self._keys, fh)
-        os.replace(tmp, self.path)
+        # mkstemp: a fresh 0600 file every time, never a leftover with older permissions.
+        fd, tmp = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=str(self.path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(self._keys, fh)
+            os.replace(tmp, self.path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        self._mtime = self._stat()
 
     def get(self, name: str) -> Optional[str]:
         env = os.environ.get(f"PYNIDS_KEY_{name.upper()}")
         if env:
             return env.strip()
         with self._lock:
+            self._refresh()
             return self._keys.get(name)
 
     def set(self, name: str, value: str) -> None:
         value = (value or "").strip()
         with self._lock:
+            self._refresh()
             if value:
                 self._keys[name] = value
             else:
@@ -61,6 +86,7 @@ class KeyStore:
 
     def delete(self, name: str) -> bool:
         with self._lock:
+            self._refresh()
             existed = self._keys.pop(name, None) is not None
             self._save()
         return existed

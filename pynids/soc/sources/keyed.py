@@ -7,7 +7,7 @@ from typing import Any, Dict
 from urllib.parse import quote, urlencode
 
 from ..ioc import Ioc, is_public_ip
-from . import HASHES, IPS, Ctx, Result, Source, SourceError, fmt_ts
+from . import HASHES, IPS, Ctx, Result, Source, SourceError, canonical_ip, fmt_ts, seg
 
 
 class VirusTotal(Source):
@@ -24,13 +24,13 @@ class VirusTotal(Source):
         if ioc.type in IPS and not is_public_ip(ioc.value):
             return self.result(status="unsupported", message="private or reserved address — not sent out")
         if ioc.type in IPS:
-            path = f"ip_addresses/{ioc.value}"
+            path = f"ip_addresses/{seg(canonical_ip(ioc.value))}"
         elif ioc.type == "domain":
-            path = f"domains/{ioc.value}"
+            path = f"domains/{seg(ioc.value)}"
         elif ioc.type == "url":
             path = "urls/" + base64.urlsafe_b64encode(ioc.value.encode()).decode().rstrip("=")
         else:
-            path = f"files/{ioc.value}"
+            path = f"files/{seg(ioc.value)}"
         data, res = self.get_json(ctx, f"https://www.virustotal.com/api/v3/{path}", {"x-apikey": ctx.key or ""})
         if not data:
             res.message = "VirusTotal has never seen this"
@@ -192,6 +192,8 @@ class UrlHaus(_AbuseCh):
     types = ("url", "domain", "ipv4", "md5", "sha256")
 
     def query(self, ioc: Ioc, ctx: Ctx) -> Result:
+        if ioc.type in IPS and not is_public_ip(ioc.value):
+            return self.result(status="unsupported", message="private or reserved address — not sent out")
         base = "https://urlhaus-api.abuse.ch/v1/"
         if ioc.type == "url":
             data, res = self.post(ctx, base + "url/", {"url": ioc.value})
@@ -240,6 +242,8 @@ class ThreatFox(_AbuseCh):
     types = IPS + ("domain", "url") + HASHES[:3]
 
     def query(self, ioc: Ioc, ctx: Ctx) -> Result:
+        if ioc.type in IPS and not is_public_ip(ioc.value):
+            return self.result(status="unsupported", message="private or reserved address — not sent out")
         payload = ({"query": "search_hash", "hash": ioc.value} if ioc.type in HASHES
                    else {"query": "search_ioc", "search_term": ioc.value, "exact_match": False})
         data, res = self.post(ctx, "https://threatfox-api.abuse.ch/api/v1/", payload=payload)

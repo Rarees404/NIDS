@@ -240,16 +240,19 @@ class LocalhostProbeDetector(BaseDetector):
         scan_window: float = 30.0,
         ignore_ports: Iterable[int] = (),
         repeat_cooldown: float = 3600.0,
+        scan_cooldown: float = 600.0,
     ) -> None:
         self.scan_threshold = scan_threshold
         self.scan_window = scan_window
         self.ignore_ports = frozenset(int(p) for p in ignore_ports if p)
         self.repeat_cooldown = repeat_cooldown
+        self.scan_cooldown = scan_cooldown
         # (src_ip, dst_ip, app) -> deque[(timestamp, dst_port)]
         self._history: Dict[Tuple[str, str, Optional[str]], Deque[Tuple[float, int]]] = defaultdict(
             lambda: deque(maxlen=64)
         )
-        self._reported: Set[Tuple[str, str, Optional[str]]] = set()
+        # (src_ip, dst_ip, app) -> time of the last scan alert; re-alerts after scan_cooldown
+        self._reported: Dict[Tuple[str, str, Optional[str]], float] = {}
         self._udp_seen: Set[Tuple[str, str, int]] = set()
         # (app, dst_ip, dst_port) -> [last_alert_ts, attempts_since]
         self._recent: Dict[Tuple[Optional[str], str, int], list] = {}
@@ -261,6 +264,8 @@ class LocalhostProbeDetector(BaseDetector):
     def prune(self, now: float) -> None:
         for key in [k for k, h in self._history.items() if not h or now - h[-1][0] > self.scan_window]:
             del self._history[key]
+        for key in [k for k, t in self._reported.items() if now - t >= self.scan_cooldown]:
+            del self._reported[key]
 
     def _is_local_ipc(self, src_port: int, dst_port: int) -> bool:
         """A process connecting to a socket it opened a moment earlier."""
@@ -379,8 +384,13 @@ class LocalhostProbeDetector(BaseDetector):
             hist.popleft()
         hist.append((now, dst_port))
         unique_ports = {p for _, p in hist}
-        if len(unique_ports) >= self.scan_threshold and key not in self._reported:
-            self._reported.add(key)
+        last = self._reported.get(key)
+        if len(unique_ports) >= self.scan_threshold and (last is None or now - last >= self.scan_cooldown):
+            # Re-insert so dict order stays oldest-first for the size cap.
+            self._reported.pop(key, None)
+            if len(self._reported) >= 10_000:
+                del self._reported[next(iter(self._reported))]
+            self._reported[key] = now
             who = app or "An unidentified process"
             yield Alert(
                 alert_type=AlertType.BEHAVIORAL,

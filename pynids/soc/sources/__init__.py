@@ -13,6 +13,7 @@ the original data.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import time
@@ -20,6 +21,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import quote, urlsplit
 
 from ... import __version__
 from ..ioc import Ioc
@@ -37,12 +39,32 @@ class SourceError(Exception):
     """A source failed in a way worth showing the analyst."""
 
 
+_PLAIN_HEADERS = {"user-agent", "accept", "content-type", "content-length", "host"}
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow https redirects only; with an API key in the headers, only to the same host
+    (urllib would otherwise forward the key to wherever the redirect points)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        old, new = urlsplit(req.full_url), urlsplit(newurl)
+        names = {k.lower() for k in list(req.headers) + list(req.unredirected_hdrs)}
+        same = (new.hostname or "").lower() == (old.hostname or "").lower() and new.port == old.port
+        if new.scheme != "https" or (names - _PLAIN_HEADERS and not same):
+            raise SourceError(f"refused a redirect to {new.scheme}://{new.hostname or '?'} "
+                              "(only https, and never to another host while an API key is attached)")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_SafeRedirect)
+
+
 def urllib_http(method: str, url: str, headers: Dict[str, str], body: Optional[bytes],
                 timeout: float) -> Tuple[int, str]:
     req = urllib.request.Request(url, data=body, method=method, headers={
         "User-Agent": f"PyNIDS/{__version__} (SOC workbench)", "Accept": "application/json", **headers})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed https endpoints
+        with _OPENER.open(req, timeout=timeout) as resp:  # noqa: S310 — fixed https endpoints
             return resp.status, resp.read(MAX_RAW + 1).decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read(MAX_RAW).decode("utf-8", errors="replace")
@@ -101,6 +123,7 @@ class Source:
     key_optional = False            # works without a key, better with one
     key_help = ""                   # where to get a key
     active = False                  # touches the indicator's own infrastructure
+    external = True                 # sends the indicator to a third party
     ttl = 6 * 3600                  # cache lifetime in seconds
     per_minute: Optional[int] = None  # rate limit of the free tier
 
@@ -157,6 +180,16 @@ def _short(text: str, n: int = 160) -> str:
     text = re.sub(r"<(script|style)\b.*?</\1>|<[^>]+>", " ", text or "", flags=re.S | re.I)
     text = " ".join(text.split())
     return text[:n] + ("…" if len(text) > n else "")
+
+
+def seg(value: str) -> str:
+    """One URL path segment: nothing in an indicator can add path, query or fragment."""
+    return quote(str(value), safe="")
+
+
+def canonical_ip(value: str) -> str:
+    """The validated, canonical form of an address (scope id dropped) for use in URLs."""
+    return str(ipaddress.ip_address(value.split("%")[0]))
 
 
 def fmt_ts(value: Any) -> Optional[str]:

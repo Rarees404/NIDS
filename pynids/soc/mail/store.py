@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -61,11 +62,19 @@ class EmailStore:
         path = self._path(sha)
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o400)
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-            os.replace(tmp, path)
+            # A unique temp file per writer: two uploads of the same message can't collide.
+            fd, tmp = tempfile.mkstemp(prefix=sha + ".", suffix=".tmp", dir=str(path.parent))
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(data)
+                os.chmod(tmp, 0o400)
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
         result = self.analysis(sha, data)
         s = result["summary"]
         with self._lock:

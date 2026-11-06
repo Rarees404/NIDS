@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
-  { name = "Your Name" }
+  { name = "Rares" }
 ]
 keywords = ["nids", "ids", "security", "network", "intrusion-detection", "scapy", "cybersecurity"]
 classifiers = [

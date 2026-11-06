@@ -23,6 +23,11 @@ from . import filetype
 from .mime import LineIndex, Part, eol_stats, invisible_chars, parse, visible
 
 SEV_ORDER = {"high": 3, "medium": 2, "low": 1, "info": 0}
+# Work limits, so one crafted message can't stall the daemon.
+MAX_LINKS = 300                  # distinct links checked per message
+MAX_HTML_LINKS = 5000            # link attributes collected per HTML part
+MAX_IOC_TEXT = 2 * 1024 * 1024   # characters of each body scanned for indicators
+MAX_IOC_TEXT_TOTAL = 8 * 1024 * 1024
 
 BRANDS = [
     "paypal.com", "microsoft.com", "office.com", "office365.com", "outlook.com", "live.com", "microsoftonline.com",
@@ -124,7 +129,8 @@ def lookalike(domain: str) -> Optional[str]:
 # Received chain
 # ---------------------------------------------------------------------------
 
-_IP_IN = re.compile(r"\[?((?:\d{1,3}\.){3}\d{1,3}|(?:IPv6:)?[0-9a-fA-F:]{3,}:[0-9a-fA-F.]+)\]?")
+# The lookbehind keeps this linear: without it every offset of a long hex run is a new start.
+_IP_IN = re.compile(r"\[?(?<![0-9a-fA-F:.])((?:\d{1,3}\.){3}\d{1,3}|(?:IPv6:)?[0-9a-fA-F:]{3,}:[0-9a-fA-F.]+)\]?")
 
 
 def parse_received(value: str) -> Dict[str, Any]:
@@ -233,6 +239,8 @@ class _Html(HTMLParser):
             m = re.search(r"url\s*=\s*['\"]?([^'\";]+)", a.get("content", ""), re.I)
             if m:
                 self.links.append({"url": m.group(1).strip(), "context": "meta refresh"})
+        if len(self.links) >= MAX_HTML_LINKS:
+            return
         for k, v in a.items():
             if k in self.URL_ATTRS and v.strip():
                 values = [s.strip().split(" ")[0] for s in v.split(",")] if k == "srcset" else [v.strip()]
@@ -243,7 +251,7 @@ class _Html(HTMLParser):
                         self._a = item
                         item["text"] = ""
             if k == "style":
-                for u in re.findall(r"url\(\s*['\"]?([^'\")]+)", v, re.I):
+                for u in re.findall(r"url\(\s*['\"]?([^'\"()]+)", v, re.I):
                     self.links.append({"url": u, "context": f"{tag} style"})
 
     def handle_endtag(self, tag: str) -> None:
@@ -428,6 +436,9 @@ def analyze(data: bytes, name: Optional[str] = None) -> Dict[str, Any]:
     bodies: List[Dict[str, Any]] = []
     attachments: List[Dict[str, Any]] = []
     seen_urls: Dict[str, Dict[str, Any]] = {}
+    limits: List[str] = []  # analysis limits that were reached
+    links_dropped = [0]
+    ioc_budget = [MAX_IOC_TEXT_TOTAL]
 
     def add_link(url: str, part: Part, context: str, text: Optional[str] = None) -> None:
         url = url.strip()
@@ -444,6 +455,9 @@ def analyze(data: bytes, name: Optional[str] = None) -> Dict[str, Any]:
         final, wrapper = unwrap(url)
         key = final
         item = seen_urls.get(key)
+        if item is None and len(links) >= MAX_LINKS:
+            links_dropped[0] += 1
+            return
         if item is None:
             host = (urlsplit(final).hostname or "").lower()
             item = {"url": final, "defanged": defang(final, "url"), "host": host, "wrapped": url if wrapper else None,
@@ -458,14 +472,27 @@ def analyze(data: bytes, name: Optional[str] = None) -> Dict[str, Any]:
             item["texts"].append(visible(text.strip())[:200])
 
     part_lines = {p.id: lines.span(p.body_start, p.end) for p in root.walk()}
+    # The same parser warning on many parts becomes one finding that counts them.
+    warned: Dict[str, Tuple[Dict[str, Any], List[int]]] = {}
+
+    def warn(part: Part) -> None:
+        for w in part.warnings:
+            title = w[0].upper() + w[1:]
+            if title in warned:
+                warned[title][1][0] += 1
+                continue
+            sev = "medium" if ("preamble" in w or "epilogue" in w or "appended" in w) else "low"
+            f = _f(sev, "structure", title, f"part {part.id} ({part.content_type})",
+                   lines.span(part.start, part.end), part.id)
+            warned[title] = (f, [0])
+            findings.append(f)
+
     for part in root.walk():
         if part.is_multipart:
+            warn(part)  # e.g. "too many parts" on the container
             continue
         span = lines.span(part.body_start, part.end)
-        for w in part.warnings:
-            sev = "medium" if ("preamble" in w or "epilogue" in w or "appended" in w) else "low"
-            findings.append(_f(sev, "structure", w[0].upper() + w[1:], f"part {part.id} ({part.content_type})",
-                               lines.span(part.start, part.end), part.id))
+        warn(part)
         if part.content_type == "message/rfc822":
             continue
         if part.is_attachment:
@@ -528,20 +555,32 @@ def analyze(data: bytes, name: Optional[str] = None) -> Dict[str, Any]:
             if p.meta_refresh:
                 findings.append(_f("medium", "content", "Automatic redirect (meta refresh)",
                                    "; ".join(p.meta_refresh)[:200], span, part.id))
-        for ioc in extract(text):
+        scan = min(len(text), MAX_IOC_TEXT, ioc_budget[0])
+        ioc_budget[0] -= scan
+        if scan < len(text):
+            body["ioc_scan_truncated"] = True
+            limits.append(f"part {part.id}: only the first {scan:,} of {len(text):,} characters were scanned "
+                          "for links and indicators")
+        for ioc in extract(text[:scan]) if scan else ():
             if ioc.type == "url":
                 add_link(ioc.value, part, "text")
         cues = sorted({m.group(0).lower() for m in URGENCY.finditer(val("Subject") + " " + text[:200_000])})
         if cues:
             body["cues"] = cues
 
+    for f, (more,) in warned.values():
+        if more:
+            f["detail"] += f" and {more:,} more part(s)"
+    if links_dropped[0]:
+        limits.append(f"only the first {MAX_LINKS} distinct links were checked; {links_dropped[0]:,} more skipped")
+
     # link checks
     for item in links:
         host = item["host"]
         if not host:
             continue
-        is_ip = classify(host) is not None and classify(host).type in ("ipv4", "ipv6")
-        if is_ip:
+        host_ioc = classify(host)
+        if host_ioc is not None and host_ioc.type in ("ipv4", "ipv6"):
             item["flags"].append("ip-literal")
         if "@" in (urlsplit(item["url"]).netloc or ""):
             item["flags"].append("userinfo")
@@ -628,6 +667,13 @@ def analyze(data: bytes, name: Optional[str] = None) -> Dict[str, Any]:
     for a in attachments:
         add_ioc(a["hashes"]["sha256"], f"attachment {a['filename'] or a['part']}")
 
+    if limits:
+        findings.append(_f("info", "structure", "Analysis limits reached — part of this message wasn't examined",
+                           "; ".join(limits)[:1000]))
+    unique: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    for f in findings:
+        unique.setdefault((f["severity"], f["category"], f["title"], f["detail"], f["part"]), f)
+    findings = list(unique.values())
     findings.sort(key=lambda f: -SEV_ORDER[f["severity"]])
     counts = {s: sum(1 for f in findings if f["severity"] == s) for s in SEV_ORDER}
     risk = "high" if counts["high"] else "medium" if counts["medium"] else "low" if counts["low"] else "none"
@@ -641,4 +687,5 @@ def analyze(data: bytes, name: Optional[str] = None) -> Dict[str, Any]:
         "structure": root.to_dict(lines),
         "bodies": bodies, "links": links, "attachments": attachments,
         "iocs": list(iocs.values()), "findings": findings, "counts": counts, "risk": risk,
+        "limits": limits,
     }

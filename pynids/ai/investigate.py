@@ -199,9 +199,32 @@ class Toolbox:
                                        "exposure_label", "signature", "flags")}
                 for r in self.inspector.listening()][:80]
 
+    def _known_programs(self) -> set:
+        """Executables PyNIDS has actually observed: behind a connection, listener or recent
+        alert (whose connection may be gone by now), or run by launchd."""
+        snap = self.inspector.connections()
+        known = {r.get("exe") for r in snap.get("connections") or []}
+        known |= {p.get("exe") for p in snap.get("programs") or []}
+        known |= {r.get("exe") for r in snap.get("listening") or []}
+        if self.live:
+            known |= {(a.get("context") or {}).get("exe") for a in self.live.recent_alerts(limit=500)}
+        persistence = getattr(self.inspector, "persistence", None)
+        if persistence is not None:
+            try:
+                known |= {j.get("program") for j in persistence.jobs()}
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("launch items unavailable: %s", exc)
+        known.discard(None)
+        return known
+
     def t_inspect_program(self, exe: str) -> Dict[str, Any]:
         if not exe.startswith("/"):
             raise ValueError("exe must be an absolute path, as shown by list_connections")
+        # The path comes from the model, which reads attacker-influenced data: only
+        # programs PyNIDS has seen may be opened and hashed.
+        if exe not in self._known_programs():
+            raise ValueError("exe must be a program shown by list_connections, list_listening_ports, "
+                             "recent_alerts or list_launch_items")
         return self.inspector.program(exe)
 
     def t_ip_dossier(self, ip: str, lookup_external: bool = False) -> Dict[str, Any]:

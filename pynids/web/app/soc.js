@@ -12,6 +12,8 @@ const SOC = {
   parsed: null,         // multi-indicator extraction result
   listFilter: null,
   retry: {},            // source name -> timer (rate limits)
+  gen: {},              // source name -> generation of its newest lookup
+  nav: 0,               // bumped on every navigation; stale responses compare it
 };
 const VERDICT_LABEL = { malicious: "Malicious", suspicious: "Suspicious", clean: "Clean", info: "Info", unknown: "No verdict" };
 const VERDICT_ORDER = ["malicious", "suspicious", "clean", "info", "unknown"];
@@ -47,7 +49,7 @@ function socRoot() {
     el("div", { class: "section-title" }, el("h1", { text: "Investigate" }),
       el("span", { class: "sub", text: "Look up indicators across threat-intel sources, then pivot." }),
       el("div", { class: "right" },
-        el("button", { class: "btn", onclick: () => socHome() }, "Home"),
+        el("button", { class: "btn", onclick: () => { setRoute("investigate"); socHome(); } }, "Home"),
         el("button", { class: "btn", onclick: () => openSourcesDrawer() }, "Sources & API keys"))),
     el("div", { class: "card inv-search" },
       el("div", { class: "box" }, input,
@@ -67,12 +69,40 @@ async function loadSources(force) {
 }
 function sourceInfo(name) { return (SOC.sources || []).find((s) => s.name === name) || { name, label: name }; }
 
-async function socShow(arg) {
+/** Show the tab for a route.  opts.auto is false when the URL came from
+ * outside the dashboard (a link on another site, a typed URL): then the
+ * indicator is only pre-filled, and nothing is sent to outside sources until
+ * the analyst clicks "Look up". */
+async function socShow(arg, opts = {}) {
   socRoot();
+  const focus = () => setTimeout(() => $("invInput").focus(), 0);
+  if (arg && SOC.ioc && (SOC.ioc.value === arg || SOC.ioc.original === arg)) { focus(); return; }  // already showing it
+  const nav = ++SOC.nav;
   try { await loadSources(); } catch (e) { $("invMain").replaceChildren(emptyBox(e.message)); return; }
-  if (arg) { $("invInput").value = arg; socRun(arg); }
-  else if (!SOC.ioc && !SOC.parsed) socHome();
-  setTimeout(() => $("invInput").focus(), 0);
+  if (nav !== SOC.nav) return;
+  if (arg) {
+    if (opts.auto === false) socConfirm(arg);
+    else { $("invInput").value = arg; socRun(arg, { fromRoute: true }); }
+  } else if (opts.fromHistory) {
+    // Back to plain #investigate: the indicator list it came from, or home.
+    if (SOC.parsed) { Object.values(SOC.retry).forEach(clearTimeout); SOC.retry = {}; SOC.ioc = null; renderTrail(); renderList(); } else socHome();
+  } else if (!SOC.ioc && !SOC.parsed) socHome();
+  focus();
+}
+
+function socConfirm(value) {
+  Object.values(SOC.retry).forEach(clearTimeout); SOC.retry = {};
+  SOC.ioc = null; SOC.parsed = null; SOC.trail = []; renderTrail();
+  $("invInput").value = value;
+  $("invMain").replaceChildren(el("div", { class: "card inv-confirm", style: "margin-top:16px" },
+    el("div", { class: "card-head" }, el("h2", { text: "Look up this indicator?" }),
+      el("span", { class: "sub", text: "opened from a link — nothing has been sent anywhere yet" })),
+    el("div", { class: "card-body" },
+      el("div", { class: "value", text: value }),
+      el("p", { class: "note", text: "Looking it up sends it to the threat-intel sources you have enabled (VirusTotal, AbuseIPDB …). Check it is what you meant to investigate." }),
+      el("div", { class: "actions" },
+        el("button", { class: "btn primary", onclick: () => socRun(value, { fromRoute: true }) }, icon("i-search"), "Look up"),
+        el("button", { class: "btn", onclick: () => { setRoute("investigate", { replace: true }); socHome(); } }, "Cancel")))));
 }
 
 /** Entry point used elsewhere in the dashboard ("Investigate" buttons). */
@@ -82,6 +112,8 @@ function investigate(value) {
 
 // ---------------------------------------------------------------- home
 async function socHome() {
+  const nav = ++SOC.nav;
+  Object.values(SOC.retry).forEach(clearTimeout); SOC.retry = {};
   SOC.ioc = null; SOC.parsed = null; SOC.trail = []; renderTrail();
   const main = $("invMain");
   const hist = el("div", { class: "hist" }, el("div", { class: "skeleton" }));
@@ -98,11 +130,13 @@ async function socHome() {
       el("div", { class: "card-body" }, srcs))));
   try {
     const rows = await api("/api/soc/history?limit=40");
+    if (nav !== SOC.nav) return;
     hist.replaceChildren(...(rows.length ? rows.map((r) => el("button", { "data-verdict": r.verdict, onclick: () => investigate(r.value) },
       el("i"), el("span", { class: "t", text: TYPE_LABEL[r.kind] || r.kind }), el("span", { class: "v", text: r.value }),
       el("span", { class: "a", text: fmtAgo(r.last) }))) : [emptyBox("Nothing investigated yet.")]));
   } catch (e) { hist.replaceChildren(emptyBox(e.message)); }
   await loadSources().catch(() => {});
+  if (nav !== SOC.nav) return;
   srcs.replaceChildren(...(SOC.sources || []).map((s) => el("div", { class: "srcline" },
     el("b", { text: s.label }), s.configured ? el("span", { class: "ok-dot", text: s.key ? "● key set" : "● ready" })
       : s.key_optional ? el("span", {}, el("span", { class: "ok-dot", text: "● ready " }),
@@ -113,20 +147,26 @@ async function socHome() {
 }
 
 // ---------------------------------------------------------------- run
-async function socRun(text) {
+/** opts.fromRoute: the text came from the URL, so the URL is updated in place
+ * (replaceState) instead of adding a history entry. */
+async function socRun(text, opts = {}) {
   text = (text || "").trim();
   if (!text) return;
+  const nav = ++SOC.nav;
   const main = $("invMain");
   main.replaceChildren(el("div", { class: "card", style: "margin-top:16px;padding:18px" }, el("div", { class: "skeleton" }), el("div", { class: "skeleton", style: "width:60%" })));
   let parsed;
   try { parsed = await api("/api/soc/parse", { method: "POST", body: JSON.stringify({ text }) }); }
-  catch (e) { main.replaceChildren(emptyBox(e.message)); return; }
+  catch (e) { if (nav === SOC.nav) main.replaceChildren(emptyBox(e.message)); return; }
+  if (nav !== SOC.nav) return;  // the analyst started something else meanwhile
   if (!parsed.iocs.length) {
     main.replaceChildren(el("div", { class: "card", style: "margin-top:16px" }, emptyBox("No indicators recognised. Paste an IP, domain, URL, file hash, email address, ASN or CVE.")));
     return;
   }
-  if (parsed.single) { SOC.trail = []; openIoc(parsed.iocs[0]); return; }
+  if (parsed.single) { SOC.trail = []; openIoc(parsed.iocs[0], { replaceRoute: opts.fromRoute }); return; }
+  Object.values(SOC.retry).forEach(clearTimeout); SOC.retry = {};
   SOC.parsed = parsed; SOC.ioc = null; SOC.listFilter = null; SOC.trail = []; renderTrail();
+  setRoute("investigate", { replace: opts.fromRoute });
   renderList();
 }
 
@@ -156,18 +196,24 @@ function renderList() {
 function downloadCsv(rows) {
   const q = (s) => '"' + String(s).replace(/"/g, '""') + '"';
   const csv = "type,value,defanged\n" + rows.map((i) => [i.type, i.value, i.defanged].map(q).join(",")).join("\n");
-  const a = el("a", { href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })), download: "indicators.csv" });
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  const a = el("a", { href: url, download: "indicators.csv" });
   document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);  // after the download has started
 }
 
 // ---------------------------------------------------------------- one indicator
 async function openIoc(ioc, opts = {}) {
+  const nav = ++SOC.nav;
   if (!ioc.sources) {  // a pivot: only type + value known
     try { ioc = (await api("/api/soc/parse", { method: "POST", body: JSON.stringify({ text: ioc.value }) })).iocs[0] || ioc; }
-    catch (e) { toast(e.message); return; }
+    catch (e) { if (nav === SOC.nav) toast(e.message); return; }
+    if (nav !== SOC.nav) return;
+    if (!ioc.sources) { toast("Not an indicator PyNIDS can look up"); return; }
   }
   Object.values(SOC.retry).forEach(clearTimeout); SOC.retry = {};
   SOC.ioc = ioc; SOC.results = {};
+  setRoute("investigate/" + encodeURIComponent(ioc.value), { replace: opts.replaceRoute });
   if (!opts.fromTrail) {
     const idx = SOC.trail.findIndex((t) => t.type === ioc.type && t.value === ioc.value);
     if (idx >= 0) SOC.trail = SOC.trail.slice(0, idx + 1); else SOC.trail.push(ioc);
@@ -175,6 +221,7 @@ async function openIoc(ioc, opts = {}) {
   $("invInput").value = ioc.value;
   renderTrail();
   await loadSources().catch(() => {});
+  if (nav !== SOC.nav || SOC.ioc !== ioc) return;
   const runnable = ioc.sources.filter((n) => { const s = sourceInfo(n); return s.configured || s.key_optional; });
   const missing = ioc.sources.filter((n) => !runnable.includes(n));
   $("invMain").replaceChildren(
@@ -189,14 +236,21 @@ async function openIoc(ioc, opts = {}) {
 
 async function lookupOne(name, refresh) {
   const ioc = SOC.ioc;
+  if (!ioc) return;
+  clearTimeout(SOC.retry[name]); delete SOC.retry[name];  // a pending rate-limit retry is superseded
+  const gen = SOC.gen[name] = (SOC.gen[name] || 0) + 1;
   SOC.results[name] = { loading: true }; renderCard(name);
   let res;
   try { res = await api("/api/soc/lookup", { method: "POST", body: JSON.stringify({ source: name, type: ioc.type, value: ioc.value, refresh }) }); }
   catch (e) { res = { source: name, status: "error", message: e.message, verdict: "unknown", summary: [], tags: [], pivots: [] }; }
-  if (SOC.ioc !== ioc) return;  // the analyst moved on
+  if (SOC.ioc !== ioc || SOC.gen[name] !== gen) return;  // the analyst moved on, or asked again
   SOC.results[name] = res;
   if (res.status === "rate_limited") {
-    SOC.retry[name] = setTimeout(() => { if (SOC.ioc === ioc) lookupOne(name, refresh); }, (res.retry_after || 15) * 1000);
+    clearTimeout(SOC.retry[name]);
+    SOC.retry[name] = setTimeout(() => {
+      delete SOC.retry[name];
+      if (SOC.ioc === ioc && SOC.gen[name] === gen) lookupOne(name, refresh);
+    }, Math.max(1, Number(res.retry_after) || 15) * 1000);
   }
   renderCard(name); renderSubject();
 }
@@ -258,7 +312,7 @@ function renderCard(name) {
   if (!card) return;
   const s = sourceInfo(name), r = SOC.results[name] || {};
   const head = el("div", { class: "card-head" },
-    el("h2", {}, s.homepage ? el("a", { href: s.homepage, target: "_blank", rel: "noreferrer noopener", style: "color:inherit;text-decoration:none", title: s.description }, s.label) : s.label),
+    el("h2", {}, safeHref(s.homepage) ? el("a", { href: safeHref(s.homepage), target: "_blank", rel: "noreferrer noopener", style: "color:inherit;text-decoration:none", title: s.description }, s.label) : s.label),
     r.loading ? el("span", { class: "spinner" }) : r.status === "ok" ? vpill(r.verdict) : null,
     el("div", { class: "right" },
       r.fetched && !r.loading ? el("span", { class: "when", title: new Date(r.fetched * 1000).toLocaleString(), text: (r.cached ? "cached · " : "") + fmtAgo(r.fetched) }) : null,
@@ -303,8 +357,8 @@ function summaryValue(v) {
         el("span", { class: "muted", text: row.time || "" }),
         el("span", { class: "u", text: row.url || "" }),
         el("span", {}), el("span", { class: "muted", text: [row.ip, row.country, row.server].filter(Boolean).join(" · ") }),
-        row.report ? el("span", {}) : null,
-        row.report ? el("span", {}, el("a", { href: row.report, target: "_blank", rel: "noreferrer noopener", class: "ext" }, "report")) : null)),
+        safeHref(row.report) ? el("span", {}) : null,
+        safeHref(row.report) ? el("span", {}, el("a", { href: safeHref(row.report), target: "_blank", rel: "noreferrer noopener", class: "ext" }, "report")) : null)),
         !all && v.length > 5 ? el("button", { class: "mini-btn", onclick: () => draw(true) }, `+${v.length - 5} more`) : null);
       draw(false);
       return dd;
@@ -348,7 +402,7 @@ function linksCard(ioc) {
   return el("div", { class: "card" },
     el("div", { class: "card-head" }, el("h2", { text: "Open in…" }), el("span", { class: "sub", text: "nothing is sent until you click" })),
     el("div", { class: "card-body" }, ioc.links && ioc.links.length
-      ? el("div", { class: "linkgrid" }, ioc.links.map((l) => el("a", { href: l.url, target: "_blank", rel: "noreferrer noopener" }, l.label)))
+      ? el("div", { class: "linkgrid" }, ioc.links.filter((l) => safeHref(l.url)).map((l) => el("a", { href: safeHref(l.url), target: "_blank", rel: "noreferrer noopener" }, l.label)))
       : emptyBox("No external tools for this type.")));
 }
 

@@ -15,8 +15,9 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
-from .ioc import Ioc, classify, is_public_ip, parse
+from .ioc import Ioc, classify, is_public_ip, parse, private_reason
 from .keys import KeyStore
 from .links import links
 from .sources import (IPS, VERDICT_RANK, Ctx, Http, Result, Source, SourceError, all_sources,
@@ -33,6 +34,7 @@ class LocalSource(Source):
     description = "Your threat-intel feeds, traffic this Mac exchanged with the indicator, and alerts it raised."
     types = ("ipv4", "ipv6", "domain", "url", "email", "md5", "sha1", "sha256", "sha512", "asn", "cve")
     ttl = 0  # always fresh
+    external = False
 
     def __init__(self, intel: Optional[Callable[[], Any]] = None, inspector: Any = None,
                  live: Any = None, db_path: Optional[Path] = None) -> None:
@@ -259,20 +261,36 @@ class Workbench:
             self._remember(iocs[0])
         return {"input": text, "iocs": out, "single": len(iocs) == 1}
 
-    def lookup(self, source: str, kind: str, value: str, refresh: bool = False) -> Dict[str, Any]:
+    def lookup(self, source: str, kind: str, value: str, refresh: bool = False,
+               send_query: bool = False) -> Dict[str, Any]:
+        """Run one source.  Indicators that only mean something on this network are never sent
+        out, and a URL goes out without its query string and fragment unless *send_query*."""
         src = self.sources.get(source)
         if src is None:
             raise KeyError(f"unknown source: {source}")
         ioc = classify(value)
         if ioc is None or ioc.type != kind:
-            ioc = Ioc(kind, value, value) if ioc is None else ioc
+            return Result(source=source, status="unsupported",
+                          message=f"not a valid {kind}" if ioc is None else f"this is a {ioc.type}, not a {kind}").to_dict()
         if not src.supports(ioc):
             return Result(source=source, status="unsupported", message=f"{src.label} doesn't handle {ioc.type}").to_dict()
+        extra: Dict[str, Any] = {}
+        sent = ioc
+        if src.external:
+            reason = private_reason(ioc)
+            if reason:
+                res = Result(source=source, status="unsupported",
+                             message=f"skipped: {reason} — not sent to third parties")
+                return {**res.to_dict(), "skipped": "private"}
+            parts = urlsplit(ioc.value) if ioc.type == "url" else None
+            if parts and (parts.query or parts.fragment) and not send_query:
+                sent = Ioc("url", urlunsplit((parts.scheme, parts.netloc, parts.path, "", "")), ioc.original)
+                extra = {"query_stripped": True, "sent_value": sent.value}
         key = self.keys.get(src.key) if src.key else None
         if src.key and not key and not src.key_optional:
             return Result(source=source, status="needs_key", message=src.key_help).to_dict()
         if not refresh:
-            hit = self._cached(src, ioc)
+            hit = self._cached(src, sent)
             if hit:
                 return hit
         wait = self.limiter.acquire(src.name, src.per_minute)
@@ -281,7 +299,7 @@ class Workbench:
                          message=f"free-tier limit of {src.per_minute}/min — retrying in {round(wait)} s")
             return {**res.to_dict(), "retry_after": max(1, round(wait))}
         try:
-            res = src.query(ioc, Ctx(http=self.http, key=key))
+            res = src.query(sent, Ctx(http=self.http, key=key))
         except SourceError as exc:
             res = Result(source=source, status="error", message=str(exc))
         except (OSError, ValueError) as exc:
@@ -290,8 +308,10 @@ class Workbench:
         except Exception as exc:  # noqa: BLE001 — a broken source must not break the page
             logger.exception("source %s failed on %s", source, ioc.value)
             res = Result(source=source, status="error", message=f"internal error: {exc}"[:300])
-        data = res.to_dict()
-        self._store(src, ioc, data)
+        if extra and not res.message:
+            res.message = "looked up without the query string (it often carries tokens or the recipient's address)"
+        data = {**res.to_dict(), **extra}
+        self._store(src, sent, data)
         if res.status == "ok":
             self._remember(ioc, res.verdict)
         return data

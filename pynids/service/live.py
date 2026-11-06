@@ -51,6 +51,8 @@ class LiveState(BaseOutput):
         self._max_remotes = max_remotes
 
         self._subscribers: List["queue.Queue[Dict[str, Any]]"] = []
+        # Set on shutdown: open /api/stream handlers see it and return.
+        self.streams_closed = threading.Event()
 
     # ------------------------------------------------------------------
     # Packet observer
@@ -170,6 +172,10 @@ class LiveState(BaseOutput):
         with self._lock:
             if q in self._subscribers:
                 self._subscribers.remove(q)
+
+    def close_streams(self) -> None:
+        self.streams_closed.set()
+        self.broadcast("bye", {})  # wake handlers blocked on their queue
 
     def broadcast(self, event_type: str, data: Dict[str, Any]) -> None:
         with self._lock:

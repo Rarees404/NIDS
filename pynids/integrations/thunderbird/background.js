@@ -54,11 +54,13 @@ async function analyze(message) {
   let data = {};
   try { data = await res.json(); } catch (_) { /* empty */ }
   if (!res.ok) {
-    await notify("PyNIDS refused the message", data.error || `HTTP ${res.status}` +
+    await notify("PyNIDS refused the message", (data.error || `HTTP ${res.status}`) +
       (res.status === 401 ? " — check the API token in the add-on options" : ""));
     return;
   }
-  await messenger.windows.openDefaultBrowser(`http://127.0.0.1:${port}/#email/${data.sha256}`);
+  // /?auth= signs the browser in to the dashboard (it is locked without the session cookie).
+  await messenger.windows.openDefaultBrowser(
+    `http://127.0.0.1:${port}/?auth=${encodeURIComponent(token)}#email/${encodeURIComponent(data.sha256)}`);
 }
 
 messenger.messageDisplayAction.onClicked.addListener(async (tab) => {

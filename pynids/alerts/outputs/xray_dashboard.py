@@ -29,9 +29,10 @@ the state under the same lock.
 """
 from __future__ import annotations
 
+import heapq
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import datetime
 from typing import Any, Deque, Dict, Optional, Tuple
 
@@ -78,6 +79,9 @@ class XRayDashboard(BaseOutput):
     """
     Rich-Live multi-panel dashboard for stealth/X-Ray events.
 
+    Every string that came off the wire (SNI, hosts, paths, messages) is
+    rendered through :class:`rich.text.Text`, never parsed as markup.
+
     Args:
         iface:         Interface name shown in the banner (purely cosmetic).
         refresh_hz:    Render rate.  4-6 Hz feels live without flickering.
@@ -116,15 +120,17 @@ class XRayDashboard(BaseOutput):
         self._severity_counts: Dict[Severity, int] = {s: 0 for s in Severity}
 
         # Per-panel rolling state.
+        # The *_keys maps only index items still in their panel's deque.
         self._webrtc: Deque[Dict[str, Any]] = deque(maxlen=max_per_panel)
         self._webrtc_keys: Dict[Tuple[str, str, Optional[str]], Dict[str, Any]] = {}
 
         self._localhost: Deque[Dict[str, Any]] = deque(maxlen=max_per_panel)
         self._localhost_keys: Dict[Tuple[str, str, int], Dict[str, Any]] = {}
 
-        self._quic: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        self._websocket: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        self._trackers: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # Most recently updated last; capped at MAX_KEYS entries each.
+        self._quic: "OrderedDict[Tuple[str, str], Dict[str, Any]]" = OrderedDict()
+        self._websocket: "OrderedDict[Tuple[str, str], Dict[str, Any]]" = OrderedDict()
+        self._trackers: "OrderedDict[Tuple[str, str], Dict[str, Any]]" = OrderedDict()
 
         self._stream: Deque[Dict[str, Any]] = deque(maxlen=max_stream)
         self._start_time = time.time()
@@ -248,8 +254,7 @@ class XRayDashboard(BaseOutput):
                 "severity": alert.severity,
                 "count": 0,
             }
-            self._webrtc_keys[key] = item
-            self._webrtc.append(item)
+            self._push(self._webrtc, self._webrtc_keys, key, item)
         item["count"] += 1
         item["last_seen"] = alert.timestamp
         if alert.severity > item["severity"]:
@@ -273,8 +278,7 @@ class XRayDashboard(BaseOutput):
                 "severity": alert.severity,
                 "count": 0,
             }
-            self._localhost_keys[key] = item
-            self._localhost.append(item)
+            self._push(self._localhost, self._localhost_keys, key, item)
         item["count"] += 1
         item["last_seen"] = alert.timestamp
         if alert.severity > item["severity"]:
@@ -295,7 +299,7 @@ class XRayDashboard(BaseOutput):
             item["sni"] = ev["sni"]
         item["count"] += 1
         item["last_seen"] = alert.timestamp
-        self._quic[key] = item
+        self._remember(self._quic, key, item)
 
     def _ingest_websocket(self, alert: Alert, ev: Dict[str, Any]) -> None:
         host = ev.get("host") or alert.dst_ip or "?"
@@ -308,7 +312,7 @@ class XRayDashboard(BaseOutput):
         }
         item["count"] += 1
         item["last_seen"] = alert.timestamp
-        self._websocket[key] = item
+        self._remember(self._websocket, key, item)
 
     def _ingest_tracker(self, alert: Alert, ev: Dict[str, Any]) -> None:
         host = ev.get("host") or alert.dst_ip or "?"
@@ -323,7 +327,24 @@ class XRayDashboard(BaseOutput):
         }
         item["count"] += 1
         item["last_seen"] = alert.timestamp
-        self._trackers[key] = item
+        self._remember(self._trackers, key, item)
+
+    MAX_KEYS = 2000
+
+    @staticmethod
+    def _push(panel: Deque[Dict[str, Any]], index: Dict, key: Any, item: Dict[str, Any]) -> None:
+        """Append to a bounded panel deque, unindexing the item it pushes out."""
+        if panel.maxlen is not None and len(panel) == panel.maxlen:
+            index.pop(panel[0].get("_key"), None)
+        item["_key"] = key
+        index[key] = item
+        panel.append(item)
+
+    def _remember(self, table: "OrderedDict", key: Any, item: Dict[str, Any]) -> None:
+        table[key] = item
+        table.move_to_end(key)
+        while len(table) > self.MAX_KEYS:
+            table.popitem(last=False)
 
     # ------------------------------------------------------------------
     # Rendering
@@ -379,22 +400,22 @@ class XRayDashboard(BaseOutput):
         )
 
         meter = Text()
-        meter.append(f"iface ", style="dim")
+        meter.append("iface ", style="dim")
         meter.append(self._iface, style="bold")
-        meter.append(f"   uptime ", style="dim")
+        meter.append("   uptime ", style="dim")
         meter.append(uptime_str, style="bold")
-        meter.append(f"   hidden events ", style="dim")
+        meter.append("   hidden events ", style="dim")
         meter.append(str(counts.get("total", 0)), style="bold yellow")
-        meter.append(f"   leaks ", style="dim")
+        meter.append("   leaks ", style="dim")
         meter.append(
             str(counts.get("webrtc", 0) + counts.get("localhost", 0)),
             style="bold red",
         )
-        meter.append(f"   trackers ", style="dim")
+        meter.append("   trackers ", style="dim")
         meter.append(str(counts.get("tracker", 0)), style="bold yellow")
-        meter.append(f"   beacons ", style="dim")
+        meter.append("   beacons ", style="dim")
         meter.append(str(counts.get("beacon", 0)), style="yellow")
-        meter.append(f"   crit/high ", style="dim")
+        meter.append("   crit/high ", style="dim")
         meter.append(
             f"{sev.get(Severity.CRITICAL, 0)}/{sev.get(Severity.HIGH, 0)}",
             style="bold red",
@@ -439,8 +460,8 @@ class XRayDashboard(BaseOutput):
             table.add_row(
                 ts,
                 Text(f"{src} → {dst}", style=sev_style),
-                Text(leaked_ip, style=cls_style),
-                Text(cls, style=cls_style),
+                Text(str(leaked_ip), style=cls_style),
+                Text(str(cls), style=cls_style),
                 str(it.get("count", 1)),
             )
 
@@ -484,9 +505,9 @@ class XRayDashboard(BaseOutput):
             sev_style = _SEV_STYLE.get(it.get("severity", Severity.MEDIUM), "white")
             table.add_row(
                 ts,
-                src,
+                Text(str(src)),
                 Text(dst, style=sev_style),
-                Text(kind, style=kind_style),
+                Text(str(kind), style=kind_style),
                 str(it.get("count", 1)),
             )
 
@@ -507,9 +528,7 @@ class XRayDashboard(BaseOutput):
         table.add_column("×", justify="right", width=4)
 
         with self._lock:
-            items = sorted(
-                self._quic.values(), key=lambda x: x.get("last_seen", 0), reverse=True
-            )[: self._max_per_panel]
+            items = self._newest(self._quic)
 
         if not items:
             return self._empty_panel(
@@ -523,8 +542,8 @@ class XRayDashboard(BaseOutput):
             target = it.get("sni") or f"{it.get('dst')}:{it.get('port') or '?'}"
             table.add_row(
                 ts,
-                f"{it.get('src')} → {target}",
-                Text(it.get("version") or "?", style="bright_cyan"),
+                Text(f"{it.get('src')} → {target}"),
+                Text(str(it.get("version") or "?"), style="bright_cyan"),
                 str(it.get("count", 1)),
             )
 
@@ -545,9 +564,7 @@ class XRayDashboard(BaseOutput):
         table.add_column("×", justify="right", width=4)
 
         with self._lock:
-            items = sorted(
-                self._websocket.values(), key=lambda x: x.get("last_seen", 0), reverse=True
-            )[: self._max_per_panel]
+            items = self._newest(self._websocket)
 
         if not items:
             return self._empty_panel(
@@ -560,8 +577,8 @@ class XRayDashboard(BaseOutput):
             ts = self._fmt_time(it.get("last_seen"))
             table.add_row(
                 ts,
-                Text(it.get("host") or "?", style="bright_blue"),
-                Text((it.get("path") or "/")[:40], style="dim"),
+                Text(str(it.get("host") or "?"), style="bright_blue"),
+                Text(str(it.get("path") or "/")[:40], style="dim"),
                 str(it.get("count", 1)),
             )
 
@@ -582,9 +599,7 @@ class XRayDashboard(BaseOutput):
         table.add_column("×", justify="right", width=4)
 
         with self._lock:
-            items = sorted(
-                self._trackers.values(), key=lambda x: x["count"], reverse=True
-            )[:8]
+            items = heapq.nlargest(8, self._trackers.values(), key=lambda x: x["count"])
             beacons = self._counts.get("beacon", 0)
             prefetch = self._counts.get("prefetch", 0)
 
@@ -596,17 +611,17 @@ class XRayDashboard(BaseOutput):
         else:
             for it in items:
                 table.add_row(
-                    it.get("category") or "?",
-                    it.get("host") or "?",
-                    it.get("source") or "?",
+                    Text(str(it.get("category") or "?")),
+                    Text(str(it.get("host") or "?")),
+                    Text(str(it.get("source") or "?")),
                     str(it.get("count", 1)),
                 )
             content = table
 
         footer = Text()
-        footer.append(f"   beacons/pixels: ", style="dim")
+        footer.append("   beacons/pixels: ", style="dim")
         footer.append(str(beacons), style="bold yellow")
-        footer.append(f"   dns prefetch storms: ", style="dim")
+        footer.append("   dns prefetch storms: ", style="dim")
         footer.append(str(prefetch), style="bold cyan")
 
         return Panel(
@@ -646,7 +661,7 @@ class XRayDashboard(BaseOutput):
             dst = ev.get("host") or ev.get("dst_ip") or "-"
             port = ev.get("dst_port")
             flow = f"{src} → {dst}" + (f":{port}" if port and not ev.get("host") else "")
-            table.add_row(ts, kind_text, sev_text, flow, ev["message"][:200])
+            table.add_row(ts, kind_text, sev_text, Text(flow), Text(str(ev["message"])[:200]))
 
         return Panel(
             table,
@@ -657,6 +672,15 @@ class XRayDashboard(BaseOutput):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _newest(self, table: "OrderedDict") -> list:
+        """The most recently updated rows, newest first (caller holds the lock)."""
+        out = []
+        for item in reversed(table.values()):
+            if len(out) >= self._max_per_panel:
+                break
+            out.append(item)
+        return out
 
     @staticmethod
     def _empty_panel(title: str, msg: str, border: str = "white") -> Panel:

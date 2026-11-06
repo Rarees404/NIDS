@@ -16,6 +16,7 @@ encoded words, RFC 2231 parameters, quoted-printable.
 """
 from __future__ import annotations
 
+import array
 import base64
 import binascii
 import bisect
@@ -30,6 +31,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 MAX_DEPTH = 30
 MAX_PARTS = 2000
+MAX_HEADERS = 20000  # across the whole message
 
 # Characters that change how text *looks* without being visible: shown as
 # ⟨U+XXXX⟩ markers in every view so nothing can hide in plain sight.
@@ -56,12 +58,14 @@ def visible(text: str) -> str:
     return "".join(out)
 
 
+_INVISIBLE_RE = re.compile("[" + "".join(chr(c) for c in INVISIBLE) + "]")
+
+
 def invisible_chars(text: str) -> Dict[str, int]:
     counts: Dict[str, int] = {}
-    for ch in text:
-        name = INVISIBLE.get(ord(ch))
-        if name:
-            counts[name] = counts.get(name, 0) + 1
+    for m in _INVISIBLE_RE.finditer(text):
+        name = INVISIBLE[ord(m.group(0))]
+        counts[name] = counts.get(name, 0) + 1
     return counts
 
 
@@ -193,7 +197,12 @@ class LineIndex:
 
     def __init__(self, data: bytes) -> None:
         self.data = data
-        self.starts = [0] + [m.end() for m in re.finditer(b"\n", data)]
+        # A compact array: a 50 MB message can have millions of lines.
+        self.starts = array.array("q", [0])
+        pos = data.find(b"\n")
+        while pos >= 0:
+            self.starts.append(pos + 1)
+            pos = data.find(b"\n", pos + 1)
         if self.starts[-1] == len(data) and len(self.starts) > 1:
             self.starts.pop()  # no empty phantom line after a final newline
 
@@ -231,8 +240,10 @@ def _lines(data: bytes, start: int, end: int) -> Iterator[Tuple[int, int, bytes]
         pos = stop
 
 
-def _parse_headers(data: bytes, start: int, end: int, part: Part) -> int:
+def _parse_headers(data: bytes, start: int, end: int, part: Part, counter: Optional[List[int]] = None) -> int:
     """Fill part.headers; return the offset where the body starts."""
+    budget = MAX_HEADERS - (counter[1] if counter else 0)
+    dropped = False
     pos = start
     current: Optional[List[int]] = None  # [start, end] of the header being built
     spans: List[Tuple[int, int]] = []
@@ -252,7 +263,11 @@ def _parse_headers(data: bytes, start: int, end: int, part: Part) -> int:
             current[1] = le
         elif b":" in line and re.match(rb"^[\x21-\x39\x3b-\x7e]+[ \t]*:", line):
             if current is not None:
-                spans.append((current[0], current[1]))
+                if len(spans) < budget:
+                    spans.append((current[0], current[1]))
+                elif not dropped:
+                    dropped = True
+                    part.warnings.append(f"too many headers — only the first {MAX_HEADERS} in the message are listed")
             current = [ls, le]
         else:
             # Not a header and no blank line: RFC 5322 says the body started
@@ -261,11 +276,12 @@ def _parse_headers(data: bytes, start: int, end: int, part: Part) -> int:
                                  f"{visible(bytes_to_text(line))[:60]!r})")
             body_start = ls
             break
-        pos = le
     else:
         body_start = end
-    if current is not None:
+    if current is not None and len(spans) < budget:
         spans.append((current[0], current[1]))
+    if counter:
+        counter[1] += len(spans)
     for hs, he in spans:
         raw = data[hs:he].rstrip(b"\r\n")
         name, _, value = raw.partition(b":")
@@ -380,10 +396,11 @@ def _uudecode(body: bytes, part: Part) -> bytes:
 def _parse_part(data: bytes, start: int, end: int, pid: str, depth: int, counter: List[int]) -> Part:
     counter[0] += 1
     part = Part(id=pid, start=start, end=end, body_start=start)
-    part.body_start = _parse_headers(data, start, end, part)
+    part.body_start = _parse_headers(data, start, end, part, counter)
     _content_info(part)
-    if depth >= MAX_DEPTH or counter[0] >= MAX_PARTS:
-        part.warnings.append("nesting too deep / too many parts — not parsed further")
+    if depth >= MAX_DEPTH or counter[0] > MAX_PARTS:
+        part.warnings.append("nesting too deep — not parsed further" if depth >= MAX_DEPTH
+                             else "too many parts — not parsed further")
         part.decoded = data[part.body_start:end]
         return part
 
@@ -406,11 +423,17 @@ def _parse_part(data: bytes, start: int, end: int, pid: str, depth: int, counter
 def _split_multipart(data: bytes, part: Part, boundary: bytes, depth: int, counter: List[int]) -> None:
     dash = b"--" + boundary
     delimiters: List[Tuple[int, int, bool]] = []  # (line_start, line_end, is_close)
+    # One delimiter more than the part budget allows: the last one only ends the last child.
+    room = max(0, MAX_PARTS - counter[0])
+    truncated = False
     for ls, le, line in _lines(data, part.body_start, part.end):
         if not line.startswith(dash):
             continue
         rest = line[len(dash):].rstrip(b" \t")
         if rest == b"":
+            if len(delimiters) > room:
+                truncated = True
+                break
             delimiters.append((ls, le, False))
         elif rest == b"--":
             delimiters.append((ls, le, True))
@@ -433,7 +456,11 @@ def _split_multipart(data: bytes, part: Part, boundary: bytes, depth: int, count
         part.preamble = (part.body_start, before_eol(first_ls))
         part.warnings.append("text before the first part (preamble) — not shown by mail clients")
     n = 0
+    cut = truncated  # the last delimiter collected only marks where the last child ends
     for i, (ls, le, close) in enumerate(delimiters):
+        if (cut and i == len(delimiters) - 1) or (not close and counter[0] >= MAX_PARTS):
+            truncated = True
+            break
         if close:
             if data[le:part.end].strip():
                 part.epilogue = (le, part.end)
@@ -443,13 +470,16 @@ def _split_multipart(data: bytes, part: Part, boundary: bytes, depth: int, count
         child_end = before_eol(nxt) if i + 1 < len(delimiters) else part.end
         n += 1
         part.children.append(_parse_part(data, le, max(le, child_end), f"{part.id}.{n}", depth + 1, counter))
-    if not delimiters[-1][2]:
+    if truncated:
+        part.warnings.append(f"too many parts — only the first {MAX_PARTS} in the message were parsed, "
+                             "the rest of this part is not shown")
+    elif not delimiters[-1][2]:
         part.warnings.append("closing boundary missing (message may be truncated)")
 
 
 def parse(data: bytes) -> Part:
     """Parse a whole message.  The root part has id ``1``."""
-    return _parse_part(data, 0, len(data), "1", 0, [0])
+    return _parse_part(data, 0, len(data), "1", 0, [0, 0])  # [parts, headers]
 
 
 def eol_stats(data: bytes) -> Dict[str, int]:

@@ -26,6 +26,8 @@ Guard rails
 * An explicit ``never_block`` allowlist (IPs or CIDRs) is honoured.
 * Every block has an expiry (default 1 hour); expired blocks are lifted
   automatically.
+* Addresses are canonicalised before they reach pfctl or the ledger, so
+  nothing that looks like a pfctl option can be passed through.
 * ``dry_run`` records decisions without touching pf.
 """
 from __future__ import annotations
@@ -56,6 +58,10 @@ block drop quick from <{TABLE}> to any
 block drop quick from any to <{TABLE}>
 """
 
+DEFAULT_TTL = 3600.0
+# How often the gateway / DNS servers are re-read (they change with the network).
+_PROTECTED_REFRESH = 60.0
+
 Runner = Callable[[Sequence[str], Optional[str]], "subprocess.CompletedProcess[str]"]
 
 
@@ -77,6 +83,21 @@ class BlockEntry:
 
 class BlockRefused(ValueError):
     """Raised when an IP is protected by a guard rail."""
+
+
+def canonical_ip(ip: str) -> str:
+    """``2001:4860:4860:0::8888`` → ``2001:4860:4860::8888``; ValueError if not an IP.
+
+    Also what keeps pfctl arguments safe: the canonical form never starts with "-".
+    """
+    return str(ipaddress.ip_address(str(ip).strip()))
+
+
+def _canonical_or_none(ip: str) -> Optional[str]:
+    try:
+        return canonical_ip(ip.split("%")[0])
+    except ValueError:
+        return None
 
 
 class PfBlocker:
@@ -110,6 +131,7 @@ class PfBlocker:
             except ValueError:
                 logger.warning("Ignoring invalid never_block entry %r", item)
         self._protected_ips = set(_system_critical_ips())
+        self._protected_at = time.monotonic()
         self._load_ledger()
 
     # ------------------------------------------------------------------
@@ -122,9 +144,10 @@ class PfBlocker:
             addr = ipaddress.ip_address(ip)
         except ValueError:
             raise BlockRefused(f"{ip!r} is not a valid IP address") from None
+        ip = str(addr)
         if not addr.is_global or addr.is_multicast:
             raise BlockRefused(f"{ip} is a local/private/reserved address — never blocked")
-        if ip in self._protected_ips:
+        if ip in {_canonical_or_none(p) for p in self._protected()}:
             raise BlockRefused(f"{ip} is your gateway or DNS server — never blocked")
         for net in self._never:
             if addr.version == net.version and addr in net:
@@ -139,10 +162,13 @@ class PfBlocker:
         alert_id: Optional[str] = None,
     ) -> BlockEntry:
         self.check_blockable(ip)
+        ip = canonical_ip(ip)
+        if not ttl:  # every block expires
+            ttl = DEFAULT_TTL
         now = time.time()
         entry = BlockEntry(
             ip=ip, reason=reason, created=now,
-            expires=(now + ttl) if ttl else None, source=source, alert_id=alert_id,
+            expires=now + ttl, source=source, alert_id=alert_id,
         )
         with self._lock:
             if not self.dry_run:
@@ -158,6 +184,7 @@ class PfBlocker:
         return entry
 
     def unblock(self, ip: str) -> bool:
+        ip = canonical_ip(ip)  # ValueError for anything else: never reaches pfctl
         with self._lock:
             existed = self._entries.pop(ip, None) is not None
             if not self.dry_run:
@@ -215,7 +242,17 @@ class PfBlocker:
             self._pfctl("-a", ANCHOR, "-t", TABLE, "-T", "replace", *self._entries.keys())
 
     def is_blocked(self, ip: str) -> bool:
-        return ip in self._entries
+        return _canonical_or_none(ip) in self._entries
+
+    def _protected(self) -> set:
+        """Gateway + DNS servers, re-read once a minute so network changes are honoured."""
+        if time.monotonic() - self._protected_at > _PROTECTED_REFRESH:
+            self._protected_at = time.monotonic()
+            try:
+                self._protected_ips = set(_system_critical_ips())
+            except Exception as exc:  # noqa: BLE001 — keep the previous set
+                logger.debug("could not re-read gateway / DNS servers: %s", exc)
+        return self._protected_ips
 
     # ------------------------------------------------------------------
     # pf plumbing
@@ -233,7 +270,13 @@ class PfBlocker:
         self._anchor_loaded = True
 
     def _pfctl(self, *args: str, stdin: Optional[str] = None, check: bool = True):
-        result = self._run([PFCTL, *args], stdin)
+        try:
+            result = self._run([PFCTL, *args], stdin)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            if check:
+                raise RuntimeError(f"pfctl {' '.join(args)} failed: {exc}") from None
+            logger.warning("pfctl %s failed: %s", " ".join(args), exc)
+            return subprocess.CompletedProcess([PFCTL, *args], -1, "", str(exc))
         if check and result.returncode != 0:
             raise RuntimeError(
                 f"pfctl {' '.join(args)} failed: {(result.stderr or '').strip()}"
@@ -248,7 +291,14 @@ class PfBlocker:
         try:
             data = json.loads(self.ledger_path.read_text(encoding="utf-8"))
             for item in data.get("blocks", []):
-                self._entries[item["ip"]] = BlockEntry(**item)
+                entry = BlockEntry(**item)
+                ip = _canonical_or_none(entry.ip)
+                if ip is None:
+                    continue
+                entry.ip = ip
+                if not entry.expires:  # from before every block had to expire
+                    entry.expires = time.time() + DEFAULT_TTL
+                self._entries[ip] = entry
         except (OSError, ValueError, TypeError, KeyError):
             pass
 

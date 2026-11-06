@@ -24,6 +24,11 @@ class ApiClient:
     def dashboard_url(self) -> str:
         return self.base + "/"
 
+    def dashboard_link(self, anchor: str = "") -> str:
+        """URL that signs a browser in to the dashboard (``/?auth=<token>``) at *anchor*."""
+        from urllib.parse import quote
+        return f"{self.base}/?auth={quote(self.token, safe='')}{anchor}"
+
     def request(self, method: str, path: str, body: Optional[Dict[str, Any]] = None,
                 timeout: Optional[float] = None, raw: Optional[bytes] = None,
                 headers: Optional[Dict[str, str]] = None) -> Any:

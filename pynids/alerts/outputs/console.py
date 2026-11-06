@@ -74,24 +74,19 @@ class ConsoleOutput(BaseOutput):
             else "-"
         )
 
-        mitre = f"[dim][{alert.mitre_technique}][/dim] " if alert.mitre_technique else ""
-        tags = f"[dim]({', '.join(alert.tags)})[/dim]" if alert.tags else ""
-
-        self._console.print(
-            f"[dim]{ts}[/dim] ",
-            sev_text,
-            " ",
-            type_text,
-            f" [bold]{src}[/bold] → [bold]{dst}[/bold]  ",
-            mitre,
-            f"{alert.message}  ",
-            tags,
-            sep="",
+        # Alert text comes off the wire (hosts, URIs, SNI): never parse it as markup.
+        line = Text.assemble(
+            (ts, "dim"), " ", sev_text, " ", type_text,
+            " ", (src, "bold"), " → ", (dst, "bold"), "  ",
         )
+        if alert.mitre_technique:
+            line.append(f"[{alert.mitre_technique}] ", style="dim")
+        line.append(f"{alert.message}  ")
+        if alert.tags:
+            line.append(f"({', '.join(alert.tags)})", style="dim")
+        self._console.print(line)
 
         if self.show_evidence and alert.evidence:
             for k, v in alert.evidence.items():
-                if isinstance(v, (list, dict)):
-                    self._console.print(f"  [dim]  {k}: {v}[/dim]")
-                elif v is not None:
-                    self._console.print(f"  [dim]  {k}: {v}[/dim]")
+                if v is not None:
+                    self._console.print(Text(f"    {k}: {v}", style="dim"))

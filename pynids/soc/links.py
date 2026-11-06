@@ -86,7 +86,7 @@ def links(ioc: Ioc) -> List[Dict[str, str]]:
     v = ioc.value
     fields = {
         "v": quote(v, safe=":/"), "q": quote_plus(v),
-        "r": registered_domain(v) if ioc.type == "domain" else v,
+        "r": registered_domain(v, private=False) if ioc.type == "domain" else v,
         "m": ("sha256%3A" if ioc.type == "sha256" else ioc.type + "%3A") + v if len(v) in HASH_TYPES else v,
         "n": v[2:] if ioc.type == "asn" else v[4:] if ioc.type == "cve" else v,
     }

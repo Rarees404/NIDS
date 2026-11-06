@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from collections import defaultdict, deque
 from typing import Deque, Dict, Iterable, List, Optional, Tuple
@@ -78,17 +79,77 @@ logger = logging.getLogger(__name__)
 # DNS tunneling
 # ---------------------------------------------------------------------------
 
+# Two-label public suffixes common enough to matter for "registered domain".
+_TWO_LABEL_SUFFIXES = frozenset({
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz",
+    "co.jp", "ne.jp", "or.jp", "com.br", "com.cn", "com.mx", "com.tr", "co.za",
+    "co.in", "co.kr", "com.sg", "com.hk", "com.tw", "com.ar", "co.il",
+})
+# Provider zones whose hostnames are random by design (ad frames, CDN
+# nodes, cloud endpoints).  Tunnelling needs an authoritative name server
+# the attacker controls, which these zones never delegate.
+_RANDOM_NAME_ZONES = frozenset({
+    "googlesyndication.com", "googlevideo.com", "1e100.net", "gvt1.com", "gvt2.com",
+    "akamaiedge.net", "akamai.net", "akamaihd.net", "edgekey.net", "cloudfront.net",
+    "amazonaws.com", "azureedge.net", "trafficmanager.net", "fastly.net", "llnwd.net",
+})
+_GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _registered_domain(labels: List[str]) -> int:
+    """Number of trailing labels forming the registered domain (eTLD+1, approximated)."""
+    if len(labels) >= 3 and ".".join(labels[-2:]) in _TWO_LABEL_SUFFIXES:
+        return 3
+    return min(2, len(labels))
+
+
+def _shannon(text: str) -> float:
+    if not text:
+        return 0.0
+    n = len(text)
+    counts: Dict[str, int] = defaultdict(int)
+    for ch in text:
+        counts[ch] += 1
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def _class_switches(text: str) -> int:
+    """Letter↔digit transitions: encoded data mixes them, words and names rarely do."""
+    switches, prev = 0, None
+    for ch in text:
+        kind = "d" if ch.isdigit() else "a" if ch.isalpha() else None
+        if kind and prev and kind != prev:
+            switches += 1
+        if kind:
+            prev = kind
+    return switches
+
+
 class DnsTunnelingDetector(BaseDetector):
     """
-    Detect DNS-based covert channels using entropy and label-length analysis.
+    Detect DNS-based covert channels by looking at the labels a tunnel
+    would encode data into.
+
+    Only queries are judged (a response repeats the question, which would
+    double every alert).  Reverse lookups (``in-addr.arpa`` / ``ip6.arpa``),
+    mDNS / DNS-SD (``.local``, ``_tcp`` / ``_udp`` service labels) and
+    provider zones with random-by-design names are skipped.
+
+    A query is suspicious when, below its registered domain:
+
+    * a label of at least ``label_min_length`` characters has Shannon
+      entropy >= ``entropy_threshold`` and mixes letters and digits the way
+      base32 / hex / base64 encodings do, or
+    * the subdomain part is at least ``length_threshold`` characters long.
+
+    Additionally, ``unique_subdomain_threshold`` distinct subdomains of one
+    registered domain within ``unique_window`` seconds (0 disables) flags a
+    tunnel that keeps each query short.
 
     Args:
-        entropy_threshold: Minimum Shannon entropy (bits) of the query name
-                           to be considered suspicious (default 3.5).
-        length_threshold:  Minimum total length of a query name before
-                           it is considered anomalously long (default 50).
-        depth_threshold:   Minimum subdomain depth (label count) indicating
-                           a tunneled payload (default 5).
+        entropy_threshold: Minimum entropy (bits/char) of an encoded-looking label (default 3.5).
+        length_threshold:  Minimum length of the subdomain part (default 50).
+        depth_threshold:   Label count reported in the evidence when reached (default 5).
     """
 
     def __init__(
@@ -96,14 +157,35 @@ class DnsTunnelingDetector(BaseDetector):
         entropy_threshold: float = 3.5,
         length_threshold: int = 50,
         depth_threshold: int = 5,
+        label_min_length: int = 16,
+        unique_subdomain_threshold: int = 50,
+        unique_window: float = 60.0,
+        ignore_domains: Iterable[str] = (),
     ) -> None:
         self.entropy_threshold = entropy_threshold
         self.length_threshold = length_threshold
         self.depth_threshold = depth_threshold
+        self.label_min_length = label_min_length
+        self.unique_subdomain_threshold = unique_subdomain_threshold
+        self.unique_window = unique_window
+        self.ignore_domains = _RANDOM_NAME_ZONES | {d.lower().strip(".") for d in ignore_domains if d}
+        # registered domain -> (window start, distinct subdomains, alerted)
+        self._subdomains: Dict[str, list] = {}
 
     @property
     def name(self) -> str:
         return "dns_tunneling"
+
+    def prune(self, now: float) -> None:
+        for dom in [d for d, st in self._subdomains.items() if now - st[0] > self.unique_window]:
+            del self._subdomains[dom]
+
+    def _ignored(self, name: str, labels: List[str]) -> bool:
+        if name.endswith((".in-addr.arpa", ".ip6.arpa")) or name.endswith(".local"):
+            return True
+        if any(lbl in ("_tcp", "_udp") for lbl in labels):
+            return True  # DNS-SD service discovery
+        return any(name == z or name.endswith("." + z) for z in self.ignore_domains)
 
     def analyze(
         self,
@@ -112,33 +194,48 @@ class DnsTunnelingDetector(BaseDetector):
         flow: Optional[Flow],
     ) -> Iterable[Alert]:
         dns = layer7.get("dns")
-        if not dns:
+        if not dns or dns.get("is_response"):
             return
 
         query_name: Optional[str] = dns.get("query_name")
         if not query_name:
             return
+        name = query_name.lower().rstrip(".")
+        labels = [lbl for lbl in name.split(".") if lbl]
+        if not labels or self._ignored(name, labels):
+            return
 
-        entropy: float = dns.get("name_entropy", 0.0)
-        length: int = dns.get("name_length", 0)
-        depth: int = dns.get("subdomain_depth", 0)
+        reg_len = _registered_domain(labels)
+        registered = ".".join(labels[-reg_len:])
+        # Data is encoded below the registered domain; a bare domain is judged by its own label.
+        sub_labels = [lbl for lbl in labels[:-reg_len] if not lbl.startswith("_")] or labels[:1]
+        subdomain = ".".join(labels[:-reg_len])
+        # Judge every label: one long plain label must not hide an encoded one next to it.
+        encoded = [lbl for lbl in sub_labels if self._looks_encoded(lbl)]
+        longest = max(encoded or sub_labels, key=lambda lbl: (len(lbl), _shannon(lbl)))
+        entropy = _shannon(longest)
+        depth = len(labels) - 1
 
         triggered_reasons: List[str] = []
-        if entropy >= self.entropy_threshold:
-            triggered_reasons.append(f"entropy={entropy:.2f}")
-        if length >= self.length_threshold:
-            triggered_reasons.append(f"length={length}")
-        if depth >= self.depth_threshold:
-            triggered_reasons.append(f"depth={depth}")
+        if encoded:
+            triggered_reasons.append(f"encoded-looking label ({len(longest)} chars, entropy={entropy:.2f})")
+        if len(subdomain) >= self.length_threshold:
+            triggered_reasons.append(f"subdomain length={len(subdomain)}")
+        unique = self._count_unique(registered, subdomain, meta.get("timestamp") or time.time())
+        if unique is not None:
+            triggered_reasons.append(f"{unique} distinct subdomains in {self.unique_window:.0f}s")
 
         if not triggered_reasons:
             return
+        if depth >= self.depth_threshold:
+            triggered_reasons.append(f"depth={depth}")
 
         confidence = min(
             1.0,
             (
                 (entropy / self.entropy_threshold if entropy >= self.entropy_threshold else 0)
-                + (length / self.length_threshold if length >= self.length_threshold else 0)
+                + (len(subdomain) / self.length_threshold if len(subdomain) >= self.length_threshold else 0)
+                + (1.0 if unique is not None else 0)
             ) / 2.0,
         )
 
@@ -158,11 +255,38 @@ class DnsTunnelingDetector(BaseDetector):
             confidence=confidence,
             evidence={
                 "query_name": query_name,
-                "entropy": entropy,
-                "name_length": length,
+                "registered_domain": registered,
+                "longest_label": longest,
+                "entropy": round(entropy, 3),
+                "name_length": len(name),
+                "subdomain_length": len(subdomain),
                 "subdomain_depth": depth,
+                "distinct_subdomains": unique,
             },
         )
+
+    def _looks_encoded(self, label: str) -> bool:
+        return (len(label) >= self.label_min_length
+                and _shannon(label) >= self.entropy_threshold
+                and _class_switches(label) >= max(3, len(label) // 6)
+                and not _GUID_RE.match(label))
+
+    def _count_unique(self, registered: str, subdomain: str, now: float) -> Optional[int]:
+        """Track distinct subdomains per registered domain; returns the count once it crosses the threshold."""
+        if not self.unique_subdomain_threshold or not subdomain:
+            return None
+        state = self._subdomains.get(registered)
+        if state is None or now - state[0] > self.unique_window:
+            if state is None and len(self._subdomains) >= 10_000:
+                del self._subdomains[next(iter(self._subdomains))]
+            state = self._subdomains[registered] = [now, set(), False]
+        seen: set = state[1]
+        if len(seen) <= self.unique_subdomain_threshold:
+            seen.add(subdomain)
+        if state[2] or len(seen) < self.unique_subdomain_threshold:
+            return None
+        state[2] = True  # once per domain per window
+        return len(seen)
 
 
 # ---------------------------------------------------------------------------
@@ -190,8 +314,19 @@ class HttpAttackDetector(BaseDetector):
         http = layer7.get("http")
         if not http:
             return
-
+        # Attacks travel client → server.  A server's response (an HTML page
+        # full of <script> tags) or traffic flowing back on a connection the
+        # other side opened is not an attack by this source.
+        if http.get("direction") == "response":
+            return
         src_ip = meta.get("src_ip")
+        # A parsed request line already proves this side is the client.  Flow
+        # direction is only "first packet seen", which is wrong for connections
+        # already open when capture (re)started, so it only judges the rest.
+        if (http.get("direction") != "request" and flow is not None
+                and flow.src_ip and flow.src_ip != src_ip):
+            return
+
         dst_ip = meta.get("dst_ip")
         dst_port = meta.get("dst_port")
         uri = http.get("uri", "")
@@ -446,19 +581,27 @@ class BeaconingDetector(BaseDetector):
             self._alerted.add(key)
             app = context.get("app")
             host = context.get("remote_host")
+            # A name taken from the client's own SNI / Host header, never
+            # confirmed by a DNS answer for this IP, is whatever the program
+            # chose to send — it must not make the alert quieter.
+            verified = bool(host) and not context.get("remote_host_unverified")
             # Apps that poll a named server (mail sync, update checks, chat
             # presence) are the common benign case.  Malware more often calls
             # home to a bare IP it never looked up in DNS.
-            severity = Severity.MEDIUM if host else Severity.HIGH
+            severity = Severity.MEDIUM if verified else Severity.HIGH
             who = app or src_ip
-            target = f"{host} ({dst_ip}:{dst_port})" if host else f"{dst_ip}:{dst_port}"
+            label = host if verified else (f"{host}?" if host else None)
+            target = f"{label} ({dst_ip}:{dst_port})" if label else f"{dst_ip}:{dst_port}"
+            suffix = ("" if verified else
+                      " — name claimed by the client, not seen in DNS" if host else
+                      " — bare IP with no DNS lookup")
             yield Alert(
                 alert_type=AlertType.BEHAVIORAL,
                 severity=severity,
                 message=(
                     f"Regular check-ins: {who} contacted {target} every "
                     f"{_human_interval(mean)} like clockwork ({len(hist)} times, CV={cv:.2f})"
-                    + ("" if host else " — bare IP with no DNS lookup")
+                    + suffix
                 ),
                 src_ip=src_ip,
                 dst_ip=dst_ip,
@@ -472,7 +615,8 @@ class BeaconingDetector(BaseDetector):
                     "stddev_seconds": round(stddev, 2),
                     "coefficient_of_variation": round(cv, 4),
                     "sample_count": len(hist),
-                    "hostname_known": bool(host),
+                    "hostname_known": verified,
+                    "hostname_claimed": host if host and not verified else None,
                 },
             )
 

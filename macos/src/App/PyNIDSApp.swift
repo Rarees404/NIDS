@@ -24,9 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls where url.scheme == "pynids" {
             let anchor = url.host.map { "#\($0)" } ?? ""
-            if let target = URL(string: PyNIDSClient.dashboard.absoluteString + anchor) {
-                NSWorkspace.shared.open(target)
-            }
+            NSWorkspace.shared.open(PyNIDSClient.dashboardLink(anchor))
         }
     }
 }
@@ -323,7 +321,7 @@ final class Monitor: ObservableObject {
     }
 
     func openDashboard(_ anchor: String = "") {
-        NSWorkspace.shared.open(URL(string: PyNIDSClient.dashboard.absoluteString + anchor)!)
+        NSWorkspace.shared.open(PyNIDSClient.dashboardLink(anchor))
     }
 }
 

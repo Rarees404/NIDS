@@ -21,6 +21,7 @@ import logging
 import os
 import queue
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -187,14 +188,27 @@ def is_system_path(exe: Optional[str]) -> bool:
 
 
 def sha256_file(path: str, limit: int = 512 * 1024 * 1024) -> Optional[str]:
-    """SHA-256 of *path* (skipped for files over *limit* bytes)."""
+    """SHA-256 of the regular file at *path* (None for devices, FIFOs, directories, files over *limit*)."""
     try:
-        if os.path.getsize(path) > limit:
+        real = os.path.realpath(path)
+        if not stat.S_ISREG(os.stat(real).st_mode):
             return None
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
+        # O_NONBLOCK: a FIFO swapped in after the stat must not block the open.
+        fd = os.open(real, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as f:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+                return None
+            h = hashlib.sha256()
+            left = limit
+            while left > 0:
+                chunk = f.read(min(1 << 20, left))
+                if not chunk:
+                    break
                 h.update(chunk)
+                left -= len(chunk)
+            if left <= 0 and f.read(1):
+                return None  # grew past the limit while being read
         return h.hexdigest()
     except OSError:
         return None

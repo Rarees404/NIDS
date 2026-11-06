@@ -115,7 +115,14 @@ class SQLiteOutput(BaseOutput):
         path:          File path for the SQLite database.
         min_severity:  Only persist alerts at or above this level.
         batch_size:    Number of alerts to buffer before committing (0 = autocommit).
+        max_pending:   Rows kept for retry while the database is unwritable; beyond
+                       this the oldest are dropped (and counted in ``dropped``).
+
+    Every use of the connection happens under ``self._lock``, so outputs
+    called from several capture threads share it safely.
     """
+
+    BUSY_TIMEOUT_MS = 5000
 
     def __init__(
         self,
@@ -123,13 +130,19 @@ class SQLiteOutput(BaseOutput):
         min_severity: Severity = Severity.LOW,
         batch_size: int = 50,
         flush_interval: float = 2.0,
+        max_pending: int = 10_000,
     ) -> None:
         self.path = path
         self.min_severity = min_severity
         self.batch_size = batch_size
         self.flush_interval = flush_interval
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self.max_pending = max(1, int(max_pending))
+        self.dropped = 0
+        self._conn = sqlite3.connect(path, check_same_thread=False,
+                                     timeout=self.BUSY_TIMEOUT_MS / 1000)
+        # Wait for the API server's readers / writers instead of failing at once.
+        self._conn.execute(f"PRAGMA busy_timeout={self.BUSY_TIMEOUT_MS}")
         # WAL lets the API server read while the capture thread writes.
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_DDL)
@@ -178,6 +191,12 @@ class SQLiteOutput(BaseOutput):
         )
         with self._lock:
             self._pending.append(row)
+            overflow = len(self._pending) - self.max_pending
+            if overflow > 0:
+                del self._pending[:overflow]
+                self.dropped += overflow
+                logger.warning("SQLiteOutput: database unwritable, dropped %d oldest alert(s) "
+                               "(%d dropped in total)", overflow, self.dropped)
             due = (
                 self.batch_size == 0
                 or len(self._pending) >= self.batch_size
@@ -259,7 +278,34 @@ class SQLiteOutput(BaseOutput):
         try:
             self._conn.executemany(_INSERT, self._pending)
             self._conn.commit()
-        except sqlite3.Error as exc:
-            logger.error("SQLiteOutput flush error: %s", exc)
-        finally:
             self._pending.clear()
+        except sqlite3.OperationalError as exc:
+            # Locked / busy / disk full: keep the rows and retry on the next flush.
+            self._rollback()
+            logger.error("SQLiteOutput flush error (%d alert(s) kept for retry): %s",
+                         len(self._pending), exc)
+        except sqlite3.Error as exc:
+            # A row the database rejects must not block the rest: insert one by one.
+            self._rollback()
+            logger.error("SQLiteOutput flush error: %s — retrying row by row", exc)
+            kept: List[tuple] = []
+            for row in self._pending:
+                try:
+                    self._conn.execute(_INSERT, row)
+                except sqlite3.OperationalError:
+                    kept.append(row)
+                except sqlite3.Error as row_exc:
+                    self.dropped += 1
+                    logger.error("SQLiteOutput: dropping unstorable alert %s: %s", row[0], row_exc)
+            try:
+                self._conn.commit()
+                self._pending = kept
+            except sqlite3.Error as commit_exc:
+                self._rollback()
+                logger.error("SQLiteOutput commit error: %s", commit_exc)
+
+    def _rollback(self) -> None:
+        try:
+            self._conn.rollback()
+        except sqlite3.Error:
+            pass

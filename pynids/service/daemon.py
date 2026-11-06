@@ -48,8 +48,9 @@ from ..host.persistence import PersistenceIndex
 from ..intel import feeds as feeds_mod
 from ..intel.threat_intel import ThreatIntel
 from ..paths import (
-    DEFAULT_API_HOST, DEFAULT_API_PORT, daemon_config_path, data_dir, db_path,
-    evidence_dir, intel_dir, is_root, paused_flag_path, soc_keys_path, token_path,
+    DEFAULT_API_HOST, DEFAULT_API_PORT, anthropic_key_path, blocklist_path, console_owner_uid,
+    daemon_config_path, data_dir, db_path, evidence_dir, geoip_dir, intel_dir, is_root,
+    notifications_off_flag_path, paused_flag_path, soc_keys_path, token_path,
 )
 from ..sniffer import sniff_live
 from .api import ServiceContext, make_server
@@ -150,18 +151,71 @@ def default_interface() -> Optional[str]:
 
 def ensure_token() -> str:
     path = token_path()
+    token = ""
     try:
         token = path.read_text(encoding="utf-8").strip()
-        if token:
-            return token
     except OSError:
         pass
-    token = secrets.token_urlsafe(32)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(token + "\n", encoding="utf-8")
-    # Readable by local users so the menu bar app / CLI can use the API.
-    os.chmod(path, 0o644)
+    if not token:
+        token = secrets.token_urlsafe(32)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(token + "\n")
+    # Only the user this Mac's PyNIDS belongs to (and root) may read it: it
+    # lets the menu bar app and CLI drive the API, which can block IPs.
+    try:
+        os.chmod(path, 0o600)
+        uid = console_owner_uid() if is_root() else None
+        if uid is not None:
+            os.chown(path, uid, -1)
+    except OSError as exc:
+        logger.warning("Could not restrict %s: %s", path, exc)
     return token
+
+
+def _chmod(path: Path, mode: int) -> None:
+    try:
+        if path.exists() and not path.is_symlink() and path.stat().st_uid == os.geteuid():
+            os.chmod(path, mode)
+    except OSError as exc:
+        logger.debug("chmod %s failed: %s", path, exc)
+
+
+def harden_permissions() -> None:
+    """
+    Tighten modes of data written by older versions (the daemon itself runs
+    with umask 077).  The data directory stays traversable so the user's
+    menu bar app can reach its token and the pause flag; alerts, captures,
+    evidence and keys are root-only.  Threat-intel feeds are public data the
+    user's CLI shows, so they stay readable.
+    """
+    root = data_dir()
+    _chmod(root, 0o711)
+    for name in ("events.db", "events.db-wal", "events.db-shm", "events.db-journal",
+                 "allowlist.json", "last-update.json"):
+        _chmod(root / name, 0o600 if name != "last-update.json" else 0o644)
+    for path in (blocklist_path(), soc_keys_path(), anthropic_key_path()):
+        _chmod(path, 0o600)
+    for folder in (root / "captures", evidence_dir()):
+        if folder.is_dir():
+            _chmod(folder, 0o700)
+            for dirpath, dirnames, filenames in os.walk(folder):
+                for d in dirnames:
+                    _chmod(Path(dirpath) / d, 0o700)
+                for f in filenames:
+                    _chmod(Path(dirpath) / f, 0o600)
+    share_intel()
+
+
+def share_intel() -> None:
+    """Feeds and GeoIP databases are public data the user's CLI reads too."""
+    folder = intel_dir()
+    _chmod(folder, 0o755)
+    for f in folder.glob("*"):
+        if f.is_file():
+            _chmod(f, 0o644)
+    _chmod(geoip_dir(), 0o755)
 
 
 def build_config(options: DaemonOptions) -> Dict[str, Any]:
@@ -207,6 +261,7 @@ class Daemon:
         self.interfaces: List[str] = []
         self.recorder: Any = None
         self._restart_requested = False
+        self._last_error_log: Dict[str, float] = {}
         # Set to end the current capture threads without stopping the daemon
         # (detection paused from the menu bar app or dashboard).
         self.capture_stop = threading.Event()
@@ -260,6 +315,8 @@ class Daemon:
                 min_interval=float(ncfg.get("min_interval", 15)),
             )
             self.alerts.register_output(self.notifier)
+            if notifications_off_flag_path().exists():
+                self.notifier.enabled = False
 
         rcfg = self.cfg["response"]
         self.blocker = None
@@ -319,9 +376,8 @@ class Daemon:
         ucfg = self.cfg["updates"]
         self.updater = Updater(
             state_file=data_dir() / "last-update.json",
-            # Under launchd an exit is followed by a restart into the new code;
-            # started by hand, the user has to start it again.
-            on_restart=self.restart_for_update if _under_launchd() else None,
+            # The process re-executes itself into the new code (see reexec).
+            on_restart=self.restart_for_update,
             broadcast=self.live.broadcast,
             interval_hours=float(ucfg.get("interval_hours", 6)) if ucfg.get("check", True) else 0,
             extras=str(ucfg.get("extras", "all")),
@@ -354,6 +410,7 @@ class Daemon:
             updater=self.updater,
             workbench=self.workbench,
             emails=self.emails,
+            set_notifications=self.set_notifications,
         )
         self.server = make_server(self.api_ctx, dcfg["api_host"], int(dcfg["api_port"]))
 
@@ -423,14 +480,30 @@ class Daemon:
         with self._feeds_lock:
             self._feeds_attempt = time.monotonic()
             results = feeds_mod.update_feeds(intel_dir())
+            share_intel()
             intel = _build_intel(self.cfg)
             doh_hosts, doh_ips = feeds_mod.load_doh(intel_dir())
             self.engine.reload_intel(intel, feeds_mod.load_trackers(intel_dir()), doh_hosts, doh_ips)
         self.live.broadcast("intel", {"updated": time.time()})
         return [r.__dict__ for r in results]
 
+    def set_notifications(self, enabled: bool) -> bool:
+        """Switch macOS notifications on or off.  The choice survives restarts."""
+        if self.notifier is None:
+            return False
+        self.notifier.enabled = bool(enabled)
+        flag = notifications_off_flag_path()
+        try:
+            if enabled:
+                flag.unlink(missing_ok=True)
+            else:
+                flag.write_text(f"{time.time()}\n", encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Could not save the notification setting: %s", exc)
+        return self.notifier.enabled
+
     def restart_for_update(self) -> None:
-        """Exit with 75 so launchd starts the freshly updated code."""
+        """Shut down and re-execute (exit code 75 → :func:`reexec`) into the updated code."""
         self._restart_requested = True
         self.capture_stop.set()
         self.stop_event.set()
@@ -457,46 +530,66 @@ class Daemon:
                     return
                 stop.wait(5)
 
+    _TICK = 2.0  # seconds between _periodic iterations
+
+    def _step(self, name: str, fn: Any) -> None:
+        """Run one periodic task; a failure is logged (at most every 5 min) and skipped."""
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 — never let one task end the loop
+            now = time.monotonic()
+            if now - self._last_error_log.get(name, -1e9) >= 300:
+                self._last_error_log[name] = now
+                logger.error("Periodic task %s failed: %s", name, exc)
+            else:
+                logger.debug("Periodic task %s failed: %s", name, exc)
+
+    def _expire_blocks(self) -> None:
+        for ip in self.blocker.expire():
+            self.live.broadcast("unblock", {"ip": ip, "expired": True})
+
+    def _follow_default_route(self) -> None:
+        current = default_interface()
+        if current and self.interfaces and current != self.interfaces[0]:
+            logger.warning("Default interface changed %s → %s; restarting capture",
+                           self.interfaces[0], current)
+            if _under_launchd():
+                # Start over in a fresh process (exit 75 → reexec).
+                self._restart_requested = True
+                self.capture_stop.set()
+                self.stop_event.set()
+            else:
+                # Started by hand: move the capture over in place.
+                self._restart_capture()
+
+    def _maybe_refresh_feeds(self, refresh_s: float) -> None:
+        # A feed that keeps failing leaves the cache "stale" forever;
+        # don't re-download every feed every 10 minutes because of it.
+        retry_s = min(refresh_s, 3600.0)
+        if (feeds_mod.oldest_fetch_age(intel_dir()) > refresh_s
+                and time.monotonic() - self._feeds_attempt > retry_s
+                and not self._feeds_lock.locked()):
+            threading.Thread(target=self.refresh_feeds, daemon=True).start()
+
     def _periodic(self) -> None:
         refresh_s = float(self.cfg["daemon"].get("feed_refresh_hours", 6)) * 3600
         tick = 0
-        while not self.stop_event.wait(2.0):
+        while not self.stop_event.wait(self._TICK):
             tick += 1
-            self.store.flush()
+            self._step("alert flush", self.store.flush)
             if tick % 15 == 0 and self.baseline is not None:
-                self.baseline.store.flush()
+                self._step("baseline flush", self.baseline.store.flush)
             if tick % 30 == 0 and self.lan is not None and not self.paused:
-                try:
-                    self.lan.refresh()
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("LAN refresh failed: %s", exc)
+                self._step("LAN refresh", self.lan.refresh)
             if self.blocker and tick % 15 == 0:
-                for ip in self.blocker.expire():
-                    self.live.broadcast("unblock", {"ip": ip, "expired": True})
+                self._step("block expiry", self._expire_blocks)
             if tick % 10 == 0 and self.interfaces and self.cfg["daemon"]["interface"] == "auto":
-                current = default_interface()
-                if current and current != self.interfaces[0]:
-                    logger.warning("Default interface changed %s → %s; restarting capture",
-                                   self.interfaces[0], current)
-                    if _under_launchd():
-                        # launchd restarts us into a clean process (exit 75).
-                        self._restart_requested = True
-                        self.capture_stop.set()
-                        self.stop_event.set()
-                    else:
-                        # Started by hand: nothing would bring us back, so
-                        # move the capture over in place.
-                        self._restart_capture()
+                self._step("interface check", self._follow_default_route)
             if refresh_s > 0 and tick % 300 == 0 and not self.paused:
-                # A feed that keeps failing leaves the cache "stale" forever;
-                # don't re-download every feed every 10 minutes because of it.
-                retry_s = min(refresh_s, 3600.0)
-                if (feeds_mod.oldest_fetch_age(intel_dir()) > refresh_s
-                        and time.monotonic() - self._feeds_attempt > retry_s
-                        and not self._feeds_lock.locked()):
-                    threading.Thread(target=self.refresh_feeds, daemon=True).start()
+                self._step("feed refresh", lambda: self._maybe_refresh_feeds(refresh_s))
             if tick % 1800 == 0:  # hourly
-                self.store.prune(float(self.cfg["daemon"].get("retention_days") or 0))
+                self._step("retention", lambda: self.store.prune(
+                    float(self.cfg["daemon"].get("retention_days") or 0)))
 
     def _start_capture(self) -> None:
         dcfg = self.cfg["daemon"]
@@ -611,13 +704,14 @@ class Daemon:
         while not self.stop_event.wait(1.0):
             pass
         self.shutdown()
-        # Exit code 75 (EX_TEMPFAIL) tells launchd to restart us promptly
-        # on a network change; a clean stop exits 0.
+        # Exit code 75 (EX_TEMPFAIL): start over in a fresh process (network
+        # change, update); a clean stop exits 0.
         return 75 if self._restart_requested else 0
 
     def shutdown(self) -> None:
         self.state = "stopping"
         logger.info("Shutting down")
+        self.live.close_streams()
         try:
             self.server.shutdown()
             self.server.server_close()
@@ -629,6 +723,12 @@ class Daemon:
             self.processes.stop()
         if self.signatures:
             self.signatures.stop()
+        stop_lookups = getattr(self.lookups, "stop", None)
+        if callable(stop_lookups):
+            try:
+                stop_lookups()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("lookup shutdown failed: %s", exc)
         from ..host.lan import kill_scans
         kill_scans()
         if self.baseline is not None:
@@ -661,5 +761,31 @@ def run_daemon(options: DaemonOptions) -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Alerts, captures, evidence and keys must not be readable by other accounts.
+    os.umask(0o077)
+    harden_permissions()
     daemon = Daemon(options)
     return daemon.run()
+
+
+def reexec() -> None:
+    """
+    Replace this process with a fresh interpreter running the same command,
+    so updated code is actually loaded (an in-process restart would keep the
+    old modules, and stray threads still holding the old state).
+    """
+    argv = [sys.executable, "-m", "pynids", *sys.argv[1:]]
+    logger.warning("Restarting: %s", " ".join(argv))
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:  # noqa: BLE001
+            pass
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        os.execv(sys.executable, argv)
+    except OSError as exc:
+        # launchd's KeepAlive brings us back after an exit; by hand, say so.
+        logger.error("Could not restart (%s); exiting with 75", exc)
+        sys.exit(75)

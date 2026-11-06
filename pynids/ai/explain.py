@@ -18,6 +18,7 @@ Requires the optional dependency: ``pip install "pynids[ai]"``.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from typing import Any, Dict, Optional
@@ -88,11 +89,8 @@ def save_api_key(key: str) -> None:
 
 
 def is_available() -> bool:
-    try:
-        import anthropic  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    """Whether the optional anthropic package is installed (without importing it)."""
+    return importlib.util.find_spec("anthropic") is not None
 
 
 def _alert_payload(alert: Dict[str, Any], extra: Optional[Dict[str, Any]] = None) -> str:

@@ -7,7 +7,10 @@ A rule matches when every field it sets matches the alert:
 * ``kind``    — the UI kind (``tracker``, ``beacon``, ``attack`` …)
 * ``rule_id`` — an exact detector rule
 * ``app``     — the owning app (``context.app``)
-* ``host``    — remote hostname; ``example.com`` also covers subdomains
+* ``host``    — remote hostname; ``example.com`` also covers subdomains.
+  For security alerts, names the client merely claimed (SNI / HTTP Host
+  never confirmed by a DNS answer, ``context.remote_host_unverified``) do
+  not match.
 * ``ip``      — remote IP
 
 Rules are stored as JSON in the data directory so they survive restarts.
@@ -30,6 +33,9 @@ from .model import Alert
 logger = logging.getLogger(__name__)
 
 FIELDS = ("kind", "rule_id", "app", "host", "ip")
+# Kinds where a forged hostname could hide something; privacy telemetry
+# (trackers, QUIC …) keeps matching on whatever name the browser sent.
+_SECURITY_KINDS = frozenset({"threat", "attack", "host", "other"})
 
 
 def _host_matches(rule_host: str, host: Optional[str]) -> bool:
@@ -97,7 +103,13 @@ class Allowlist:
         ctx = d.get("context") or {}
         ev = d.get("evidence") or {}
         kind = d.get("kind") or classify(d)
-        host = ctx.get("remote_host") or ev.get("host") or ev.get("sni") or ev.get("query_name")
+        if ctx.get("remote_host_unverified") and kind in _SECURITY_KINDS:
+            # The name is only what the client claimed (SNI / Host header,
+            # no DNS answer backs it): a host rule must not let a forged
+            # name silence a security alert.  The DNS question is fair game.
+            host = ev.get("query_name")
+        else:
+            host = ctx.get("remote_host") or ev.get("host") or ev.get("sni") or ev.get("query_name")
         ip = ctx.get("remote_ip") or d.get("dst_ip")
         with self._lock:
             for rule in self._rules:

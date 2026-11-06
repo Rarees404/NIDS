@@ -249,3 +249,7 @@
 .linkrow .u small { display: block; color: var(--muted); font-family: var(--font); }
 a.btn { text-decoration: none; color: inherit; }
 a.btn.danger { color: var(--critical); }
+
+/* deep link from outside the dashboard: confirm before querying sources */
+.inv-confirm .value { font-family: var(--mono); font-size: 15px; overflow-wrap: anywhere; margin-bottom: 8px; }
+.inv-confirm .actions { display: flex; gap: 8px; margin-top: 12px; }

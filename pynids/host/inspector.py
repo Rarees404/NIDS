@@ -365,7 +365,7 @@ class HostInspector:
     def dossier(self, ip: str, external: Optional[bool] = None, refresh: bool = False) -> Dict[str, Any]:
         """Everything known about *ip*.  ``external=None`` uses cached lookups only."""
         try:
-            ipaddress.ip_address(ip.split("%")[0])
+            canon = str(ipaddress.ip_address(ip.split("%")[0]))
         except ValueError:
             raise ValueError(f"not an IP address: {ip}") from None
         local: Dict[str, Any] = {"scope": _scope(ip)}
@@ -389,12 +389,12 @@ class HostInspector:
             if dev:
                 local["lan_device"] = dev
         out: Dict[str, Any] = {"ip": ip, "local": local,
-                               "virustotal": VIRUSTOTAL_IP.format(ip=ip) if is_public(ip) else None}
+                               "virustotal": VIRUSTOTAL_IP.format(ip=canon) if is_public(ip) else None}
         if self.lookups is not None:
             if external:
-                out["external"] = self.lookups.lookup(ip, refresh=refresh)
+                out["external"] = self.lookups.lookup(canon, refresh=refresh)
             else:
-                cached = self.lookups.cached(ip)
+                cached = self.lookups.cached(canon)
                 out["external"] = ({**cached, "cached": True} if cached else
                                    {"ip": ip, "external": False, "pending": is_public(ip),
                                     "reason": "not looked up yet" if is_public(ip)

@@ -13,6 +13,7 @@ stream.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from ..manager import BaseOutput
@@ -45,20 +46,24 @@ class JsonFileOutput(BaseOutput):
         self.min_severity = min_severity
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = self.path.open("a", encoding="utf-8")
+        # Outputs may be called from several capture threads at once.
+        self._lock = threading.Lock()
 
     def emit(self, alert: Alert) -> None:
         if alert.severity < self.min_severity:
             return
-        line = json.dumps(alert.to_dict(), ensure_ascii=False) + "\n"
-        self._fh.write(line)
-        self._fh.flush()
-        self._maybe_rotate()
+        line = json.dumps(alert.to_dict(), ensure_ascii=False, default=str) + "\n"
+        with self._lock:
+            self._fh.write(line)
+            self._fh.flush()
+            self._maybe_rotate()
 
     def close(self) -> None:
-        try:
-            self._fh.close()
-        except Exception:
-            pass
+        with self._lock:
+            try:
+                self._fh.close()
+            except Exception:
+                pass
 
     def _maybe_rotate(self) -> None:
         try:

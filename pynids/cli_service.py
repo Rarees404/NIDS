@@ -79,16 +79,15 @@ def daemon() -> None:
 @click.option("--record/--no-record", default=None, help="Keep a rolling PCAP window for `pynids decrypt`.")
 def daemon_run(config, rules, iface, port, auto_block, record) -> None:
     """Run the daemon in the foreground (this is what launchd runs)."""
-    from .service.daemon import DaemonOptions, run_daemon
+    from .service import daemon as daemon_mod
 
-    while True:
-        code = run_daemon(DaemonOptions(
-            config=config, rules=rules, interface=iface, api_port=port,
-            auto_block=auto_block, record=record,
-        ))
-        if code != 75:  # 75 = network changed, restart capture in-process
-            sys.exit(code)
-        time.sleep(1)
+    code = daemon_mod.run_daemon(daemon_mod.DaemonOptions(
+        config=config, rules=rules, interface=iface, api_port=port,
+        auto_block=auto_block, record=record,
+    ))
+    if code == 75:  # network changed or updated: start over in a fresh process
+        daemon_mod.reexec()
+    sys.exit(code)
 
 
 @daemon.command("install")
@@ -122,7 +121,7 @@ def daemon_install(rules: Optional[str], record: bool) -> None:
             break
         time.sleep(0.5)
     console.print(Panel(
-        "Dashboard  [bold]http://127.0.0.1:8787[/bold]   (or: pynids open)\n"
+        "Dashboard  [bold]pynids open[/bold]   (or the menu bar app)\n"
         "Status     pynids status\n"
         "Logs       pynids daemon logs -f\n"
         f"Config     {cfg}",
@@ -158,7 +157,10 @@ def daemon_restart() -> None:
     """Restart the background service (applies config changes)."""
     from .service import launchd
 
-    launchd.restart()
+    try:
+        launchd.restart()
+    except (PermissionError, RuntimeError) as exc:
+        raise click.ClickException(str(exc))
     console.print("[green]✓[/green] Restarted")
 
 
@@ -239,13 +241,31 @@ def _print_status() -> None:
     console.print(Panel(t, title="PyNIDS", subtitle="http://127.0.0.1:8787", expand=False))
 
 
+def _open_dashboard(client, anchor: str = "") -> None:
+    """Open the dashboard signed in (``/?auth=<token>`` sets the session cookie)."""
+    from .paths import token_path
+    if not client.token:
+        _fail(f"Can't read the API token ({token_path()}), so the dashboard can't be unlocked.\n"
+              "It belongs to the user who installed PyNIDS. Restarting the daemon hands it to the owner "
+              "of the PyNIDS folder:  sudo pynids daemon restart\n"
+              "Or open it once with:  sudo pynids mail token  and visit "
+              f"{client.base}/?auth=<token>")
+    link = client.dashboard_link(anchor)
+    opened = subprocess.run(["open", link], check=False, capture_output=True).returncode == 0
+    # Managed Macs sometimes block `open`; the link always works pasted into a browser.
+    console.print(("Opening the dashboard. If no window appears, paste this link into your browser:\n"
+                   if opened else "Couldn't open a browser. Paste this link into your browser:\n") + link,
+                  highlight=False, soft_wrap=True)
+
+
 @main.command("open")
-def open_cmd() -> None:
-    """Open the live web dashboard in your browser."""
+@click.argument("anchor", required=False, default="")
+def open_cmd(anchor: str) -> None:
+    """Open the live web dashboard in your browser (optionally at a tab, e.g. events)."""
     client = _client()
     if not client.alive():
         _fail("The daemon is not running. Start it with:  sudo pynids daemon install")
-    subprocess.run(["open", client.dashboard_url], check=False)
+    _open_dashboard(client, ("#" + anchor.lstrip("#")) if anchor else "")
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +420,8 @@ def block() -> None:
 @block.command("add")
 @click.argument("ip")
 @click.option("--reason", default="Blocked from the command line")
-@click.option("--ttl", default=3600, show_default=True, help="Seconds until the block lifts (0 = never).")
+@click.option("--ttl", default=3600, show_default=True,
+              help="Seconds until the block lifts (60 s to 7 days; 0 = the 1-hour default).")
 def block_add(ip: str, reason: str, ttl: int) -> None:
     """Block all traffic to and from IP."""
     try:
@@ -660,7 +681,7 @@ def investigate_cmd(indicator: tuple, web: bool, refresh: bool, as_json: bool) -
     text = " ".join(indicator)
     client = _client()
     if web:
-        subprocess.run(["open", client.dashboard_url + "#investigate/" + quote(text, safe="")], check=False)
+        _open_dashboard(client, "#investigate/" + quote(text, safe=""))
         return
     parsed = _client().post("/api/soc/parse", {"text": text}, timeout=30) if client.alive() else None
     if parsed is None:
@@ -739,7 +760,7 @@ def mail_analyze(path: Path, web: bool, as_json: bool, local: bool) -> None:
         except Exception as exc:  # noqa: BLE001
             _fail(str(exc))
         if web:
-            subprocess.run(["open", client.dashboard_url + "#email/" + result["sha256"]], check=False)
+            _open_dashboard(client, "#email/" + result["sha256"])
             return
     if as_json:
         click.echo(json.dumps(result, indent=2, default=str))
@@ -958,7 +979,11 @@ def decrypt_cmd(pcaps, keylog: Optional[str], wireshark: bool, limit: int) -> No
     keylog_path = Path(keylog) if keylog else _default_keylog()
     if not keylog_path.exists():
         _fail(f"No key log at {keylog_path} — start a browser with: pynids keylog")
-    files = [Path(p) for p in pcaps] or sorted((data_dir() / "captures").glob("*.pcap"))
+    captures = data_dir() / "captures"
+    if not pcaps and captures.is_dir() and not os.access(captures, os.R_OK | os.X_OK):
+        _fail(f"Recorded traffic in {captures} is readable only by root:  "
+              f"sudo pynids decrypt --keylog {keylog_path}")
+    files = [Path(p) for p in pcaps] or sorted(captures.glob("*.pcap"))
     if not files:
         _fail("No recorded traffic. Enable recording: sudo pynids daemon install --record")
 

@@ -7,11 +7,13 @@ sent to one or more output backends.  It provides:
 Deduplication
     Identical alerts (same rule, same source, same destination) within a
     configurable time window are collapsed into a single emitted event.
-    A ``duplicate_count`` field is added to the evidence of the original.
+    A ``duplicate_count`` field (duplicates collapsed so far) is kept up to
+    date in the evidence of the original, in-memory alert.
 
 Suppression
     A whitelist of (rule_id, src_cidr) pairs can be configured.  Any
-    alert matching an entry in the whitelist is silently dropped.
+    alert matching an entry in the whitelist is silently dropped.  An
+    omitted or ``"*"`` src_cidr matches any source (IPv4 and IPv6).
 
 Correlation
     When multiple distinct alerts originate from the same source IP
@@ -20,7 +22,8 @@ Correlation
 
 Dispatch
     Registered :class:`BaseOutput` backends receive every non-suppressed,
-    non-deduplicated alert.
+    non-deduplicated alert.  Outputs run outside the manager's lock so a
+    slow backend only delays its own caller, never other capture threads.
 """
 from __future__ import annotations
 
@@ -55,22 +58,37 @@ class BaseOutput:
 # ---------------------------------------------------------------------------
 
 class _SuppressionEntry:
-    def __init__(self, rule_id: str, src_cidr: str) -> None:
+    def __init__(self, rule_id: str, src_cidr: Optional[str]) -> None:
         self.rule_id = rule_id  # "*" means any rule
-        try:
-            self.network: Optional[Any] = ipaddress.ip_network(src_cidr, strict=False)
-        except ValueError:
-            self.network = None
+        # None = any source, of either address family.
+        self.network: Optional[Any] = None
+        if src_cidr not in (None, "", "*"):
+            self.network = ipaddress.ip_network(str(src_cidr).strip(), strict=False)
 
     def matches(self, alert: Alert) -> bool:
         if self.rule_id != "*" and self.rule_id != alert.rule_id:
             return False
-        if alert.src_ip and self.network is not None:
-            try:
-                return ipaddress.ip_address(alert.src_ip) in self.network
-            except ValueError:
-                return False
-        return False
+        if self.network is None:
+            return True
+        if not alert.src_ip:
+            return False
+        try:
+            addr = ipaddress.ip_address(alert.src_ip)
+        except ValueError:
+            return False
+        if addr.version == 6 and addr.ipv4_mapped is not None and self.network.version == 4:
+            addr = addr.ipv4_mapped
+        return addr.version == self.network.version and addr in self.network
+
+
+def _build_suppression(rules: Optional[List[Dict[str, str]]]) -> List[_SuppressionEntry]:
+    entries: List[_SuppressionEntry] = []
+    for r in rules or []:
+        try:
+            entries.append(_SuppressionEntry(str(r.get("rule_id", "*")), r.get("src_cidr")))
+        except (ValueError, TypeError) as exc:
+            logger.warning("Ignoring suppression rule %r: invalid src_cidr (%s)", r, exc)
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -106,13 +124,10 @@ class AlertManager:
         self._outputs: List[BaseOutput] = []
         # Callables returning True drop an alert (e.g. the user's allowlist).
         self._filters: List[Callable[[Alert], bool]] = []
-        self._suppression: List[_SuppressionEntry] = [
-            _SuppressionEntry(r.get("rule_id", "*"), r.get("src_cidr", "0.0.0.0/0"))
-            for r in (suppression_rules or [])
-        ]
+        self._suppression: List[_SuppressionEntry] = _build_suppression(suppression_rules)
 
-        # Dedup: {dedup_key → (last_seen_ts, count)}
-        self._dedup: Dict[str, Tuple[float, int]] = {}
+        # Dedup: {dedup_key → (first_seen_ts, count, original alert)}
+        self._dedup: Dict[str, Tuple[float, int, Alert]] = {}
 
         # Correlation: {src_ip → deque[(timestamp, rule_id)]}
         self._corr_window: Dict[str, Deque[Tuple[float, str]]] = defaultdict(deque)
@@ -120,8 +135,9 @@ class AlertManager:
         self._last_prune: float = time.time()
 
         # Alerts arrive from several threads (one capture thread per
-        # interface, the LAN inventory, the C2 correlator).  Re-entrant
-        # because an output may add an alert of its own while being emitted.
+        # interface, the LAN inventory, the C2 correlator).  The lock guards
+        # the bookkeeping only; outputs are called after it is released, so
+        # an output may add an alert of its own while being emitted.
         self._lock = threading.RLock()
 
         # Statistics
@@ -150,21 +166,25 @@ class AlertManager:
         suppressed or deduplicated.
         """
         with self._lock:
-            return self._add(alert)
+            to_emit = self._add(alert)
+        for out in to_emit:
+            self._emit(out)
+        return bool(to_emit)
 
-    def _add(self, alert: Alert) -> bool:
+    def _add(self, alert: Alert) -> List[Alert]:
+        """Bookkeeping under the lock; returns the alerts to hand to outputs."""
         self.total_seen += 1
 
         # Severity gate
         if alert.severity < self.min_severity:
             self.total_suppressed += 1
-            return False
+            return []
 
         # Suppression whitelist
         if any(e.matches(alert) for e in self._suppression):
             logger.debug("Suppressed alert %s (whitelist)", alert.alert_id)
             self.total_suppressed += 1
-            return False
+            return []
         for predicate in self._filters:
             try:
                 dropped = predicate(alert)
@@ -173,7 +193,7 @@ class AlertManager:
                 dropped = False
             if dropped:
                 self.total_suppressed += 1
-                return False
+                return []
 
         # Deduplication
         key = alert.dedup_key
@@ -181,24 +201,30 @@ class AlertManager:
         if now - self._last_prune >= 60.0:
             self._prune(now)
         if key in self._dedup:
-            last_ts, count = self._dedup[key]
-            if (now - last_ts) < self.dedup_window:
-                self._dedup[key] = (last_ts, count + 1)
+            first_ts, count, original = self._dedup[key]
+            if (now - first_ts) < self.dedup_window:
+                self._dedup[key] = (first_ts, count + 1, original)
+                # Swap in a new dict: outputs (outside the lock) may be iterating the old one.
+                original.evidence = {**original.evidence, "duplicate_count": count}
                 self.total_deduplicated += 1
                 logger.debug("Deduplicated alert %s (count=%d)", key, count + 1)
-                return False
+                return []
 
-        self._dedup[key] = (now, 1)
-        self._emit(alert)
+        self._dedup[key] = (now, 1, alert)
+        self.total_emitted += 1
+        to_emit = [alert]
 
         # Correlation bookkeeping.  X-Ray privacy telemetry (STEALTH-*) is
         # excluded: it describes this machine's own browsing (trackers, QUIC,
         # DoH …) and would otherwise brand the local host a "multi-vector
         # attacker" several times an hour.
         if alert.src_ip and not (alert.rule_id or "").startswith("STEALTH-"):
-            self._update_correlation(alert)
+            corr = self._update_correlation(alert)
+            if corr is not None:
+                self.total_emitted += 1
+                to_emit.append(corr)
 
-        return True
+        return to_emit
 
     def close(self) -> None:
         """Flush and close all registered outputs."""
@@ -232,8 +258,7 @@ class AlertManager:
                               if now - t < self.correlation_window}
 
     def _emit(self, alert: Alert) -> None:
-        self.total_emitted += 1
-        for output in self._outputs:
+        for output in list(self._outputs):
             try:
                 output.emit(alert)
             except Exception as exc:
@@ -243,7 +268,7 @@ class AlertManager:
                     exc,
                 )
 
-    def _update_correlation(self, alert: Alert) -> None:
+    def _update_correlation(self, alert: Alert) -> Optional[Alert]:
         """Track alerts per source and emit a correlation alert if warranted."""
         src = alert.src_ip
         now = alert.timestamp
@@ -258,15 +283,15 @@ class AlertManager:
         # Count distinct rule IDs in the window
         distinct_rules = {entry[1] for entry in window}
         if len(distinct_rules) < self.correlation_threshold:
-            return
+            return None
 
         # Suppress duplicate correlation alerts within the same window
         last_corr = self._corr_alerted.get(src, 0.0)
         if (now - last_corr) < self.correlation_window:
-            return
+            return None
 
         self._corr_alerted[src] = now
-        corr_alert = Alert(
+        return Alert(
             alert_type=AlertType.CORRELATION,
             severity=Severity.CRITICAL,
             message=(
@@ -284,4 +309,3 @@ class AlertManager:
                 "window_seconds": self.correlation_window,
             },
         )
-        self._emit(corr_alert)

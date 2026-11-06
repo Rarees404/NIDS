@@ -298,7 +298,8 @@ def _prefetch(alert, ev, ctx) -> Guide:
 
 def _beaconing(alert, ev, ctx) -> Guide:
     host = _host(alert, ctx, ev)
-    bare = not ev.get("hostname_known", bool(ctx.get("remote_host")))
+    bare = not ev.get("hostname_known",
+                      bool(ctx.get("remote_host")) and not ctx.get("remote_host_unverified"))
     return _g(
         f"{_who(ctx)} contacts {host} {_interval(ev.get('mean_interval_seconds'))}, very regularly.",
         "Software that checks in on a fixed timer is common: mail and calendar sync, update "
@@ -387,7 +388,8 @@ def _exfil(alert, ev, ctx) -> Guide:
         "Large uploads are normal for backups, cloud sync, sending files or video calls. "
         "Malware stealing data looks the same on the wire, so big uploads to unfamiliar "
         "destinations are worth a glance.",
-        HARMLESS if ctx.get("app") and ctx.get("remote_host") else CHECK,
+        HARMLESS if ctx.get("app") and ctx.get("remote_host") and not ctx.get("remote_host_unverified")
+        else CHECK,
         ["If you were uploading or syncing something, this is expected.",
          "If you don't recognise the app or destination, investigate before it continues."],
         [("Uploaded", f"{ev.get('megabytes')} MiB"), ("Duration", f"{ev.get('duration_seconds')} s")],

@@ -8,6 +8,7 @@ browser's ``SSLKEYLOGFILE``, to decrypt (see ``pynids decrypt``).
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -22,7 +23,9 @@ class PcapRing:
 
         self._writer_cls = PcapWriter
         self.directory = Path(directory)
-        self.directory.mkdir(parents=True, exist_ok=True)
+        # Raw traffic (and with a key log, its plaintext): root-only.
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.directory, 0o700)
         self.max_bytes = max_mb * 1024 * 1024
         self.max_files = max_files
         self.prefix = prefix
@@ -40,8 +43,17 @@ class PcapRing:
             except Exception:  # noqa: BLE001
                 pass
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        self._path = self.directory / f"{self.prefix}-{stamp}-{int(time.time() * 1000) % 1000:03d}.pcap"
+        base = f"{self.prefix}-{stamp}-{int(time.time() * 1000) % 1000:03d}"
+        self._path = self.directory / f"{base}.pcap"
+        n = 1
+        while self._path.exists():  # two rotations in one millisecond must not overwrite
+            self._path = self.directory / f"{base}_{n}.pcap"  # "_" sorts after ".": order kept
+            n += 1
         self._writer = self._writer_cls(str(self._path), append=False, sync=False)
+        try:
+            os.chmod(self._path, 0o600)
+        except OSError:
+            pass
         # Set directly: scapy treats linktype=0 (DLT_NULL, i.e. lo0) as "unset".
         self._writer.linktype = self.linktype
         self._written = 0
