@@ -13,6 +13,12 @@ DnsTunnelingDetector
     characteristic of DNS tunneling tools (iodine, dnscat2, DNScat).
     MITRE: T1071.004.
 
+DgaDetector
+    Counts failed lookups (NXDOMAIN) for many different domains from one
+    client.  Malware with a domain-generation algorithm tries dozens of
+    throwaway names until one resolves.
+    MITRE: T1568.002.
+
 HttpAttackDetector
     Leverages the HTTP dissector's heuristic flags (SQL injection,
     XSS, path traversal, scanner user-agents) to generate severity-
@@ -290,6 +296,122 @@ class DnsTunnelingDetector(BaseDetector):
 
 
 # ---------------------------------------------------------------------------
+# Domain-generation algorithms (NXDOMAIN bursts)
+# ---------------------------------------------------------------------------
+
+class DgaDetector(BaseDetector):
+    """
+    Flag a client whose lookups keep failing for many *different* domains.
+
+    Malware that finds its command server through a domain-generation
+    algorithm asks for dozens of pseudo-random names; almost all of them do
+    not exist, so the resolver answers NXDOMAIN again and again.  A typo or a
+    dead bookmark fails for one domain; an app retrying one broken name fails
+    for one domain many times.  Only distinct registered domains count.
+
+    Skipped: single-label names (search-suffix expansion, Chrome's random
+    start-up probes), ``.local`` / ``.arpa`` / ``.lan`` / ``.home`` style
+    private zones, and service-discovery names.
+
+    Args:
+        nxdomain_threshold: Distinct failing registered domains that trigger an alert.
+        window:             Sliding window in seconds.
+    """
+
+    _PRIVATE_SUFFIXES = (".local", ".arpa", ".lan", ".home", ".internal", ".corp", ".localdomain",
+                         ".intranet", ".test", ".invalid", ".example")
+
+    def __init__(self, nxdomain_threshold: int = 12, window: float = 60.0) -> None:
+        self.nxdomain_threshold = nxdomain_threshold
+        self.window = window
+        # client ip -> deque[(timestamp, registered domain, full name)]
+        self._failures: Dict[str, Deque[Tuple[float, str, str]]] = defaultdict(deque)
+        self._alerted: Dict[str, float] = {}
+
+    @property
+    def name(self) -> str:
+        return "dga"
+
+    def prune(self, now: float) -> None:
+        for client in [c for c, d in self._failures.items() if not d or now - d[-1][0] > self.window]:
+            del self._failures[client]
+        self._alerted = {c: t for c, t in self._alerted.items() if now - t <= self.window}
+
+    def analyze(
+        self,
+        meta: dict,
+        layer7: dict,
+        flow: Optional[Flow],
+    ) -> Iterable[Alert]:
+        dns = layer7.get("dns")
+        if not dns or not dns.get("is_response") or dns.get("rcode") != 3:
+            return
+        if not self.nxdomain_threshold:
+            return
+        query_name: Optional[str] = dns.get("query_name")
+        client = meta.get("dst_ip")  # the answer travels resolver → client
+        if not query_name or not client:
+            return
+        name = query_name.lower().rstrip(".")
+        labels = [lbl for lbl in name.split(".") if lbl]
+        if len(labels) < 2 or name.endswith(self._PRIVATE_SUFFIXES):
+            return
+        if any(lbl.startswith("_") for lbl in labels):
+            return
+        registered = ".".join(labels[-_registered_domain(labels):])
+
+        ts = meta.get("timestamp") or time.time()
+        bucket = self._failures[client]
+        while bucket and ts - bucket[0][0] > self.window:
+            bucket.popleft()
+        bucket.append((ts, registered, name))
+        if len(bucket) > 2000:
+            bucket.popleft()
+
+        domains = {entry[1] for entry in bucket}
+        if len(domains) < self.nxdomain_threshold:
+            return
+        if ts - self._alerted.get(client, -1e18) <= self.window:
+            return
+        self._alerted[client] = ts
+
+        # Generated names look random; dead-but-real names look like words.
+        firsts = [d.split(".")[0] for d in domains]
+        mean_entropy = sum(_shannon(lbl) for lbl in firsts) / len(firsts)
+        mean_length = sum(len(lbl) for lbl in firsts) / len(firsts)
+        random_looking = mean_entropy >= 3.0 and mean_length >= 10
+        context = layer7.get("context") or {}
+        who = context.get("app") or client
+        yield Alert(
+            alert_type=AlertType.BEHAVIORAL,
+            severity=Severity.HIGH if random_looking else Severity.MEDIUM,
+            message=(
+                f"Many failed DNS lookups: {who} asked for {len(domains)} different domains that "
+                f"do not exist in {self.window:.0f}s"
+                + (" — the names look machine-generated" if random_looking else "")
+            ),
+            src_ip=client,
+            dst_ip=meta.get("src_ip"),
+            dst_port=meta.get("src_port"),
+            protocol=meta.get("protocol"),
+            mitre_technique="T1568.002",
+            tags=["dga", "dns", "c2"],
+            confidence=min(1.0, (0.45 if random_looking else 0.25)
+                           + len(domains) / (self.nxdomain_threshold * 4)),
+            evidence={
+                "failed_domains": len(domains),
+                "failed_lookups": len(bucket),
+                "window_seconds": self.window,
+                "sample_names": sorted({entry[2] for entry in bucket})[:15],
+                "mean_label_entropy": round(mean_entropy, 2),
+                "mean_label_length": round(mean_length, 1),
+                "looks_generated": random_looking,
+                "resolver": meta.get("src_ip"),
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
 # HTTP attack patterns
 # ---------------------------------------------------------------------------
 
@@ -535,6 +657,9 @@ class BeaconingDetector(BaseDetector):
         # Beacons are repeated *connections*; only count the first packet of
         # each flow, otherwise every packet of a bulk download looks periodic.
         if flow is not None and flow.packet_count > 1:
+            return
+        # A flow first seen through the server's packet: not this side's check-in.
+        if flow is not None and flow.src_ip and flow.src_ip != src_ip:
             return
         # Service discovery / time sync / DNS are periodic by design.
         if _is_multicast_or_broadcast(dst_ip) or dst_port in _SYSTEM_SERVICE_PORTS:

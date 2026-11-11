@@ -107,10 +107,38 @@ def _common_details(alert: Dict[str, Any], ctx: Dict[str, Any]) -> List[Tuple[st
     loc = ", ".join(x for x in (ctx.get("city"), ctx.get("country_name") or ctx.get("country")) if x)
     if loc:
         out.append(("Server location", loc + (f" · {ctx['org']}" if ctx.get("org") else "")))
+    flow = ctx.get("flow") if isinstance(ctx.get("flow"), dict) else None
+    if flow and flow.get("packets"):
+        outcome = _FLOW_OUTCOMES.get(flow.get("outcome"), flow.get("outcome"))
+        out.append(("Connection", f"{outcome} · {flow.get('packets')} packets · "
+                                  f"{_size(flow.get('bytes_out'))} sent, {_size(flow.get('bytes_in'))} received"))
     conf = alert.get("confidence")
     if isinstance(conf, (int, float)):
         out.append(("Detector confidence", f"{round(conf * 100)}%"))
     return out
+
+
+_FLOW_OUTCOMES = {
+    "attempt": "no answer (filtered or offline)",
+    "rejected": "refused by the other side",
+    "established": "open",
+    "reset": "cut off by a reset",
+    "closed": "finished normally",
+    "closing": "closing",
+    "active": "in progress",
+}
+
+
+def _size(n: Any) -> str:
+    try:
+        n = float(n or 0)
+    except (TypeError, ValueError):
+        return "?"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1000 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1000
+    return f"{n:.1f} GB"
 
 
 def _g(summary: str, meaning: str, verdict: str, steps: List[str],
@@ -449,11 +477,51 @@ def _threat_intel(alert, ev, ctx) -> Guide:
 
 
 def _generic(alert, ev, ctx) -> Guide:
+    # Signature rules carry their own explanation (``why`` / ``response``).
+    rule = ev.get("rule") if isinstance(ev.get("rule"), dict) else {}
+    severity = alert.get("severity")
+    verdict = ACT if severity == "CRITICAL" else CHECK if severity in ("HIGH", "MEDIUM") else HARMLESS
+    steps = []
+    if rule.get("response"):
+        steps.append(str(rule["response"]))
+    steps.append("Use 'Explain with Claude' for a detailed analysis of this specific event.")
+    details: List[Tuple[str, Any]] = []
+    for cond in (ev.get("matched") or [])[:4]:
+        if isinstance(cond, dict) and cond.get("actual") not in (None, "", True, False):
+            details.append((f"Matched {cond.get('field')}", str(cond["actual"])[:160]))
+    thresh = ev.get("threshold") if isinstance(ev.get("threshold"), dict) else None
+    if thresh:
+        details.append(("Repeated", f"{thresh.get('hits')} times in {thresh.get('seconds')}s"))
+    for ref in (rule.get("references") or [])[:2]:
+        details.append(("Reference", ref))
     return _g(
         alert.get("message") or "Network event detected.",
-        "A detection rule matched this traffic. See the evidence below for what triggered it.",
-        CHECK if alert.get("severity") in ("HIGH", "CRITICAL") else HARMLESS,
-        ["Use 'Explain with Claude' for a detailed analysis of this specific event."],
+        str(rule.get("why") or "A detection rule matched this traffic. See the evidence below "
+                               "for what triggered it."),
+        verdict,
+        steps,
+        details,
+    )
+
+
+def _dga(alert, ev, ctx) -> Guide:
+    who = _who(ctx)
+    count = ev.get("failed_domains")
+    generated = ev.get("looks_generated")
+    return _g(
+        f"{who} looked up {count} different domains that do not exist.",
+        "Malware that finds its command server with a domain-generation algorithm tries one "
+        "random-looking name after another until one answers; nearly all of them fail. "
+        + ("These names look machine-generated, which fits that pattern."
+           if generated else
+           "These names look like ordinary words, so a broken app, a dead ad network or a "
+           "misconfigured search domain is the more likely cause."),
+        ACT if generated else CHECK,
+        ["Look at the sample names below: random strings under many different domains point to malware.",
+         "Find the program that made the lookups (Connections tab) and check its signature.",
+         "If one of the names did resolve, investigate that domain and the address it points to."],
+        [("Failed domains", count), ("Sample names", ", ".join((ev.get("sample_names") or [])[:6])),
+         ("Average name randomness", ev.get("mean_label_entropy")), ("DNS server", ev.get("resolver"))],
     )
 
 
@@ -579,6 +647,7 @@ _BY_TAG: List[Tuple[str, Callable[..., Guide]]] = [
     ("portscan", _portscan),
     ("volumetric", _volumetric),
     ("dns_tunneling", _dns_tunnel),
+    ("dga", _dga),
     ("exfiltration", _exfil),
     ("sqli", _web_attack), ("xss", _web_attack), ("path_traversal", _web_attack), ("scanner", _web_attack),
     ("correlation", _correlation),

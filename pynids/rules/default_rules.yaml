@@ -1,0 +1,987 @@
+# PyNIDS signature rules — the built-in, tuned ruleset.
+#
+# The daemon loads this file by default.  To retune without editing it, put
+# overrides in "rules.yaml" in the PyNIDS data directory: a rule with the same
+# id replaces the built-in one, and a partial entry changes single settings:
+#
+#   rules:
+#     - {id: SIG-C2-006, enabled: false}       # switch a rule off
+#     - {id: SIG-POL-001, severity: MEDIUM}    # change one field
+#
+# Language reference: pynids/detection/signature.py.  In short:
+#
+#   Operators  eq ne lt gt lte gte in not_in contains not_contains startswith
+#              endswith regex cidr exists
+#   Fields     src_ip dst_ip src_port dst_port protocol payload_bytes payload_len
+#              layer7.<proto>.<field>   (http, dns, tls, quic, ssh, smtp)
+#              tcp.syn  tcp.null  tcp.xmas          (a "syn" is a connection attempt)
+#              direction                            (outbound | inbound | local | transit)
+#              src_scope  dst_scope                 (public | private | loopback | link_local | multicast)
+#              flow.new  flow.packets  flow.bytes_out …   context.app  context.country …
+#   Text operators read the payload byte-for-byte; \xNN in a value is one raw byte.
+#   Regexes are case-insensitive.
+#
+# Tuning principles used here:
+#   * A port number alone is never an attack.  Port rules match the opening
+#     SYN only (one alert per connection, never on replies) and say which
+#     direction and address scope makes the connection worth reporting.
+#   * Web attacks (SQL injection, XSS, path traversal, scanner user-agents)
+#     are reported by the HTTP behavioural detector, which knows request
+#     direction — they are not duplicated here.
+#   * Confidence reflects how often the pattern is benign in real traffic.
+#
+# MITRE ATT&CK references: https://attack.mitre.org/
+
+rules:
+
+  # =========================================================================
+  # Reconnaissance
+  # =========================================================================
+
+  - id: "SIG-REC-002"
+    description: "DNS lookup for a domain in a frequently abused top-level domain"
+    message: "DNS lookup for {layer7.dns.query_name} (frequently abused top-level domain)"
+    severity: LOW
+    confidence: 0.3
+    mitre: "T1071.004"
+    tags: [dns, suspicious_tld]
+    match:
+      all:
+        - {field: dst_port, op: eq, value: 53}
+        - {field: layer7.dns.is_response, op: eq, value: false}
+        - {field: layer7.dns.query_name, op: regex,
+           value: '\.(top|xyz|pw|cc|su|tk|ml|ga|cf|gq|icu|cyou|cfd|sbs|rest|bond|click|zip|mov|cam|monster|quest)$'}
+    why: "These top-level domains are cheap or free and show up far more often in phishing and malware than in ordinary browsing. Most lookups are still harmless."
+    response: "Check which app asked. Investigate the domain if you do not recognise it."
+    action: alert
+
+  - id: "SIG-REC-003"
+    description: "TCP Xmas-scan packets (FIN+PSH+URG)"
+    message: "Xmas-scan packets from {src_ip} to {dst_ip}"
+    severity: MEDIUM
+    confidence: 0.85
+    mitre: "T1046"
+    tags: [recon, portscan, stealth_scan]
+    match:
+      all:
+        - {field: tcp.xmas, op: eq, value: true}
+        - {field: tcp.syn, op: eq, value: false}
+        - {field: tcp.ack, op: eq, value: false}
+    threshold: {count: 3, seconds: 20}
+    why: "No normal TCP stack sends FIN, PSH and URG together without ACK. Scanners use it to map open ports past simple firewalls (nmap -sX)."
+    response: "Find out who owns the source address. From your own network it is a scanner or a compromised device."
+    action: alert
+
+  - id: "SIG-REC-004"
+    description: "TCP null-scan packets (no flags set)"
+    message: "Null-scan packets from {src_ip} to {dst_ip}"
+    severity: MEDIUM
+    confidence: 0.75
+    mitre: "T1046"
+    tags: [recon, portscan, stealth_scan]
+    match:
+      all:
+        - {field: tcp.null, op: eq, value: true}
+        - {field: src_port, op: exists}
+        - {field: payload_len, op: eq, value: 0}
+        - {field: src_scope, op: ne, value: loopback}
+    threshold: {count: 5, seconds: 20}
+    why: "A TCP segment without any flag is invalid. It is the signature of a null scan (nmap -sN)."
+    response: "Find out who owns the source address."
+    action: alert
+
+  - id: "SIG-REC-005"
+    description: "Lookup of a what-is-my-IP service"
+    message: "Public IP address check via {layer7.dns.query_name}"
+    severity: LOW
+    confidence: 0.3
+    mitre: "T1016"
+    tags: [discovery, external_ip]
+    match:
+      all:
+        - {field: layer7.dns.is_response, op: eq, value: false}
+        - {field: layer7.dns.query_name, op: regex,
+           value: '^(api6?\.ipify\.org|ifconfig\.(me|co|io)|icanhazip\.com|ipv4\.icanhazip\.com|ip-api\.com|checkip\.amazonaws\.com|checkip\.dyndns\.(org|com)|ipinfo\.io|myexternalip\.com|wtfismyip\.com|ipecho\.net|ident\.me|api\.myip\.com|ip\.sb|api\.ip\.sb|l2\.io|eth0\.me)$'}
+    why: "Malware commonly asks one of these services for the victim's public address right after it starts. VPN clients, routers and scripts do the same."
+    response: "Harmless from a tool you run on purpose. Worth a look when the app is unknown or unsigned."
+    action: alert
+
+  # =========================================================================
+  # Initial access / exploitation
+  # =========================================================================
+
+  - id: "SIG-EXP-004"
+    description: "Shellshock exploit attempt (bash CVE-2014-6271)"
+    message: "Shellshock exploit attempt from {src_ip} against {dst_ip}:{dst_port}"
+    severity: CRITICAL
+    confidence: 0.97
+    mitre: "T1190"
+    tags: [shellshock, rce, initial_access]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: payload_bytes, op: regex, value: '\(\)\s*\{\s*:\s*;\s*\}\s*;'}
+    why: "The byte sequence '() { :;};' in a request header makes vulnerable bash versions run whatever follows."
+    response: "If the target is yours, confirm bash is patched and check its logs for the command that followed."
+    action: alert
+
+  - id: "SIG-EXP-005"
+    description: "Log4Shell exploit attempt (CVE-2021-44228)"
+    message: "Log4Shell exploit string from {src_ip} to {dst_ip}:{dst_port}"
+    severity: CRITICAL
+    confidence: 0.95
+    mitre: "T1190"
+    tags: [log4shell, rce, initial_access]
+    match:
+      any:
+        - {field: payload_bytes, op: regex,
+           value: '\$\{jndi:(ldaps?|rmi|dns|iiop|corba|nds|https?)://'}
+        - {field: payload_bytes, op: regex,
+           value: '\$\{(\$\{[^}]{1,40}\}|[jndi:]){1,12}\$\{(lower|upper|::-|env:|sys:|date:)'}
+        - {field: payload_bytes, op: regex, value: '\$\{\$\{::-j\}'}
+    why: "A JNDI lookup string in logged input makes vulnerable Log4j versions download and run remote code. The second and third patterns catch the usual obfuscations."
+    response: "If the target runs Java, check its Log4j version and outbound LDAP/RMI/DNS connections right after this request."
+    action: alert
+
+  - id: "SIG-EXP-006"
+    description: "SMBv1 negotiation (deprecated protocol, EternalBlue attack surface)"
+    message: "SMBv1 negotiation from {src_ip} to {dst_ip}"
+    severity: MEDIUM
+    confidence: 0.8
+    mitre: "T1210"
+    tags: [smb, smbv1, eternalblue]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: in, value: [445, 139]}
+        - {field: payload_bytes, op: contains, value: '\xffSMB\x72'}
+    why: "SMB version 1 is the protocol EternalBlue / WannaCry (MS17-010) exploit. Modern systems negotiate SMB 2 or 3; a host still offering only version 1 is old, misconfigured, or a tool probing for the vulnerability."
+    response: "Identify the client. Disable SMBv1 on anything that still accepts it."
+    action: alert
+
+  - id: "SIG-EXP-007"
+    description: "Spring4Shell exploit attempt (CVE-2022-22965)"
+    message: "Spring4Shell exploit attempt from {src_ip} against {dst_ip}:{dst_port}"
+    severity: CRITICAL
+    confidence: 0.9
+    mitre: "T1190"
+    tags: [spring4shell, rce, initial_access]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: payload_bytes, op: regex, value: 'class\.module\.classLoader\.(resources|URLs|defaultAssertionStatus)'}
+    why: "Setting class.module.classLoader properties through request parameters is the Spring4Shell technique for writing a web shell."
+    response: "If the target runs Spring on JDK 9+, patch it and look for new .jsp files in the web root."
+    action: alert
+
+  - id: "SIG-EXP-008"
+    description: "Request for a secrets or configuration file"
+    message: "Probe for a sensitive file: {src_ip} requested {layer7.http.uri} from {dst_ip}"
+    severity: MEDIUM
+    confidence: 0.8
+    mitre: "T1595.003"
+    tags: [recon, webapp, sensitive_file]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: layer7.http.uri, op: regex,
+           value: '(/\.env(\.[a-z]+)?(\?|$)|/\.git/(config|HEAD|index)|/\.aws/credentials|/\.ssh/(id_[a-z0-9]+|authorized_keys)|/wp-config\.php(\.bak|\.old|~)?(\?|$)|/\.htpasswd|/\.DS_Store|/config\.(json|ya?ml)\.(bak|old)|/etc/(passwd|shadow)|/proc/self/environ|/phpinfo\.php|/server-status(\?|$)|/actuator/(env|heapdump)|/\.vscode/sftp\.json|/id_rsa(\?|$))'}
+    why: "Automated scanners request these paths on every web server they find, hoping for leaked credentials."
+    response: "Against your own server: make sure none of these paths answer with 200. From your own machine: something is scanning."
+    action: alert
+
+  - id: "SIG-EXP-009"
+    description: "Shell command injection in an HTTP request"
+    message: "Command injection attempt from {src_ip}: {layer7.http.uri}"
+    severity: HIGH
+    confidence: 0.75
+    mitre: "T1190"
+    tags: [command_injection, rce, webapp]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: layer7.http.uri, op: regex,
+           value: '(;|%3b|\||%7c|`|%60|\$\(|%24%28|&&|%26%26)(\s|%20|\+|\$\{IFS\})*(wget|curl|nc|ncat|bash|sh|python[23]?|perl|chmod|busybox|tftp|powershell|certutil)(\s|%20|\+|\$\{IFS\}|$)'}
+    why: "A shell separator followed by a download or shell command in a URL is an attempt to make the server run it."
+    response: "Check whether the target answered 200 and whether it then opened an outbound connection."
+    action: alert
+
+  - id: "SIG-EXP-010"
+    description: "Known remote-code-execution probe (IoT botnets, PHPUnit, ThinkPHP, Apache traversal)"
+    message: "Known exploit probe from {src_ip}: {layer7.http.uri}"
+    severity: HIGH
+    confidence: 0.9
+    mitre: "T1190"
+    tags: [exploit_probe, rce, botnet]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: layer7.http.uri, op: regex,
+           value: '(vendor/phpunit/.{0,40}eval-stdin\.php|/cgi-bin/(\.%2e|%2e%2e|\.\.)/|/cgi-bin/%%32%65|invokefunction&function=call_user_func_array|/shell\?cd\+/tmp|/boaform/admin/formLogin|/GponForm/diag_Form|/setup\.cgi\?next_file=|/HNAP1/?$|/tmUnblock\.cgi|/ctrlt/DeviceUpgrade|/picsdesc\.xml|/wanipcn\.xml|/_ignition/execute-solution|/solr/admin/(info|cores)|/owa/auth/x\.js|/ecp/default\.flt|/autodiscover/autodiscover\.json\?@)'}
+    why: "Each of these paths belongs to a published exploit that botnets (Mirai family and others) spray at every reachable address."
+    response: "Background noise against a patched server. If the target is a router, camera or old web app, patch or isolate it."
+    action: alert
+
+  # =========================================================================
+  # Execution — shells and download cradles seen on the wire
+  # =========================================================================
+
+  - id: "SIG-EXE-001"
+    description: "Reverse shell command on the wire (bash / netcat)"
+    message: "Reverse shell command in traffic {src_ip} → {dst_ip}:{dst_port}"
+    severity: CRITICAL
+    confidence: 0.9
+    mitre: "T1059.004"
+    tags: [reverse_shell, execution]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - any:
+            - {field: payload_bytes, op: regex, value: '(ba|z|da)?sh\s+-i\s+[0-9]?>&?\s*/dev/(tcp|udp)/'}
+            - {field: payload_bytes, op: regex, value: '/dev/(tcp|udp)/[\w.\-]{4,}/\d{2,5}\s+0>&1'}
+            - {field: payload_bytes, op: regex, value: '\bn(c|cat)(\.exe)?\s+(-\w+\s+)*-e\s+(/bin/(ba)?sh|cmd(\.exe)?)'}
+            - {field: payload_bytes, op: regex, value: 'mkfifo\s+/tmp/\w+\s*;.{0,80}\bnc\b'}
+    why: "These one-liners connect a shell on the victim back to an attacker. Seeing one in transit means it is being delivered or typed over an unencrypted channel."
+    response: "Treat the destination of the embedded address as attacker infrastructure. Check the target host for the resulting connection."
+    action: alert
+
+  - id: "SIG-EXE-002"
+    description: "Reverse shell — Python one-liner"
+    message: "Python reverse shell code in traffic {src_ip} → {dst_ip}:{dst_port}"
+    severity: CRITICAL
+    confidence: 0.85
+    mitre: "T1059.006"
+    tags: [reverse_shell, execution, python]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - any:
+            - {field: payload_bytes, op: regex, value: 'import\s+socket\s*,\s*subprocess\s*,\s*os'}
+            - {field: payload_bytes, op: regex, value: 'socket\.socket\([^)]{0,60}\).{0,200}(subprocess\.(call|Popen|run)|pty\.spawn|os\.dup2)'}
+    why: "The classic Python reverse shell imports socket, subprocess and os in one statement, then ties a socket to a shell."
+    response: "Find the host that received this and look for a python process with an outbound connection."
+    action: alert
+
+  - id: "SIG-EXE-003"
+    description: "PowerShell download cradle or encoded command"
+    message: "PowerShell download / encoded command in traffic {src_ip} → {dst_ip}:{dst_port}"
+    severity: HIGH
+    confidence: 0.85
+    mitre: "T1059.001"
+    tags: [execution, powershell, download_cradle]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - any:
+            - {field: payload_bytes, op: regex, value: 'IEX\s*\(?.{0,80}(DownloadString|Invoke-WebRequest|iwr\s)'}
+            - {field: payload_bytes, op: regex, value: 'powershell(\.exe)?\s.{0,120}-(e|en|enc|enco|encodedcommand)\s+[A-Za-z0-9+/=]{40,}'}
+            - {field: payload_bytes, op: regex, value: 'New-Object\s+(System\.)?Net\.WebClient\)?\.Download(String|File)'}
+            - {field: payload_bytes, op: regex, value: 'powershell.{0,80}-w(indowstyle)?\s+hidden.{0,120}(http|frombase64string)'}
+    why: "These are the standard ways malware makes PowerShell fetch and run a second stage without touching disk."
+    response: "Identify the Windows host involved and decode the command."
+    action: alert
+
+  - id: "SIG-EXE-005"
+    description: "Windows command prompt banner inside a TCP stream"
+    message: "Windows shell banner sent by {src_ip} to {dst_ip}:{dst_port} — possible reverse shell"
+    severity: HIGH
+    confidence: 0.8
+    mitre: "T1059.003"
+    tags: [reverse_shell, execution, windows]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: not_in, value: [23]}
+        - {field: src_port, op: not_in, value: [23]}
+        - {field: payload_bytes, op: regex, value: 'Microsoft Windows \[Version [\d.]+\][\s\S]{0,120}Microsoft Corp'}
+    why: "cmd.exe prints this banner when it starts. Over a raw TCP connection it means a Windows shell is attached to the network."
+    response: "The sender is the machine running the shell. Isolate it and find the process."
+    action: alert
+
+  - id: "SIG-EXE-006"
+    description: "Output of the 'id' command showing root, inside a TCP stream"
+    message: "Root shell output (uid=0) sent by {src_ip} to {dst_ip}:{dst_port}"
+    severity: HIGH
+    confidence: 0.7
+    mitre: "T1059.004"
+    tags: [reverse_shell, execution, attack_response]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: payload_bytes, op: regex, value: 'uid=0\(root\)\s+gid=0\((root|wheel)\)'}
+    why: "Attackers run 'id' first thing after an exploit lands. Its output crossing the network unencrypted means someone has a root shell on the sender."
+    response: "Investigate the sending host immediately."
+    action: alert
+
+  # =========================================================================
+  # Credential access — secrets crossing the network unencrypted
+  # =========================================================================
+
+  - id: "SIG-CRED-001"
+    description: "FTP password sent in cleartext"
+    message: "FTP password sent in cleartext to {dst_ip}"
+    severity: MEDIUM
+    confidence: 0.95
+    mitre: "T1552"
+    tags: [credential_access, ftp, cleartext]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: eq, value: 21}
+        - {field: payload_bytes, op: regex, value: '^PASS\s+\S'}
+        - {not: {field: payload_bytes, op: regex, value: '^PASS\s+(anonymous|guest|\S+@\S*)\s*$'}}
+    why: "FTP sends the password as plain text. Anyone on the path can read it."
+    response: "Switch the transfer to SFTP or FTPS and change the password that was exposed."
+    action: alert
+
+  - id: "SIG-CRED-002"
+    description: "Telnet connection (unencrypted remote login)"
+    message: "Telnet connection {src_ip} → {dst_ip}"
+    severity: MEDIUM
+    confidence: 0.9
+    mitre: "T1021"
+    tags: [credential_access, telnet, cleartext]
+    match:
+      all:
+        - {field: tcp.syn, op: eq, value: true}
+        - {field: dst_port, op: eq, value: 23}
+        - {field: dst_scope, op: ne, value: loopback}
+    why: "Telnet carries the login and everything typed afterwards in plain text. It is also the door Mirai-style botnets knock on."
+    response: "Use SSH instead. An inbound Telnet attempt from the internet is a botnet scan."
+    action: alert
+
+  - id: "SIG-CRED-003"
+    description: "HTTP Basic credentials sent without encryption"
+    message: "HTTP Basic credentials sent in cleartext to {layer7.http.host} ({dst_ip})"
+    severity: MEDIUM
+    confidence: 0.9
+    mitre: "T1552"
+    tags: [credential_access, cleartext, http]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: layer7.http.headers.authorization, op: regex, value: '^Basic\s+[A-Za-z0-9+/=]{4,}'}
+        - {field: dst_scope, op: ne, value: loopback}
+    why: "Basic authentication is only base64 — over plain HTTP the user name and password are readable by anyone on the path."
+    response: "Use HTTPS for this service and change the password."
+    action: alert
+
+  - id: "SIG-CRED-005"
+    description: "Password submitted in an unencrypted HTTP form"
+    message: "Password field posted in cleartext to {layer7.http.host} ({dst_ip})"
+    severity: MEDIUM
+    confidence: 0.7
+    mitre: "T1552"
+    tags: [credential_access, cleartext, http]
+    match:
+      all:
+        - {field: layer7.http.method, op: eq, value: POST}
+        - {field: dst_scope, op: ne, value: loopback}
+        - {field: payload_bytes, op: regex,
+           value: '(\r\n\r\n|&)(pass(word|wd)?|pwd|passwd|user_pass|login_password)=[^&\s]{1,}'}
+    why: "A login form posted over plain HTTP exposes the password to the local network and every hop after it."
+    response: "Do not reuse that password. Use the site's HTTPS address."
+    action: alert
+
+  - id: "SIG-CRED-006"
+    description: "Mail login sent in cleartext (SMTP / POP3 / IMAP)"
+    message: "Mail credentials sent in cleartext to {dst_ip}:{dst_port}"
+    severity: MEDIUM
+    confidence: 0.85
+    mitre: "T1552"
+    tags: [credential_access, cleartext, mail]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: in, value: [25, 110, 143, 587]}
+        - {field: payload_bytes, op: regex, value: '^(AUTH\s+(PLAIN|LOGIN)\b|\S+\s+LOGIN\s+\S+\s+\S+|PASS\s+\S+)'}
+    why: "The mail client authenticated before (or without) switching to TLS."
+    response: "Require TLS in the mail account settings (ports 465 / 993 / 995, or STARTTLS mandatory)."
+    action: alert
+
+  - id: "SIG-CRED-007"
+    description: "NTLM authentication offered to an internet host over HTTP"
+    message: "NTLM authentication sent to internet host {layer7.http.host} ({dst_ip})"
+    severity: HIGH
+    confidence: 0.8
+    mitre: "T1187"
+    tags: [credential_access, ntlm, forced_authentication]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: layer7.http.headers.authorization, op: regex, value: '^(NTLM|Negotiate)\s+TlRMTVNT'}
+        - {field: dst_scope, op: eq, value: public}
+    why: "NTLM challenge-responses can be cracked offline or relayed. A machine should only ever offer them to servers inside its own organisation."
+    response: "Find what triggered the request (a document, a link, a UNC path) and treat the account's password as exposed."
+    action: alert
+
+  - id: "SIG-CRED-008"
+    description: "Outbound SMB connection to the internet"
+    message: "SMB connection to internet host {dst_ip}"
+    severity: HIGH
+    confidence: 0.85
+    mitre: "T1187"
+    tags: [credential_access, smb, forced_authentication]
+    match:
+      all:
+        - {field: tcp.syn, op: eq, value: true}
+        - {field: dst_port, op: in, value: [445, 139]}
+        - {field: dst_scope, op: eq, value: public}
+        - {field: src_scope, op: ne, value: public}
+    why: "File sharing to an internet address is almost never intended. Attackers plant links to remote shares so the system sends its login hash automatically."
+    response: "Find the document, e-mail or page that referenced the share. Block outbound port 445 at the router."
+    action: alert
+
+  # =========================================================================
+  # Lateral movement / remote access
+  # =========================================================================
+
+  - id: "SIG-LAT-001"
+    description: "Inbound SMB connection from the internet"
+    message: "SMB connection attempt from internet host {src_ip} to {dst_ip}"
+    severity: HIGH
+    confidence: 0.9
+    mitre: "T1021.002"
+    tags: [lateral_movement, smb, exposed_service]
+    match:
+      all:
+        - {field: tcp.syn, op: eq, value: true}
+        - {field: dst_port, op: in, value: [445, 139]}
+        - {field: src_scope, op: eq, value: public}
+        - {field: dst_scope, op: ne, value: public}
+    why: "File sharing reachable from the internet is scanned and attacked constantly (EternalBlue, password guessing, ransomware)."
+    response: "Close port 445 on the router or firewall. File sharing should never be internet-facing."
+    action: alert
+
+  - id: "SIG-LAT-002"
+    description: "Remote Desktop connection from the internet"
+    message: "Remote Desktop (RDP) connection attempt from internet host {src_ip} to {dst_ip}"
+    severity: HIGH
+    confidence: 0.9
+    mitre: "T1021.001"
+    tags: [lateral_movement, rdp, exposed_service]
+    match:
+      all:
+        - {field: tcp.syn, op: eq, value: true}
+        - {field: dst_port, op: eq, value: 3389}
+        - {field: src_scope, op: eq, value: public}
+        - {field: dst_scope, op: ne, value: public}
+    why: "Exposed RDP is one of the most common ways ransomware crews get in."
+    response: "Put RDP behind a VPN. Review the Windows security log for successful logons from this address."
+    action: alert
+
+  - id: "SIG-LAT-003"
+    description: "Incoming screen-sharing (VNC) connection"
+    message: "Screen sharing (VNC) connection attempt from {src_ip} to {dst_ip}:{dst_port}"
+    severity: MEDIUM
+    confidence: 0.7
+    mitre: "T1021.005"
+    tags: [lateral_movement, vnc, remote_access]
+    match:
+      all:
+        - {field: tcp.syn, op: eq, value: true}
+        - {field: dst_port, op: in, value: [5900, 5901, 5902]}
+        - {field: dst_scope, op: ne, value: loopback}
+        - {not: {field: direction, op: eq, value: outbound}}
+    why: "Someone is trying to view or control a screen. Expected if you use Screen Sharing; otherwise it is an intrusion attempt."
+    response: "If you did not start this, turn off Screen Sharing / Remote Management in System Settings."
+    action: alert
+
+  - id: "SIG-LAT-004"
+    description: "Incoming WinRM remote-management connection"
+    message: "WinRM connection attempt from {src_ip} to {dst_ip}:{dst_port}"
+    severity: MEDIUM
+    confidence: 0.7
+    mitre: "T1021.006"
+    tags: [lateral_movement, winrm, remote_access]
+    match:
+      all:
+        - {field: tcp.syn, op: eq, value: true}
+        - {field: dst_port, op: in, value: [5985, 5986]}
+        - {not: {field: direction, op: eq, value: outbound}}
+    why: "WinRM runs commands remotely on Windows. Administrators use it; so do attackers moving between machines."
+    response: "Confirm the source is an administration host."
+    action: alert
+
+  - id: "SIG-LAT-005"
+    description: "Incoming SSH connection from the internet"
+    message: "SSH connection attempt from internet host {src_ip} to {dst_ip}"
+    severity: MEDIUM
+    confidence: 0.7
+    mitre: "T1021.004"
+    tags: [lateral_movement, ssh, exposed_service]
+    match:
+      all:
+        - {field: tcp.syn, op: eq, value: true}
+        - {field: dst_port, op: eq, value: 22}
+        - {field: src_scope, op: eq, value: public}
+        - {field: dst_scope, op: ne, value: public}
+    why: "SSH reachable from the internet is probed for weak passwords around the clock."
+    response: "If you did not expose SSH on purpose, turn off Remote Login. Otherwise allow key authentication only."
+    action: alert
+
+  - id: "SIG-LAT-006"
+    description: "Database or admin service reached from the internet"
+    message: "Internet host {src_ip} connected to a database / admin port ({dst_ip}:{dst_port})"
+    severity: HIGH
+    confidence: 0.85
+    mitre: "T1190"
+    tags: [exposed_service, database, initial_access]
+    match:
+      all:
+        - {field: tcp.syn, op: eq, value: true}
+        - {field: dst_port, op: in, value: [1433, 1521, 2375, 2376, 3306, 5432, 5984, 6379, 9200, 11211, 27017]}
+        - {field: src_scope, op: eq, value: public}
+        - {field: dst_scope, op: ne, value: public}
+    why: "SQL Server, MySQL, PostgreSQL, Redis, MongoDB, Elasticsearch, CouchDB, memcached and the Docker API should never accept connections from the internet. Open instances are found and emptied or encrypted within hours."
+    response: "Bind the service to localhost or firewall the port."
+    action: alert
+
+  - id: "SIG-LAT-007"
+    description: "PsExec-style remote service execution over SMB"
+    message: "PsExec service pipe used over SMB: {src_ip} → {dst_ip}"
+    severity: HIGH
+    confidence: 0.85
+    mitre: "T1569.002"
+    tags: [lateral_movement, psexec, smb]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: eq, value: 445}
+        - any:
+            - {field: payload_bytes, op: contains, value: 'PSEXESVC'}
+            - {field: payload_bytes, op: contains, value: 'P\x00S\x00E\x00X\x00E\x00S\x00V\x00C'}
+            - {field: payload_bytes, op: contains, value: 'R\x00E\x00M\x00C\x00O\x00M\x00_\x00'}
+    why: "PsExec and its clones install a service on the remote machine and talk to it through a named pipe. Administrators use it; ransomware operators use it to spread."
+    response: "Confirm the source is an administrator's machine and the timing matches planned work."
+    action: alert
+
+  # =========================================================================
+  # Command and control
+  # =========================================================================
+
+  - id: "SIG-C2-001"
+    description: "IRC session (classic botnet control channel)"
+    message: "IRC session from {src_ip} to {dst_ip}:{dst_port}"
+    severity: MEDIUM
+    confidence: 0.6
+    mitre: "T1071"
+    tags: [c2, botnet, irc]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_scope, op: eq, value: public}
+        - {field: payload_bytes, op: regex, value: '^(NICK \S{1,32}\r?\n|USER \S+ \S+ \S+ :|JOIN [#&]\S+|PRIVMSG [#&]?\S+ :)'}
+    why: "IRC is rare today outside of enthusiasts — and old-style botnets, which still use it to receive commands."
+    response: "Fine if you run an IRC client. Otherwise find the program that opened the connection."
+    action: alert
+
+  - id: "SIG-C2-002"
+    description: "Legacy Internet Explorer user-agent (default in Cobalt Strike profiles and old malware)"
+    message: "Legacy Internet Explorer user-agent from {src_ip} to {layer7.http.host}"
+    severity: HIGH
+    confidence: 0.6
+    mitre: "T1071.001"
+    tags: [c2, cobaltstrike, user_agent]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: layer7.http.user_agent, op: regex,
+           value: '^Mozilla/[45]\.0 \(compatible; MSIE (6|7|8|9|10)\.0; Windows NT [5-6]\.\d'}
+    why: "Nobody browses with Internet Explorer 6–10 any more, but those strings are the built-in defaults of Cobalt Strike and of many malware families' HTTP code."
+    response: "Find the program that sent the request. On a Mac this user-agent has no legitimate source."
+    action: alert
+
+  - id: "SIG-C2-003"
+    description: "Burst of LLMNR / NetBIOS name queries (credential-relay surface)"
+    message: "Burst of LLMNR / NetBIOS name queries from {src_ip}"
+    severity: LOW
+    confidence: 0.4
+    mitre: "T1557.001"
+    tags: [mitm, llmnr, nbns]
+    match:
+      all:
+        - {field: protocol, op: eq, value: udp}
+        - {field: dst_port, op: in, value: [5355, 137]}
+        - {field: src_scope, op: ne, value: loopback}
+    threshold: {count: 40, seconds: 60}
+    why: "Windows falls back to these broadcast name lookups when DNS fails. Tools such as Responder answer them to capture login hashes."
+    response: "Disable LLMNR and NetBIOS over TCP/IP on Windows machines in this network."
+    action: alert
+
+  - id: "SIG-C2-004"
+    description: "Tor hidden-service name leaked to DNS"
+    message: "DNS lookup for a .onion address: {layer7.dns.query_name}"
+    severity: MEDIUM
+    confidence: 0.8
+    mitre: "T1090.003"
+    tags: [tor, dns, anonymizer]
+    match:
+      all:
+        - {field: layer7.dns.is_response, op: eq, value: false}
+        - {field: layer7.dns.query_name, op: endswith, value: '.onion'}
+    why: ".onion names only resolve inside Tor. A lookup through normal DNS means some software holds an onion address — a Tor-aware app that is misconfigured, or malware with a hidden-service command server."
+    response: "Identify the app. The lookup also told your DNS provider which onion service was wanted."
+    action: alert
+
+  - id: "SIG-C2-005"
+    description: "Lookup of a dynamic-DNS hostname"
+    message: "Dynamic-DNS hostname looked up: {layer7.dns.query_name}"
+    severity: LOW
+    confidence: 0.45
+    mitre: "T1568"
+    tags: [c2, dynamic_dns, dns]
+    match:
+      all:
+        - {field: layer7.dns.is_response, op: eq, value: false}
+        - {field: layer7.dns.query_name, op: regex,
+           value: '\.(duckdns\.org|no-ip\.(com|org|biz|info)|noip\.com|ddns\.net|hopto\.org|zapto\.org|sytes\.net|myftp\.(org|biz)|serveftp\.com|servebeer\.com|servehttp\.com|dynu\.(com|net)|freeddns\.org|3322\.org|changeip\.com|dyndns\.(org|info)|dynv6\.net|mooo\.com|chickenkiller\.com|strangled\.net|ddnsking\.com|gotdns\.ch|kozow\.com)$'}
+    why: "Free dynamic DNS lets anyone point a hostname at a home connection in seconds. Remote-access trojans rely on it; so do home labs and cameras."
+    response: "Expected for your own devices. Otherwise check which app asked."
+    action: alert
+
+  - id: "SIG-C2-006"
+    description: "Connection to a reverse-tunnel service"
+    message: "Reverse-tunnel service contacted from {src_ip} ({dst_ip})"
+    severity: MEDIUM
+    confidence: 0.5
+    mitre: "T1572"
+    tags: [c2, tunnel, exfiltration]
+    match:
+      any:
+        - {field: layer7.tls.sni, op: regex, value: &tunnel_hosts '(^|\.)(ngrok\.(io|app|dev|com)|ngrok-free\.(app|dev)|trycloudflare\.com|serveo\.net|localtunnel\.me|loca\.lt|portmap\.io|pagekite\.me|localhost\.run|bore\.pub|tunnelto\.dev|playit\.gg|telebit\.cloud|lhr\.life)$'}
+        - {field: layer7.quic.sni, op: regex, value: *tunnel_hosts}
+        - all:
+            - {field: layer7.dns.is_response, op: eq, value: false}
+            - {field: layer7.dns.query_name, op: regex, value: *tunnel_hosts}
+    why: "These services publish a local port on the internet, bypassing the router and firewall. Developers use them for demos; intruders use them to keep a way back in."
+    response: "Fine if you started the tunnel. Otherwise find the process and what local port it exposes."
+    action: alert
+
+  - id: "SIG-C2-007"
+    description: "Connection to a paste or anonymous file-drop site"
+    message: "Paste / file-drop site contacted from {src_ip} ({dst_ip})"
+    severity: LOW
+    confidence: 0.35
+    mitre: "T1102"
+    tags: [c2, web_service, exfiltration]
+    match:
+      any:
+        - {field: layer7.tls.sni, op: regex, value: &drop_hosts '^(www\.)?(pastebin\.com|paste\.ee|hastebin\.com|ghostbin\.(co|com)|rentry\.(co|org)|transfer\.sh|file\.io|gofile\.io|0x0\.st|temp\.sh|catbox\.moe|litterbox\.catbox\.moe|pixeldrain\.com|anonfiles\.com|bashupload\.com|termbin\.com|privatebin\.net|controlc\.com)$'}
+        - {field: layer7.quic.sni, op: regex, value: *drop_hosts}
+    why: "Malware fetches its configuration from paste sites and uploads stolen files to anonymous drops, because the traffic looks like ordinary HTTPS."
+    response: "Harmless when you opened the site yourself. Check the app when you did not."
+    action: alert
+
+  - id: "SIG-C2-008"
+    description: "Telegram Bot API contacted"
+    message: "Telegram Bot API contacted from {src_ip}"
+    severity: MEDIUM
+    confidence: 0.5
+    mitre: "T1102.002"
+    tags: [c2, web_service, telegram]
+    match:
+      any:
+        - {field: layer7.tls.sni, op: eq, value: api.telegram.org}
+        - {field: layer7.quic.sni, op: eq, value: api.telegram.org}
+    why: "The Telegram apps talk to other hosts; api.telegram.org is the bot interface. Information stealers use it to ship passwords and cookies to the attacker's chat."
+    response: "Expected only if you run a Telegram bot or automation. Otherwise identify the program."
+    action: alert
+
+  - id: "SIG-C2-009"
+    description: "Cryptocurrency mining protocol (Stratum)"
+    message: "Crypto-mining protocol in traffic {src_ip} → {dst_ip}:{dst_port}"
+    severity: HIGH
+    confidence: 0.92
+    mitre: "T1496"
+    tags: [cryptomining, impact]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - any:
+            - {field: payload_bytes, op: regex, value: '"method"\s*:\s*"mining\.(subscribe|authorize|submit|configure)"'}
+            - {field: payload_bytes, op: regex, value: '"method"\s*:\s*"login"[\s\S]{0,300}"agent"\s*:\s*"[^"]*(xmrig|xmr-stak|cpuminer|ccminer|nanominer)'}
+            - {field: payload_bytes, op: regex, value: '"jsonrpc"\s*:\s*"2\.0"[\s\S]{0,200}"method"\s*:\s*"(getjob|keepalived)"'}
+    why: "Stratum is the protocol miners use to get work from a pool. On a machine that is not supposed to mine, it means someone else is using its CPU."
+    response: "Find the process (high CPU), remove it, and work out how it got there."
+    action: alert
+
+  - id: "SIG-C2-010"
+    description: "Lookup of a cryptocurrency mining pool"
+    message: "Mining pool hostname contacted: {src_ip} ({dst_ip})"
+    severity: MEDIUM
+    confidence: 0.7
+    mitre: "T1496"
+    tags: [cryptomining, impact, dns]
+    match:
+      any:
+        - all:
+            - {field: layer7.dns.is_response, op: eq, value: false}
+            - {field: layer7.dns.query_name, op: regex, value: &pool_hosts '(^|\.)(minexmr\.com|xmrpool\.eu|supportxmr\.com|nanopool\.org|2miners\.com|f2pool\.com|ethermine\.org|minergate\.com|moneroocean\.stream|hashvault\.pro|herominers\.com|unmineable\.com|nicehash\.com|c3pool\.(com|org)|kryptex\.network|monerohash\.com|dwarfpool\.com|viabtc\.com|antpool\.com)$'}
+        - {field: layer7.tls.sni, op: regex, value: *pool_hosts}
+    why: "These domains belong to mining pools."
+    response: "If nobody mines on this machine on purpose, look for the process that asked."
+    action: alert
+
+  - id: "SIG-C2-011"
+    description: "Program or script downloaded from a bare IP address over HTTP"
+    message: "Executable requested from a bare IP: {src_ip} → http://{layer7.http.host}{layer7.http.uri}"
+    severity: HIGH
+    confidence: 0.75
+    mitre: "T1105"
+    tags: [c2, ingress_tool_transfer, download]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: layer7.http.method, op: eq, value: GET}
+        - {field: dst_scope, op: eq, value: public}
+        - {field: layer7.http.host, op: regex, value: '^\d{1,3}(\.\d{1,3}){3}(:\d{1,5})?$'}
+        - {field: layer7.http.uri, op: regex,
+           value: '\.(exe|dll|scr|ps1|bat|cmd|vbs|js|hta|jar|sh|elf|bin|dmg|pkg|msi|apk|py|pl|x86|x86_64|arm[4-7]?|mips|mpsl)(\?.*)?$'}
+    why: "Legitimate software comes from named hosts over HTTPS. A program fetched from a numeric address over plain HTTP is how droppers and botnet loaders pull their next stage."
+    response: "Find the process that made the request and the file it saved. Look up the address."
+    action: alert
+
+  - id: "SIG-C2-012"
+    description: "Executable file delivered over unencrypted HTTP"
+    message: "Executable delivered over plain HTTP from {src_ip} to {dst_ip}"
+    severity: MEDIUM
+    confidence: 0.8
+    mitre: "T1105"
+    tags: [ingress_tool_transfer, download, cleartext]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: response}
+        - {field: src_scope, op: eq, value: public}
+        - any:
+            - {field: payload_bytes, op: regex, value: '\r\n\r\nMZ[\s\S]{40,400}This program cannot be run in DOS mode'}
+            - {field: payload_bytes, op: regex, value: '\r\n\r\n\x7fELF[\x01\x02][\x01\x02]\x01'}
+            - {field: payload_bytes, op: regex, value: '\r\n\r\n(\xcf\xfa\xed\xfe|\xca\xfe\xba\xbe\x00\x00\x00[\x01-\x04])'}
+    why: "A Windows, Linux or macOS binary arrived over plain HTTP, where it can be swapped in transit and where nothing proved who sent it."
+    response: "Check what downloaded it. Software updaters that still use HTTP verify signatures themselves; an unknown process does not."
+    action: alert
+
+  - id: "SIG-C2-013"
+    description: "Windows download utility user-agent (PowerShell, certutil, BITS)"
+    message: "Windows download tool ({layer7.http.user_agent}) fetched from {layer7.http.host}"
+    severity: MEDIUM
+    confidence: 0.5
+    mitre: "T1105"
+    tags: [ingress_tool_transfer, lolbin, user_agent]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: dst_scope, op: eq, value: public}
+        - {field: layer7.http.user_agent, op: regex, value: '(WindowsPowerShell/|CertUtil URL Agent|Microsoft BITS/|^Microsoft-WebDAV-MiniRedir)'}
+    why: "Attackers use tools already present on Windows — PowerShell, certutil, bitsadmin — to download payloads without bringing their own."
+    response: "Check the Windows host: what ran the command, and what was downloaded."
+    action: alert
+
+  - id: "SIG-C2-014"
+    description: "Repeated TLS connections without a server name to one internet address"
+    message: "TLS connections without a server name: {src_ip} → {dst_ip}:{dst_port}"
+    severity: LOW
+    confidence: 0.3
+    mitre: "T1573"
+    tags: [c2, tls, no_sni]
+    match:
+      all:
+        - {field: layer7.tls.ja3, op: exists}
+        - {not: {field: layer7.tls.sni, op: exists}}
+        - {not: {field: layer7.tls.ech, op: eq, value: true}}
+        - {field: dst_scope, op: eq, value: public}
+        - {not: {field: context.system_process, op: eq, value: true}}
+    threshold: {count: 6, seconds: 600, track_by: pair}
+    why: "Browsers and almost all apps name the server they want (SNI). Clients that connect by raw address and leave it out are custom tooling — VPNs and messengers, but also implants."
+    response: "See which app owns the connection and look up the address."
+    action: alert
+
+  - id: "SIG-C2-015"
+    description: "SSH on a non-standard port to an internet host"
+    message: "SSH on non-standard port: {src_ip} → {dst_ip}:{dst_port}"
+    severity: LOW
+    confidence: 0.4
+    mitre: "T1571"
+    tags: [c2, ssh, non_standard_port]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: not_in, value: [22, 2222]}
+        - {field: dst_scope, op: eq, value: public}
+        - {field: payload_bytes, op: regex, value: '^SSH-[12]\.\d+-\S'}
+    why: "SSH on an unusual port is how tunnels and reverse shells slip past port-based filtering. Git over port 443 does the same thing legitimately."
+    response: "Check the app and the destination."
+    action: alert
+
+  - id: "SIG-C2-016"
+    description: "ICMP echo packets carrying large payloads (possible ICMP tunnel)"
+    message: "Large ICMP payloads between {src_ip} and {dst_ip}"
+    severity: MEDIUM
+    confidence: 0.6
+    mitre: "T1095"
+    tags: [c2, tunnel, icmp, exfiltration]
+    match:
+      all:
+        - {field: protocol, op: in, value: [icmp, icmpv6]}
+        - {field: payload_len, op: gt, value: 256}
+    threshold: {count: 20, seconds: 60, track_by: pair}
+    why: "Ping carries 32–56 bytes of filler. A steady stream of big ICMP payloads is how tunnelling tools (ptunnel, icmpsh) move data through firewalls that allow ping."
+    response: "Check both ends. Path-MTU tests and some monitoring tools also send large pings, briefly."
+    action: alert
+
+  # =========================================================================
+  # Exfiltration
+  # =========================================================================
+
+  - id: "SIG-EXF-001"
+    description: "High rate of DNS TXT queries (possible DNS exfiltration)"
+    message: "Many DNS TXT queries from {src_ip}"
+    severity: MEDIUM
+    confidence: 0.5
+    mitre: "T1048.003"
+    tags: [exfiltration, dns]
+    match:
+      all:
+        - {field: dst_port, op: eq, value: 53}
+        - {field: layer7.dns.is_response, op: eq, value: false}
+        - {field: layer7.dns.query_type, op: eq, value: TXT}
+        - {not: {field: layer7.dns.query_name, op: regex, value: '(\.local|\.arpa|_domainkey\..+|^_dmarc\..+|^_spf\..+)$'}}
+    threshold: {count: 25, seconds: 60}
+    why: "TXT records hold free-form text, which makes them the favourite carrier for DNS tunnels and for malware fetching commands. A single TXT lookup is routine (mail checks, domain verification); dozens a minute are not."
+    response: "Look at the names being queried — encoded-looking subdomains of one domain confirm a tunnel."
+    action: alert
+
+  - id: "SIG-EXF-002"
+    description: "DNS NULL-record query (used by DNS tunnelling tools)"
+    message: "DNS NULL-record query for {layer7.dns.query_name} from {src_ip}"
+    severity: HIGH
+    confidence: 0.75
+    mitre: "T1071.004"
+    tags: [exfiltration, dns_tunneling, dns]
+    match:
+      all:
+        - {field: dst_port, op: eq, value: 53}
+        - {field: layer7.dns.is_response, op: eq, value: false}
+        - {field: layer7.dns.query_type, op: in, value: ["NULL", "10"]}
+    why: "The NULL record type has no legitimate use today. The tunnelling tool iodine prefers it because it carries the most data per packet."
+    response: "Identify the program. Block the queried domain."
+    action: alert
+
+  # =========================================================================
+  # Impact
+  # =========================================================================
+
+  - id: "SIG-IMP-001"
+    description: "NTP monlist request (amplification attack, CVE-2013-5211)"
+    message: "NTP monlist request from {src_ip} to {dst_ip}"
+    severity: HIGH
+    confidence: 0.9
+    mitre: "T1498.002"
+    tags: [dos, amplification, ntp]
+    match:
+      all:
+        - {field: protocol, op: eq, value: udp}
+        - {field: dst_port, op: eq, value: 123}
+        - {field: payload_bytes, op: startswith, value: '\x17\x00\x03\x2a'}
+    why: "The monlist command makes an old NTP server send a response hundreds of times larger than the request — to a spoofed victim address."
+    response: "If the target is your NTP server, upgrade it or disable monlist."
+    action: alert
+
+  - id: "SIG-IMP-002"
+    description: "Memcached request over UDP (amplification attack)"
+    message: "Memcached UDP request from {src_ip} to {dst_ip}"
+    severity: HIGH
+    confidence: 0.85
+    mitre: "T1498.002"
+    tags: [dos, amplification, memcached]
+    match:
+      all:
+        - {field: protocol, op: eq, value: udp}
+        - {field: dst_port, op: eq, value: 11211}
+        - {field: payload_bytes, op: regex, value: '^[\s\S]{8}(stats|get |gets )'}
+    why: "memcached answers UDP requests with responses up to 50,000 times larger. Nothing legitimate uses it over UDP across networks."
+    response: "Disable UDP in memcached (-U 0) and firewall port 11211."
+    action: alert
+
+  - id: "SIG-IMP-003"
+    description: "Burst of DNS ANY queries (amplification or zone reconnaissance)"
+    message: "Burst of DNS ANY queries from {src_ip}"
+    severity: MEDIUM
+    confidence: 0.6
+    mitre: "T1498.002"
+    tags: [dos, amplification, dns]
+    match:
+      all:
+        - {field: dst_port, op: eq, value: 53}
+        - {field: layer7.dns.is_response, op: eq, value: false}
+        - {field: layer7.dns.query_type, op: eq, value: ANY}
+    threshold: {count: 10, seconds: 20}
+    why: "ANY asks for every record of a name, giving the largest possible answer. Resolvers and browsers never use it in bulk."
+    response: "From your own machine: find the tool. Towards your DNS server: rate-limit or refuse ANY."
+    action: alert
+
+  # =========================================================================
+  # Hygiene — weak or outdated protocols
+  # =========================================================================
+
+  - id: "SIG-POL-001"
+    description: "Outdated TLS version offered (TLS 1.0 / 1.1)"
+    message: "Outdated {layer7.tls.tls_version} offered by {src_ip} to {dst_ip}"
+    severity: LOW
+    confidence: 0.9
+    tags: [policy, tls, weak_crypto]
+    match:
+      all:
+        - {field: layer7.tls.tls_version, op: in, value: ["TLS 1.0", "TLS 1.1"]}
+        - {field: dst_scope, op: ne, value: loopback}
+    threshold: {count: 3, seconds: 300, track_by: pair}
+    why: "TLS 1.0 and 1.1 were retired in 2021. Current software offers 1.2 or 1.3; a client that tops out lower is old enough to have other unpatched problems."
+    response: "Update the program that made the connection."
+    action: alert
+
+  - id: "SIG-POL-002"
+    description: "SSH protocol version 1 in use"
+    message: "SSH protocol 1 banner ({layer7.ssh.software}) between {src_ip} and {dst_ip}"
+    severity: MEDIUM
+    confidence: 0.9
+    tags: [policy, ssh, weak_crypto]
+    match:
+      all:
+        - {field: layer7.ssh.proto_version, op: regex, value: '^1\.[0-8]'}
+    why: "SSH-1 has design flaws that allow session hijacking. It was replaced in 2006."
+    response: "Upgrade or retire the device that still speaks it."
+    action: alert
+
+  - id: "SIG-POL-003"
+    description: "SNMP request with the default 'public' community"
+    message: "SNMP with default community 'public': {src_ip} → {dst_ip}"
+    severity: LOW
+    confidence: 0.7
+    mitre: "T1602.001"
+    tags: [policy, snmp, discovery]
+    match:
+      all:
+        - {field: protocol, op: eq, value: udp}
+        - {field: dst_port, op: eq, value: 161}
+        - {field: payload_bytes, op: contains, value: '\x04\x06public'}
+        - {field: src_scope, op: ne, value: loopback}
+    threshold: {count: 5, seconds: 60}
+    why: "SNMP v1/v2c with the factory community string hands device configuration to anyone who asks. Printer drivers poll this way; so do network mappers."
+    response: "Change the community string or move the device to SNMPv3."
+    action: alert
+
+  - id: "SIG-POL-004"
+    description: "TFTP transfer (unauthenticated file transfer)"
+    message: "TFTP request from {src_ip} to {dst_ip}"
+    severity: LOW
+    confidence: 0.6
+    mitre: "T1105"
+    tags: [policy, tftp, ingress_tool_transfer]
+    match:
+      all:
+        - {field: protocol, op: eq, value: udp}
+        - {field: dst_port, op: eq, value: 69}
+        - {field: payload_bytes, op: regex, value: '^\x00[\x01\x02][^\x00]{1,200}\x00(octet|netascii)'}
+    why: "TFTP has no authentication or encryption. It boots network devices — and is a common way to pull tools onto a compromised machine."
+    response: "Expected during network boot or device firmware updates only."
+    action: alert

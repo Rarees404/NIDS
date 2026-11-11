@@ -5,70 +5,57 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>PyNIDS Dashboard</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3z' fill='%232a78d6'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3z' fill='%2322d3ee'/%3E%3C/svg%3E">
 <style>
 :root {
-  color-scheme: light;
-  --page: #f9f9f7;
-  --surface: #fcfcfb;
-  --surface-2: #f3f2ee;
-  --ink: #0b0b0b;
-  --ink-2: #52514e;
-  --muted: #898781;
-  --grid: #e1e0d9;
-  --axis: #c3c2b7;
-  --border: rgba(11,11,11,0.10);
-  --series-1: #2a78d6;
-  --series-2: #eb6834;
-  --land: #e8e7e1;
-  --good: #0ca30c;
-  --good-text: #006300;
-  --warning: #fab219;
-  --serious: #ec835a;
-  --critical: #d03b3b;
-  --accent: #2a78d6;
-  --shadow: 0 1px 2px rgba(11,11,11,0.04), 0 8px 24px rgba(11,11,11,0.06);
-  --radius: 12px;
-  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
-  --mono: ui-monospace, "SF Mono", Menlo, monospace;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --page: #0d0d0d;
-    --surface: #1a1a19;
-    --surface-2: #232321;
-    --ink: #ffffff;
-    --ink-2: #c3c2b7;
-    --muted: #898781;
-    --grid: #2c2c2a;
-    --axis: #383835;
-    --border: rgba(255,255,255,0.10);
-    --series-1: #3987e5;
-    --series-2: #d95926;
-    --land: #2a2a28;
-    --good-text: #0ca30c;
-    --accent: #3987e5;
-    --shadow: 0 1px 2px rgba(0,0,0,0.4);
-  }
-}
-:root[data-theme="dark"] {
   color-scheme: dark;
-  --page: #0d0d0d;
-  --surface: #1a1a19;
-  --surface-2: #232321;
-  --ink: #ffffff;
-  --ink-2: #c3c2b7;
-  --muted: #898781;
-  --grid: #2c2c2a;
-  --axis: #383835;
-  --border: rgba(255,255,255,0.10);
-  --series-1: #3987e5;
-  --series-2: #d95926;
-  --land: #2a2a28;
-  --good-text: #0ca30c;
-  --accent: #3987e5;
-  --shadow: 0 1px 2px rgba(0,0,0,0.4);
+  --page: #060a11;
+  --surface: #0c121c;
+  --surface-2: #131b29;
+  --ink: #e8eef6;
+  --ink-2: #a7b6c9;
+  --muted: #6f8098;
+  --grid: #1a2535;
+  --axis: #2b3a50;
+  --border: rgba(125, 211, 252, 0.15);
+  --series-1: #22d3ee;
+  --series-2: #f97316;
+  --land: #16202f;
+  --good: #22c55e;
+  --good-text: #4ade80;
+  --warning: #fbbf24;
+  --serious: #fb923c;
+  --critical: #ef4444;
+  --accent: #22d3ee;
+  --glow: rgba(34, 211, 238, 0.28);
+  --shadow: 0 1px 0 rgba(255,255,255,0.02) inset, 0 14px 34px rgba(0,0,0,0.45);
+  --radius: 8px;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+/* Light theme: opt-in with the theme button. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --page: #eef2f7;
+  --surface: #ffffff;
+  --surface-2: #e8eef5;
+  --ink: #0a111d;
+  --ink-2: #3c4b60;
+  --muted: #66768c;
+  --grid: #dbe3ec;
+  --axis: #b7c4d4;
+  --border: rgba(10, 17, 29, 0.13);
+  --series-1: #0891b2;
+  --series-2: #ea580c;
+  --land: #dbe4ee;
+  --good: #16a34a;
+  --good-text: #15803d;
+  --warning: #f59e0b;
+  --serious: #ea580c;
+  --critical: #dc2626;
+  --accent: #0e7490;
+  --glow: rgba(8, 145, 178, 0.18);
+  --shadow: 0 1px 2px rgba(10,17,29,0.05), 0 10px 26px rgba(10,17,29,0.07);
 }
 
 * { box-sizing: border-box; }
@@ -411,6 +398,7 @@ a.ext::after { content: " ↗"; }
 .ai-box code, .guide code { font-family: var(--mono); }
 </style>
 <link rel="stylesheet" href="/static/soc.css">
+<link rel="stylesheet" href="/static/theme.css">
 </head>
 <body>
 
@@ -441,6 +429,8 @@ a.ext::after { content: " ↗"; }
       <a href="#overview" data-tab="overview">Overview</a>
       <a href="#connections" data-tab="connections">Connections<span class="n" id="navConnN" hidden></span></a>
       <a href="#events" data-tab="events">Events</a>
+      <a href="#detections" data-tab="detections">Detections</a>
+      <a href="#flows" data-tab="flows">Flows</a>
       <a href="#apps" data-tab="apps">Apps</a>
       <a href="#network" data-tab="network">Network</a>
       <a href="#protection" data-tab="protection">Protection</a>
@@ -449,7 +439,7 @@ a.ext::after { content: " ↗"; }
       <a href="#email" data-tab="email" class="soc"><svg aria-hidden="true"><use href="#i-mail"/></svg>Email</a>
     </nav>
     <select class="tabs-select" id="tabSelect" aria-label="Section">
-      <option value="overview">Overview</option><option value="connections">Connections</option><option value="events">Events</option>
+      <option value="overview">Overview</option><option value="connections">Connections</option><option value="events">Events</option><option value="detections">Detections</option><option value="flows">Flows</option>
       <option value="apps">Apps</option><option value="network">Network</option><option value="protection">Protection</option><option value="investigate">Investigate</option><option value="email">Email</option>
     </select>
     <div class="spacer"></div>
@@ -562,11 +552,18 @@ a.ext::after { content: " ↗"; }
             <option value="604800">Last 7 days</option>
           </select>
           <label class="check"><input type="checkbox" id="groupToggle" checked> Group similar</label>
+          <span class="spacer"></span>
+          <a class="btn" id="exportJson" href="/api/alerts/export?format=jsonl" download title="Download the events matching these filters as JSON lines"><svg><use href="#i-download"/></svg>JSON</a>
+          <a class="btn" id="exportCsv" href="/api/alerts/export?format=csv" download title="Download the events matching these filters as CSV"><svg><use href="#i-download"/></svg>CSV</a>
         </div>
         <div class="events" id="eventList" aria-live="polite"></div>
       </div>
     </div>
   </section>
+
+  <!-- ===================================================== detections + flows (pynids/web/app/ops.js) -->
+  <section data-tab="detections" id="tab-detections"></section>
+  <section data-tab="flows" id="tab-flows"></section>
 
   <!-- ===================================================== apps -->
   <section data-tab="apps" id="tab-apps">
@@ -640,7 +637,7 @@ a.ext::after { content: " ↗"; }
   <section data-tab="email" id="tab-email"></section>
 
   <footer>
-    PyNIDS <span id="ver"></span> · <button class="link" id="checkUpdateBtn">Check for updates</button> · data stays on this Mac unless you look up an IP or ask Claude · IP geolocation by <a href="https://db-ip.com" rel="noreferrer">DB-IP</a>
+    PyNIDS <span id="ver"></span> · <button class="link" id="keysBtn">Keyboard shortcuts</button> · <button class="link" id="checkUpdateBtn">Check for updates</button> · data stays on this Mac unless you look up an IP or ask Claude · IP geolocation by <a href="https://db-ip.com" rel="noreferrer">DB-IP</a>
   </footer>
 </main>
 
@@ -672,9 +669,9 @@ const KIND_LABELS = {
   localhost: "Localhost probes", doh: "Encrypted DNS", tracker: "Trackers", beacon: "Beacons & pixels",
   websocket: "WebSockets", quic: "QUIC / HTTP-3", prefetch: "DNS prefetch", host: "Programs & devices", other: "Other",
 };
-const TABS = ["overview", "connections", "events", "apps", "network", "protection", "investigate", "email"];
+const TABS = ["overview", "connections", "events", "detections", "flows", "apps", "network", "protection", "investigate", "email"];
 const state = {
-  summary: null, alerts: [], kind: null, sev: "LOW", q: "", range: "live", app: null, group: true,
+  summary: null, alerts: [], kind: null, sev: "LOW", q: "", range: "live", app: null, group: true, rule: null, mitre: null,
   remotes: [], timeline: [], rates: null, world: null, openAlert: null, tab: "overview",
   conns: null, connFilter: "internet", connQ: "", devices: null, nmap: false, allow: [], launch: null,
 };
@@ -848,7 +845,7 @@ function ttRow(color, value, label) {
   try { saved = localStorage.getItem("pynids-theme"); } catch (_) {}
   if (saved) document.documentElement.dataset.theme = saved;
   $("themeBtn").addEventListener("click", () => {
-    const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const cur = document.documentElement.dataset.theme || "dark";  // dark is the default theme
     const next = cur === "dark" ? "light" : "dark";
     document.documentElement.dataset.theme = next;
     try { localStorage.setItem("pynids-theme", next); } catch (_) {}
@@ -1156,6 +1153,8 @@ function go(route, opts = {}) {
   if (tab === "connections") loadConnections();
   if (tab === "apps") loadApps();
   if (tab === "events") renderEvents();
+  if (tab === "detections" && typeof detectionsShow === "function") detectionsShow();
+  if (tab === "flows" && typeof flowsShow === "function") flowsShow();
   if (tab === "protection") { loadBlocks(); loadAllowlist(); loadLaunchItems(); loadIntel().catch(() => {}); }
   // Lookups run by themselves only for navigation this page made; a deep link
   // from elsewhere just pre-fills the indicator and waits for a click.
@@ -1395,10 +1394,11 @@ function openDrawer(a, push) {
           ["Flow", `${a.src_ip || "?"}${a.src_port ? ":" + a.src_port : ""} → ${a.dst_ip || "?"}${a.dst_port ? ":" + a.dst_port : ""} ${a.protocol ? "(" + a.protocol.toUpperCase() + ")" : ""}`],
           ["Direction", ctx.direction],
           ["Rule", a.rule_id],
-          ["MITRE ATT&CK", a.mitre_technique],
+          ["MITRE ATT&CK", typeof mitreLink === "function" ? mitreLink(a) : a.mitre_technique],
           ["Confidence", a.confidence != null ? Math.round(a.confidence * 100) + "%" : null],
           ["Tags", (a.tags || []).join(", ")],
         ]),
+        ...(typeof alertExtras === "function" ? alertExtras(a) : []),
         similar.length ? el("div", { class: "section" }, el("h4", { text: `${similar.length} similar event${similar.length > 1 ? "s" : ""}` }),
           el("div", {}, similar.slice(0, 12).map((x) => el("div", { class: "muted", style: "font-size:12.5px;padding:2px 0" }, fmtTime(x.timestamp) + " · ", el("button", { class: "link", onclick: () => openDrawer(x, true) }, x.message.slice(0, 90)))))) : null,
         el("details", { class: "datatable" }, el("summary", { text: "Raw evidence (JSON)" }), el("pre", { class: "json", text: JSON.stringify(a.evidence || {}, null, 2) })),
@@ -1732,12 +1732,16 @@ function renderKindFilters() {
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   wrap.replaceChildren(btn(null, "All", total), ...Object.keys(KIND_LABELS).filter((k) => counts[k]).map((k) => btn(k, KIND_LABELS[k], counts[k])));
   if (state.app) wrap.append(el("button", { class: "filter-chip", "aria-pressed": "true", onclick: () => { state.app = null; loadAlerts(); } }, "App: " + state.app + " ✕"));
+  if (state.rule) wrap.append(el("button", { class: "filter-chip", "aria-pressed": "true", onclick: () => { state.rule = null; loadAlerts(); } }, "Rule: " + state.rule + " ✕"));
+  if (state.mitre) wrap.append(el("button", { class: "filter-chip", "aria-pressed": "true", onclick: () => { state.mitre = null; loadAlerts(); } }, "ATT&CK: " + state.mitre + " ✕"));
 }
 function setKind(k) { state.kind = k; renderKindFilters(); loadAlerts(); }
 function alertMatches(a) {
   if (state.kind && a.kind !== state.kind) return false;
   if (SEV_ORDER[a.severity] < SEV_ORDER[state.sev]) return false;
   if (state.app && (a.context || {}).app !== state.app) return false;
+  if (state.rule && a.rule_id !== state.rule) return false;
+  if (state.mitre && a.mitre_technique !== state.mitre) return false;
   if (state.q) {
     const hay = [a.message, a.src_ip, a.dst_ip, (a.context || {}).app, (a.context || {}).remote_host, (a.context || {}).remote_ip, a.rule_id].join(" ").toLowerCase();
     if (!state.q.toLowerCase().split(/\s+/).every((w) => hay.includes(w))) return false;
@@ -1750,6 +1754,8 @@ async function loadAlerts() {
   if (state.kind) params.set("kind", state.kind);
   if (state.q) params.set("q", state.q);
   if (state.app) params.set("app", state.app);
+  if (state.rule) params.set("rule", state.rule);
+  if (state.mitre) params.set("mitre", state.mitre);
   if (state.range !== "live") params.set("since", String(Date.now() / 1000 - Number(state.range)));
   else if (state.summary) params.set("since", String(Date.now() / 1000 - state.summary.uptime - 5));
   // Filters change faster than queries return: only the newest request may paint.
@@ -1772,8 +1778,9 @@ function eventRow(a, isNew, count) {
   if (ctx.app) meta.append(el("span", { class: "chip", text: ctx.app }));
   if (ctx.remote_host) meta.append(el("span", { class: "chip", title: ctx.remote_host, text: ctx.remote_host }));
   if (ctx.country) meta.append(el("span", { class: "chip", text: ctx.country }));
-  if (a.mitre_technique) meta.append(el("span", { class: "chip", text: a.mitre_technique }));
-  const row = el("div", { class: "event" + (isNew ? " new" : ""), tabindex: 0, role: "button" },
+  if (a.mitre_technique) meta.append(el("span", { class: "chip mitre", title: a.mitre && a.mitre.name ? `${a.mitre.name} — ${a.mitre.tactic || "ATT&CK"}` : "MITRE ATT&CK technique", text: a.mitre_technique }));
+  if (a.rule_id && a.alert_type === "signature") meta.append(el("span", { class: "chip rule", title: "Signature rule", text: a.rule_id }));
+  const row = el("div", { class: "event sev-" + a.severity + (isNew ? " new" : ""), tabindex: 0, role: "button" },
     el("time", { text: fmtTime(a.timestamp) }),
     el("div", { class: "sevcol" }, sevBadge(a.severity)),
     el("div", {}, el("div", { class: "msg", text: (a.about && a.about.summary) || a.message, title: a.message }), meta.childNodes.length ? meta : null),
@@ -1782,8 +1789,22 @@ function eventRow(a, isNew, count) {
   row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDrawer(a); } });
   return row;
 }
+function exportParams() {
+  const params = new URLSearchParams({ limit: "1000", min_severity: state.sev });
+  if (state.kind) params.set("kind", state.kind);
+  if (state.q) params.set("q", state.q);
+  if (state.app) params.set("app", state.app);
+  if (state.rule) params.set("rule", state.rule);
+  if (state.mitre) params.set("mitre", state.mitre);
+  if (state.range !== "live") params.set("since", String(Math.floor(Date.now() / 1000 - Number(state.range))));
+  else if (state.summary) params.set("since", String(Math.floor(Date.now() / 1000 - state.summary.uptime - 5)));
+  return params;
+}
 function renderEvents() {
   const list = $("eventList");
+  const ex = exportParams();
+  ex.set("format", "jsonl"); $("exportJson").href = "/api/alerts/export?" + ex;
+  ex.set("format", "csv"); $("exportCsv").href = "/api/alerts/export?" + ex;
   const rows = state.alerts.filter(alertMatches);
   let items;
   if (state.group) {
@@ -2073,6 +2094,8 @@ async function refreshSlowNow() {
     if (state.tab === "overview") { renderTimeline(); loadAttention(); }
     if (state.tab === "network") { renderMap(); if (slowTick % 5 === 0) loadDevices(); }
     if (state.tab === "apps") loadApps();
+    if (state.tab === "flows" && typeof loadFlows === "function") loadFlows();
+    if (state.tab === "detections" && typeof loadDetections === "function" && slowTick % 2 === 0) loadDetections();
     if (state.tab === "connections") loadConnections();
     else if (slowTick % 5 === 1) once("connBadge", () => api("/api/connections")).then((c) => { state.conns = c; updateConnBadge(c.summary.flagged_programs); }).catch(() => {});
   } catch (_) { /* surfaced by summary */ }
@@ -2093,6 +2116,7 @@ function connectStream() {
   es.addEventListener("intel", () => loadIntel().catch(() => {}));
   es.addEventListener("update", (e) => { try { renderUpdate(JSON.parse(e.data), state.summary && state.summary.status && state.summary.status.version); } catch (_) {} });
   es.addEventListener("allowlist", () => { if (state.tab === "protection") loadAllowlist(); });
+  es.addEventListener("rules", () => { toast("Signature rules reloaded"); if (state.tab === "detections" && typeof loadDetections === "function") loadDetections(); });
   // The browser retries dropped streams itself; a refused one (e.g. 401) is
   // CLOSED for good, so try again later — the summary poll reports an expired session.
   es.addEventListener("error", () => {
@@ -2129,5 +2153,6 @@ if (document.readyState === "loading") document.addEventListener("DOMContentLoad
 </script>
 <script src="/static/soc.js"></script>
 <script src="/static/mail.js"></script>
+<script src="/static/ops.js"></script>
 </body>
 </html>

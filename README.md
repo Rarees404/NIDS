@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#-license)
 [![Version](https://img.shields.io/badge/version-2.0.0-orange.svg)]()
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)]()
-[![Tests](https://img.shields.io/badge/tests-372%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-pytest-brightgreen.svg)]()
 
 PyNIDS watches your Mac's real network traffic and tells you, in plain language, what is
 going on. It catches attacks and connections to known-malicious servers. It also shows
@@ -76,9 +76,10 @@ walkthrough, with what each step does and how to check it worked, is in
 
 | | |
 |---|---|
-| **Attacks & anomalies** | Port scans and host sweeps, brute force (SSH, RDP, VNC, mail …), SQL injection / XSS / path traversal, DNS tunnelling, C2 beaconing, large uploads, unsolicited traffic floods, and 20+ MITRE-tagged signature rules |
+| **Attacks & anomalies** | Port scans and host sweeps, brute force (SSH, RDP, VNC, mail …), SQL injection / XSS / path traversal, DNS tunnelling, C2 beaconing, large uploads, unsolicited traffic floods, DGA-style bursts of failed DNS lookups, and 55 tuned, MITRE-tagged signature rules (exploits, reverse shells, cleartext credentials, exposed services, C2 and tunnelling, crypto-mining, amplification) |
 | **Live threat intelligence** | Every IP, DNS name, and TLS/QUIC hostname is checked against abuse.ch Feodo (botnet C2) and URLhaus (malware), Spamhaus DROP, and Tor exit lists, refreshed every 6 hours |
-| **Correlation** | Several different attack signatures from one source become a single CRITICAL "multi-vector attack" alert |
+| **Correlation** | Several different attack signatures from one source become a single CRITICAL "multi-vector attack" alert that lists the contributing detections in order and the ATT&CK tactics they span. Low-severity notes, hygiene findings and baseline events don't count |
+| **Connection tracking** | Every flow is followed both ways: who really opened it (even when capture starts mid-conversation), how it ended (open, no answer, refused, reset, closed), bytes and packets in each direction, and the TCP flag history. These facts are attached to every alert |
 | **Untrusted programs** | Every program that reaches the internet has its code signature checked (Apple, App Store, Developer ID, ad-hoc, unsigned, or tampered) and its location judged (`/tmp`, hidden folders, `/Users/Shared`, Downloads …). Homebrew, pip, npm and other dev-tool locations are recognised, so ordinary developer tools stay quiet |
 | **Likely command-and-control** | One CRITICAL alert when independent signals line up for the same program and server: regular check-ins, a bare IP never looked up in DNS, a blocklist hit, an untrusted binary, a brand-new program, or a server Shodan tags as C2 |
 | **Baseline** | Learns this Mac for a day, then flags change: a program using the network for the first time, or an app suddenly talking to a new country (browsers excluded) |
@@ -115,7 +116,7 @@ walkthrough, with what each step does and how to check it worked, is in
 
 | | |
 |---|---|
-| **Web dashboard** | `http://127.0.0.1:8787`: a "needs your attention" summary, every live connection and the program behind it, what's exposed, a grouped event stream, per-app traffic, a world map, LAN devices, launch items, blocking, and Ask Claude. Works offline: nothing is loaded from a CDN |
+| **Web dashboard** | `http://127.0.0.1:8787`: a "needs your attention" summary, every live connection and the program behind it, what's exposed, a grouped event stream with JSON / CSV export, detections mapped to MITRE ATT&CK, the live flow table, per-app traffic, a world map, LAN devices, launch items, blocking, and Ask Claude. Dark console theme by default (the sun button switches to light), keyboard shortcuts throughout. Works offline: nothing is loaded from a CDN |
 | **Menu bar app** | Shield icon that changes colour with the threat level; popover with stats, a throughput graph, recent alerts, and busiest apps |
 | **Desktop widget** | Small / medium / large. Headlines what needs attention *in the last hour*, or "All clear" |
 | **Notifications** | macOS banners for HIGH and CRITICAL alerts; bursts are grouped into one banner |
@@ -324,12 +325,19 @@ pynids pcap --file capture.pcap                 # analyse a capture file
 |---|---|
 | **Overview** | **Needs your attention**: the few things worth a look right now (serious alerts from the last hour, untrusted programs, exposed ports, new devices), or "All clear". **Ask Claude**. Then the counters, live throughput, events per minute, and events by kind |
 | **Connections** | Every program with an open socket, riskiest first, with its signature and flags; every live connection (app, remote host, country, network owner, signature, alerts), filterable by Internet / Flagged / All; and **What's exposed**: listening ports and who can reach them. Click a program for its verified signature, SHA-256 (with a VirusTotal link), the launch items that start it, and its sockets |
-| **Events** | Live stream you can filter by kind, severity, and time range, with full-text search. Similar events are grouped (×N). Click one to see **What this means** and what to do, the app and program, **Explain with Claude**, **Block IP**, and **Mark as expected** |
+| **Events** | Live stream you can filter by kind, severity, and time range, with full-text search. Similar events are grouped (×N) and the current selection downloads as JSON lines or CSV. Click one to see **What this means** and what to do, the app and program, the connection's state and traffic, **why the rule matched** (the fields and values that triggered it), the payload excerpt, the MITRE technique with a link, **Explain with Claude**, **Block IP**, **Mark as expected**, and pivots: all events for that address, the same rule, the same technique, or the flow itself |
+| **Detections** | What fired this session, mapped to MITRE ATT&CK: a tactic strip in kill-chain order, the techniques seen, every rule and detector with its alert count, the addresses behind the most alerts, and the full signature ruleset with hit counts and load errors. Every count is a link to the matching events |
+| **Flows** | The live connection table as seen on the wire: client → server, service and server name, owning app, state (open, no answer, refused, reset, closed) with TCP flag history, packets, bytes each way and duration. Filter by text or state, sort by recency, data, duration or packets |
 | **Apps** | Each app's upload and download, endpoints, alerts, hosts and countries. Click an app for its hosts, countries, remote IPs and learned "usual countries" |
 | **Network** | World map of every remote endpoint (click a dot for its IP dossier) and the devices on your LAN, with optional nmap scans |
 | **Protection** | Blocked IPs, rules you marked as expected, launch items, and threat-intel feed status |
 | **Investigate** | The analyst workbench: look up and pivot on any indicator (see below) |
 | **Email** | Forensic analysis of suspicious emails (see below) |
+
+**Keyboard shortcuts.** Press `?` for the list. `g` then a letter jumps to a tab (`o` Overview,
+`c` Connections, `e` Events, `d` Detections, `f` Flows, `a` Apps, `n` Network, `p` Protection,
+`i` Investigate, `m` Email), `/` focuses the current tab's search box, `j` / `k` move through
+the event stream, `Enter` opens the focused event, and `Esc` closes the drawer.
 
 Every IP address anywhere in the dashboard is clickable and opens its dossier. The IP
 dossier and every alert also have an **Investigate** button that opens the indicator in
@@ -519,8 +527,31 @@ particular event.
 | `LAN-NEW-DEVICE` | A new MAC address appeared on your local network (LOW) |
 | `HOST-C2-LIKELY` | Two or more independent C2 signals for the same program and server, at least one of them network-side (CRITICAL) |
 
+### Signature rule IDs
+
+The built-in ruleset ([`pynids/rules/default_rules.yaml`](pynids/rules/default_rules.yaml)) is
+loaded by default. Each rule explains itself in the alert drawer and can be retuned or switched
+off (see [Writing signature rules](#writing-signature-rules)). The **Detections** tab lists
+every rule with its hit count.
+
+| Prefix | Covers | Examples |
+|---|---|---|
+| `SIG-REC-*` | Reconnaissance | Xmas / null scan packets, lookups of what-is-my-IP services, frequently abused top-level domains |
+| `SIG-EXP-*` | Exploitation | Shellshock, Log4Shell (including obfuscated forms), Spring4Shell, SMBv1 negotiation, probes for `.env` / `.git` / key files, shell command injection, known IoT and web RCE paths |
+| `SIG-EXE-*` | Shells on the wire | bash / netcat / Python reverse shells, PowerShell download cradles, a Windows prompt banner or `uid=0(root)` inside a TCP stream |
+| `SIG-CRED-*` | Credentials in cleartext | FTP, Telnet, HTTP Basic, password form posts, mail logins without TLS, NTLM or SMB offered to an internet host |
+| `SIG-LAT-*` | Remote access and exposure | SMB, RDP, SSH, VNC, WinRM, or a database / admin port reached from the internet; PsExec-style service execution |
+| `SIG-C2-*` | Command and control | IRC, legacy Internet Explorer user-agents, `.onion` lookups, dynamic DNS, reverse-tunnel services, paste and file-drop sites, the Telegram Bot API, Stratum mining and mining pools, executables fetched from a bare IP or delivered over plain HTTP, TLS without a server name, SSH on odd ports, ICMP tunnels |
+| `SIG-EXF-*` | Exfiltration | High rate of DNS TXT queries, DNS NULL-record queries |
+| `SIG-IMP-*` | Impact | NTP monlist, memcached over UDP, bursts of DNS ANY queries |
+| `SIG-POL-*` | Hygiene | TLS 1.0 / 1.1, SSH protocol 1, SNMP with the `public` community, TFTP |
+
+SQL injection, XSS, path traversal and scanner user-agents are reported by the HTTP
+behavioural detector, which knows request direction, so they are not duplicated as signatures.
+
 Other detectors worth knowing:
 
+* **Failed-lookup bursts (DGA).** A client that gets "no such domain" for 12 or more *different* domains in a minute is flagged: MEDIUM when the names look like words, HIGH when they look machine-generated, the pattern of malware hunting for its command server. One broken domain retried many times, single-label names and private zones (`.local`, `.lan` …) don't count.
 * **Brute force** counts new connection attempts only, not packets inside a session. Attempts *against your Mac* are HIGH ("Brute force on SSH"). Many connections *from your Mac* to one service are MEDIUM ("Many SSH connections"), since that's usually git over SSH or a mail client reconnecting.
 * **Beaconing** (regular check-ins) is MEDIUM when the app polls a named server it looked up, and HIGH when it polls a **bare IP with no DNS lookup**, the more malware-like pattern.
 
@@ -529,17 +560,19 @@ Other detectors worth knowing:
 These detectors were tuned against real traffic so everyday use doesn't raise alarms:
 
 * **Traffic spikes** only count traffic you *didn't* ask for (not your downloads), and only above 100 packets/s.
-* **Port scans** count new connection attempts only, so replies (like your router's DNS answers) don't count. Local app-to-app traffic on loopback is ignored, and browsing many HTTPS sites isn't a "host sweep".
+* **Port scans** count new connection attempts only, so replies (like your router's DNS answers) and stray ACKs from connections the table has forgotten don't count. Local app-to-app traffic on loopback is ignored, and browsing many HTTPS sites isn't a "host sweep".
+* **Signature rules never fire on a port number alone.** Port rules match the opening SYN only (one alert per connection, never on replies) and require a direction or address scope: SMB inside your LAN is silent, SMB to or from the internet is not.
 * **Large uploads** count bytes *you send*, from 100 MiB per connection. Video and voice calls through WebRTC relays are excluded.
 * **Beaconing** only looks at new connections to public internet addresses. It ignores your LAN (AirPlay, printers, NAS), loopback, service discovery, time sync, DNS, and macOS system daemons running from SIP-protected paths (`/System`, `/usr/libexec`, `/usr/sbin`).
 * **Brute force** ignores the packets of an ongoing SSH or mail session.
 * **Localhost probes** from ordinary apps talking to their own helpers aren't reported one by one; a scan is still caught, per app. Local IPC (a program connecting to a socket it just opened), PyNIDS's own dashboard port, and broadcasts are ignored, and the same app → port probe is reported at most once an hour (the next alert says how many repeats were skipped).
 * **iCloud Private Relay** is reported once, as LOW, not as a stream of encrypted-DNS alerts.
-* **Correlation** ignores privacy telemetry, so your own browsing never makes your Mac look like an "attacker".
+* **Correlation** ignores privacy telemetry, LOW-severity notes, hygiene findings and baseline events, so your own browsing or a new program never makes your Mac look like an "attacker".
 * **QUIC** is reported once per site, not once per CDN server.
 
 If something is still noisy on your network, silence it with a suppression rule (see
-[Configuration](#-configuration)).
+[Configuration](#-configuration)), or switch off a single signature rule in `rules.yaml` (see
+[Writing signature rules](#writing-signature-rules)).
 
 ---
 
@@ -556,7 +589,7 @@ If something is still noisy on your network, silence it with a suppression rule 
                            enrich ───────► app · hostname · country · ASN
                               │
                               ▼
-                     flow tracking + detect ► 16 detectors + threat intel
+                     flow tracking + detect ► 55 signature rules · 17 detectors · threat intel
                               │
                               ▼
                         alert manager ───► dedup · suppress · correlate · plain-English guide
@@ -570,6 +603,8 @@ If something is still noisy on your network, silence it with a suppression rule 
 
 * **Background service.** A launchd daemon running as root (`/Library/LaunchDaemons/com.pynids.daemon.plist`). It restarts itself on crashes and on network changes. Detection can be paused without stopping the service (`POST /api/detection`, used by the menu bar app).
 * **Capture.** A reader thread drains the BPF socket (`AF_PACKET` on Linux) into a bounded queue; the engine thread decodes raw frames itself. If the engine falls behind, packets are dropped and counted rather than piling up in memory.
+* **Flow tracking.** [`pynids/flow/tracker.py`](pynids/flow/tracker.py) keeps one entry per conversation. A flow first seen through its SYN-ACK, or through a reply from a well-known port, is still attributed to the real client. A reused port pair (a new SYN after a close, or a UDP exchange after 60 s of silence) starts a fresh flow, so each connection is counted once by the scan, brute-force and beacon detectors.
+* **Signature rules.** Compiled and validated once at load; a rule that fails to compile is skipped and reported, and the rest keep working. Rules needing payload are skipped outright on bare ACK packets. The daemon re-reads the rule files within 30 seconds of a change.
 * **Alert guide.** [`pynids/alerts/guide.py`](pynids/alerts/guide.py) turns each alert into a summary, verdict, explanation, and next steps. The API attaches it as `about` on every alert.
 * **Storage.** Alerts go to SQLite with full-text search at `/Library/Application Support/PyNIDS/events.db`.
 * **Threat intel.** Hash-indexed, so a lookup takes about 4 µs regardless of feed size. Feeds:
@@ -725,6 +760,7 @@ daemon:
   loopback: true           # watch lo0 for webpages probing localhost
   api_port: 8787
   record_pcap: false       # rolling capture for `pynids decrypt`
+  rules: builtin           # signature rules: builtin | none | /path/to/rules.yaml
 
 notifications:
   enabled: true
@@ -748,6 +784,10 @@ anomaly:
   min_rate_pps: 100        # never flag traffic spikes below this rate
 behavioral:
   exfil_threshold_bytes: 104857600   # 100 MiB uploaded by one connection
+  dga_nxdomain_threshold: 12         # distinct failing domains per client in dga_window (0 = off)
+  dga_window: 60
+flow:
+  udp_session_gap: 60                # a UDP 5-tuple silent this long starts a new flow
 
 host:
   signatures: true               # check code signatures of programs on the network
@@ -760,6 +800,10 @@ lookups:
   mode: alerts             # alerts | always | manual — when IPs may be looked up automatically
   min_severity: MEDIUM     # for mode "alerts"
 ```
+
+Signature rules are tuned separately, in `/Library/Application Support/PyNIDS/rules.yaml`:
+entries there override the built-in rules by `id` and are picked up without a restart (see
+[Writing signature rules](#writing-signature-rules)).
 
 The foreground CLI tools (`live`, `xray`, `pcap`) take `--config`. See
 [`configs/enterprise.yaml`](configs/enterprise.yaml) for every engine setting.
@@ -797,10 +841,10 @@ The foreground CLI tools (`live`, `xray`, `pcap`) take `--config`. See
 | `pynids keylog [--browser …]` | Launch a browser that logs TLS keys |
 | `pynids decrypt [PCAP…] [--wireshark]` | List decrypted requests from recorded traffic |
 | `sudo pynids xray --iface en0` | Live terminal X-Ray dashboard |
-| `sudo pynids live --iface en0 [--rules FILE]` | Classic IDS output to the terminal |
-| `pynids pcap --file capture.pcap` | Analyse a capture file |
+| `sudo pynids live --iface en0 [--rules FILE\|builtin]` | Classic IDS output to the terminal |
+| `pynids pcap --file capture.pcap [--rules FILE\|builtin]` | Analyse a capture file |
 | `pynids query --db FILE` / `pynids stats --db FILE` | Search / summarise a SQLite alert database |
-| `pynids validate FILE` | Check a rules or config file |
+| `pynids validate FILE` | Check a rules or config file. Rules are compiled: bad operators, regexes, CIDRs, thresholds and unknown keys are reported |
 
 Every command has `--help`. Use `.venv/bin/pynids` with `sudo`.
 
@@ -810,7 +854,7 @@ Every command has `--help`. Use `.venv/bin/pynids` with `sudo`.
 ```bash
 sudo .venv/bin/pynids live \
   --iface en0 \
-  --rules rules/enterprise_rules.yaml \
+  --rules builtin \           # or a path to your own rules file
   --config configs/enterprise.yaml \
   --bpf "not port 22" \
   --sqlite alerts.db \
@@ -821,7 +865,7 @@ sudo .venv/bin/pynids live \
 sudo .venv/bin/pynids xray --iface en0 --json-log xray.jsonl
 sudo .venv/bin/pynids xray --iface eth0 --loopback-iface lo      # Linux
 
-pynids pcap --file capture.pcap --rules rules/enterprise_rules.yaml --output json \
+pynids pcap --file capture.pcap --rules builtin --output json \
   | jq 'select(.severity=="CRITICAL")'
 
 sudo .venv/bin/pynids query --db "/Library/Application Support/PyNIDS/events.db" --min-severity HIGH
@@ -857,6 +901,7 @@ sudo .venv/bin/pynids query --db "/Library/Application Support/PyNIDS/events.db"
 | `…/api-token`, `…/anthropic-key` | API token (0644), Claude key (0600) |
 | `…/blocklist.json` | Active blocks and why |
 | `…/allowlist.json` | Rules you marked as expected |
+| `…/rules.yaml` | Optional: your overrides and additions to the built-in signature rules |
 | `…/paused` | Present while detection is stopped from the menu bar |
 | `…/soc-keys.json` | API keys for Investigate sources (0600) |
 | `…/evidence/email/` | Analysed emails, stored unchanged and read-only, named by SHA-256 |
@@ -915,7 +960,8 @@ Remove the Thunderbird add-on from **Add-ons and Themes → PyNIDS Email Analysi
 
 ```bash
 pip install -e ".[dev,all]"
-pytest                                    # 372 tests
+pytest
+pytest tests/test_tuning.py               # rule engine, built-in ruleset, flow tracking, DGA, analyst API
 pytest tests/test_soc.py tests/test_mail.py   # just the SOC workbench and email analyser
 pytest --cov=pynids --cov-report=term-missing
 ```
@@ -937,57 +983,87 @@ pynids/
 ├── engine.py            detection pipeline
 ├── sniffer.py           live capture (raw BPF frames + decoder) / PCAP replay
 ├── protocols/           HTTP, DNS, TLS, QUIC (+ decryption), STUN, SSH, SMTP
-├── detection/           signature, anomaly, behavioural, X-Ray (stealth) detectors
+├── detection/           signature, anomaly, behavioural (incl. DGA), X-Ray (stealth) detectors
+├── rules/               default_rules.yaml: the built-in signature ruleset
+├── flow/                connection table: direction, state, per-side counters
 ├── enrich/              app attribution (psutil + nettop), hostnames, GeoIP
 ├── host/                code signatures, socket table, launch items, IP dossiers, LAN inventory
 ├── intel/               threat intel index + live feeds
-├── alerts/              alert model, manager, plain-English guide, outputs (SQLite, JSON, syslog, terminal)
+├── alerts/              alert model, manager, plain-English guide, MITRE catalogue, outputs (SQLite, JSON, syslog, terminal)
 ├── response/            pf blocking, macOS notifications
 ├── ai/                  Explain with Claude, Ask Claude (investigation agent)
 ├── soc/                 Investigate (indicators, sources, workbench) and mail/ (lossless MIME parser, phishing analysis, evidence store)
 ├── integrations/        Thunderbird add-on, VS Code .eml grammar
 ├── service/             daemon, local API, live stats, launchd, PCAP recorder
-├── web/dashboard.html   web dashboard (app/: Investigate + Email tabs, vendor/: offline map libraries)
+├── web/dashboard.html   web dashboard (app/: theme, Detections + Flows, Investigate + Email tabs; vendor/: offline map libraries)
 ├── cli.py, cli_service.py
 macos/
 ├── src/                 SwiftUI menu bar app + WidgetKit widget
 ├── build.sh             builds both with the Command Line Tools only
 └── swiftbar/            alternative SwiftBar menu bar plugin
-configs/  rules/  intel/  tests/
+configs/  rules/  intel/  tests/     (rules/enterprise_rules.yaml links to pynids/rules/default_rules.yaml)
 ```
 
 ### Writing signature rules
 
+The daemon loads the tuned built-in set, `pynids/rules/default_rules.yaml`
+(`rules/enterprise_rules.yaml` is a link to it). To retune it without editing that file, create
+`rules.yaml` in the PyNIDS data directory. A rule there with the same `id` replaces the built-in
+one, and a partial entry changes single settings. Edits are picked up within 30 seconds.
+
 ```yaml
 rules:
-  - id: "SIG-EXP-001"
-    description: "SQL injection pattern in HTTP URI"
-    severity: CRITICAL          # LOW | MEDIUM | HIGH | CRITICAL
-    confidence: 0.88
-    mitre: "T1190"
-    tags: [sqli, webapp]
+  - {id: SIG-C2-006, enabled: false}       # switch a built-in rule off
+  - {id: SIG-POL-001, severity: MEDIUM}    # change one field
+  - id: "LOCAL-001"                        # add your own
+    description: "SSH from the internet"
+    message: "SSH connection attempt from {src_ip}"   # {field} placeholders
+    severity: MEDIUM            # LOW | MEDIUM | HIGH | CRITICAL
+    confidence: 0.7
+    mitre: "T1021.004"
+    tags: [ssh, exposed_service]
     match:
       all:
-        - {field: protocol, op: eq, value: tcp}
-        - {field: dst_port, op: in, value: [80, 8080]}
-        - {field: layer7.http.sqli_suspect, op: eq, value: true}
-    threshold: {count: 3, seconds: 60}   # optional
+        - {field: tcp.syn, op: eq, value: true}        # the opening SYN only
+        - {field: dst_port, op: eq, value: 22}
+        - {field: src_scope, op: eq, value: public}
+    threshold: {count: 3, seconds: 60, track_by: src_ip}   # optional
+    why: "Shown in the alert drawer as the explanation."
+    response: "Shown as the first thing to do."
 ```
 
-**Operators:** `eq`, `ne`, `lt`, `gt`, `lte`, `gte`, `in`, `not_in`, `contains`,
-`startswith`, `regex`, `exists`. Combine conditions with `all` / `any` / `not`.
+**Operators:** `eq`, `ne`, `lt`, `gt`, `lte`, `gte`, `in`, `not_in`, `contains`, `not_contains`,
+`startswith`, `endswith`, `regex` (case-insensitive), `cidr`, `exists`. Combine conditions with
+`all` / `any` / `not`. Text operators read the payload byte for byte, and `\xNN` in a value is
+one raw byte, so `'\xffSMB\x72'` matches binary data.
 
-**Fields** include `src_ip`, `dst_ip`, `dst_port`, `protocol`, `layer7.http.uri`,
-`layer7.http.user_agent`, `layer7.dns.query_name`, `layer7.dns.answers`, `layer7.tls.sni`,
-`layer7.tls.alpn`, `layer7.tls.ja3`, `layer7.tls.ech`, `layer7.quic.sni`, and
-`layer7.ssh.software`.
+**Fields**
 
-Validate rules with `pynids validate rules/my_rules.yaml`. Rules hot-reload in `live` mode.
+| Field | Meaning |
+|---|---|
+| `src_ip`, `dst_ip`, `src_port`, `dst_port`, `protocol`, `payload_bytes`, `payload_len` | The packet |
+| `layer7.http.*`, `layer7.dns.*`, `layer7.tls.*`, `layer7.quic.*`, `layer7.ssh.*`, `layer7.smtp.*` | Dissected fields, e.g. `layer7.http.uri`, `layer7.http.headers.authorization`, `layer7.dns.query_name`, `layer7.dns.query_type`, `layer7.tls.sni`, `layer7.tls.ja3` |
+| `tcp.syn`, `tcp.synack`, `tcp.fin`, `tcp.rst`, `tcp.null`, `tcp.xmas` | TCP flag tests; `tcp.syn` is a connection attempt (SYN without ACK) |
+| `direction` | `outbound`, `inbound`, `local` or `transit` (needs process/host enrichment) |
+| `src_scope`, `dst_scope` | `public`, `private`, `loopback`, `link_local` or `multicast` |
+| `flow.new`, `flow.packets`, `flow.bytes`, `flow.bytes_out`, `flow.bytes_in`, `flow.duration`, `flow.state` | The connection the packet belongs to |
+| `context.app`, `context.remote_host`, `context.country`, `context.signature`, … | Enrichment |
+
+**Thresholds** count matches per `track_by` key (`src_ip` by default, or `dst_ip`, `pair`,
+`flow`, `global`) and start over after each alert.
+
+A port number alone is never an attack: match the opening SYN (`tcp.syn`) and say which
+direction or address scope makes the connection worth reporting, as the built-in rules do.
+
+Validate rules with `pynids validate my_rules.yaml`: it compiles every rule and reports bad
+operators, regexes, CIDRs, thresholds and unknown keys. A rule that fails to compile is skipped
+and listed on the **Detections** tab; the rest of the set keeps working. Use
+`--rules builtin` with `pynids live` / `pynids pcap` to run the built-in set from the terminal.
 
 ### Embedding the engine
 
 ```python
-from pynids.engine import DetectionEngine
+from pynids.engine import BUILTIN_RULES, DetectionEngine
 from pynids.alerts.manager import AlertManager
 from pynids.alerts.outputs.json_file import JsonFileOutput
 from pynids.enrich import Enricher, HostnameCache, ProcessResolver
@@ -995,16 +1071,33 @@ from pynids.enrich import Enricher, HostnameCache, ProcessResolver
 mgr = AlertManager(dedup_window=60)
 mgr.register_output(JsonFileOutput("alerts.json"))
 engine = DetectionEngine(
-    config={}, rules_path="rules/enterprise_rules.yaml", alert_manager=mgr,
+    config={}, rules_path=str(BUILTIN_RULES), alert_manager=mgr,   # or a list of files, later ones override by id
     enricher=Enricher(processes=ProcessResolver().start(), hostnames=HostnameCache()),
 )
 alerts = engine.process_packet(meta)   # meta from pynids.sniffer.decode_frame() / packet_to_meta()
+engine.flows(limit=50)                 # the connection table, most recent first
+engine.rules()                         # loaded rules with hit counts and load problems
 ```
 
 ### MITRE ATT&CK coverage
 
-| Technique | ID | Detector |
+The **Detections** tab shows this live, by tactic. Names and tactics come from an offline
+catalogue ([`pynids/alerts/mitre.py`](pynids/alerts/mitre.py)).
+
+| Tactic | Techniques | Detected by |
 |---|---|---|
+| Reconnaissance | T1595, T1595.003, T1592.004 | `HttpAttackDetector` (scanner user-agents), `SIG-EXP-008`, `WebRtcLeakDetector` |
+| Initial Access | T1190 | `HttpAttackDetector`, `SIG-EXP-*`, `SIG-LAT-006` |
+| Execution | T1059.001 / .003 / .004 / .006 / .007, T1569.002 | `SIG-EXE-*`, `SIG-LAT-007`, `HttpAttackDetector` (XSS) |
+| Credential Access | T1110, T1187, T1552, T1557.001 | `BruteForceDetector`, `SIG-CRED-*`, `SIG-C2-003` |
+| Discovery | T1046, T1016, T1083 | `PortScanDetector`, `LocalhostProbeDetector`, `SIG-REC-*`, `HttpAttackDetector` |
+| Lateral Movement | T1021.001 / .002 / .004 / .005 / .006, T1210 | `SIG-LAT-*`, `SIG-EXP-006` |
+| Collection | T1602.001 | `SIG-POL-003` |
+| Command and Control | T1071, T1071.001, T1071.004, T1090.003, T1095, T1102, T1105, T1568, T1568.002, T1571, T1572, T1573 | `BeaconingDetector`, `DnsTunnelingDetector`, `DgaDetector`, `DohDetector`, threat intel, `SIG-C2-*` |
+| Exfiltration | T1041, T1048.003 | `DataExfiltrationDetector`, `SIG-EXF-*` |
+| Impact | T1496, T1498, T1498.002 | `AnomalyDetector`, `SIG-C2-009` / `-010` (mining), `SIG-IMP-*` |
+
+---|---|---|
 | Active Scanning | T1595 | Signature (scanner user agents) |
 | Network Service Discovery | T1046 | `PortScanDetector`, `LocalhostProbeDetector` |
 | Brute Force | T1110 | `BruteForceDetector` |

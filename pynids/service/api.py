@@ -52,6 +52,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .. import __version__
 from ..alerts.classify import classify
 from ..alerts.guide import describe
+from ..alerts.mitre import technique as mitre_technique
 from .live import LiveState, _brief
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,7 @@ class ServiceContext:
         workbench: Any = None,
         emails: Any = None,
         set_notifications: Optional[Callable[[bool], bool]] = None,
+        engine: Any = None,
     ) -> None:
         self.live = live
         self.token = token
@@ -156,6 +158,7 @@ class ServiceContext:
         self.workbench = workbench
         self.emails = emails
         self.set_notifications = set_notifications
+        self.engine = engine
         self._widget_lock = threading.Lock()
         self._widget_cache: Optional[tuple] = None  # (monotonic time, payload)
         self._explain_lock = threading.Lock()
@@ -214,6 +217,7 @@ def _row_to_alert(row: sqlite3.Row) -> Dict[str, Any]:
             d[key] = [] if key == "tags" else {}
     d["kind"] = classify(d)
     d["about"] = describe(d)
+    d["mitre"] = mitre_technique(d.get("mitre_technique"))
     return d
 
 
@@ -398,6 +402,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(ctx.live.timeline())
         elif method == "GET" and path == "/api/stream":
             self._stream()
+        elif method == "GET" and path == "/api/flows":
+            self._send_json(self._flows(query))
+        elif method == "GET" and path == "/api/rules":
+            if ctx.engine is None:
+                self._send_json({"files": [], "rules": [], "problems": [], "detectors": []})
+            else:
+                self._send_json(ctx.engine.rules())
+        elif method == "GET" and path == "/api/detections":
+            self._send_json(ctx.live.detections())
+        elif method == "GET" and path == "/api/alerts/export":
+            self._export_alerts(query)
         elif method == "GET" and path == "/api/intel":
             self._send_json(ctx.feed_status())
         elif method == "POST" and path == "/api/intel/update":
@@ -566,9 +581,13 @@ class _Handler(BaseHTTPRequestHandler):
         limit = _num(query, "limit", 200, lo=1, hi=1000)
         kind = q1("kind")
         conn = self.ctx.db()
+        rule, mitre = q1("rule"), q1("mitre")
         if conn is None:
-            rows = self.ctx.live.recent_alerts(limit=limit if not kind else 1000)
-            return [r for r in rows if not kind or r.get("kind") == kind][:limit]
+            rows = self.ctx.live.recent_alerts(limit=limit if not (kind or rule or mitre) else 1000)
+            return [r for r in rows
+                    if (not kind or r.get("kind") == kind)
+                    and (not rule or r.get("rule_id") == rule)
+                    and (not mitre or r.get("mitre_technique") == mitre)][:limit]
         clauses, params = [], []
         min_sev = (q1("min_severity") or "LOW").upper()
         if _SEV_NUM.get(min_sev, 1) > 1:
@@ -585,6 +604,12 @@ class _Handler(BaseHTTPRequestHandler):
         if q1("app"):
             clauses.append("app = ?")
             params.append(q1("app"))
+        if rule:
+            clauses.append("rule_id = ?")
+            params.append(rule)
+        if mitre:
+            clauses.append("mitre_technique = ?")
+            params.append(mitre)
         if q1("q"):
             fts = _fts_query(q1("q"))
             if fts:
@@ -606,6 +631,71 @@ class _Handler(BaseHTTPRequestHandler):
         if kind:
             out = [a for a in out if a["kind"] == kind]
         return out[:limit]
+
+    def _flows(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
+        """The live connection table, optionally filtered by a search string."""
+        engine = self.ctx.engine
+        if engine is None:
+            return {"counts": {}, "flows": [], "total": 0}
+        limit = _num(query, "limit", 300, lo=1, hi=2000)
+        sort = (query.get("sort") or ["recent"])[0]
+        needle = ((query.get("q") or [""])[0] or "").strip().lower()
+        state = ((query.get("state") or [""])[0] or "").strip().lower()
+        # Filtering needs the whole table; otherwise only the page asked for.
+        rows = engine.flows(limit=100_000 if (needle or state) else limit, sort=sort)
+        if state:
+            rows = [r for r in rows if r["outcome"] == state or r["state"] == state]
+        if needle:
+            def _match(r: Dict[str, Any]) -> bool:
+                hay = " ".join(str(r.get(k) or "") for k in (
+                    "src_ip", "dst_ip", "src_port", "dst_port", "protocol", "app_proto",
+                    "server_name", "app", "outcome"))
+                return needle in hay.lower()
+            rows = [r for r in rows if _match(r)]
+        total = len(rows)
+        rows = rows[:limit]
+        index = self.ctx.live.remote_index()
+        for r in rows:
+            geo = index.get(r["dst_ip"]) or index.get(r["src_ip"]) or {}
+            r["country"] = geo.get("country")
+            r["org"] = geo.get("org")
+            if not r.get("server_name") and geo.get("remote_host"):
+                r["server_name"] = geo["remote_host"]
+        return {"counts": engine.flow_counts(), "flows": rows, "total": total}
+
+    def _export_alerts(self, query: Dict[str, List[str]]) -> None:
+        """Download the alerts matching the usual filters as JSON lines or CSV."""
+        fmt = ((query.get("format") or ["jsonl"])[0] or "jsonl").lower()
+        query = {**query, "limit": [(query.get("limit") or ["1000"])[0]]}
+        rows = self._alerts(query)
+        if fmt == "csv":
+            import csv
+            import io
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            cols = ["timestamp", "severity", "kind", "rule_id", "mitre_technique", "message", "src_ip",
+                    "src_port", "dst_ip", "dst_port", "protocol", "app", "remote_host", "country",
+                    "confidence", "alert_id"]
+            writer.writerow(cols)
+            for a in rows:
+                ctx = a.get("context") or {}
+                flat = {**a, "app": ctx.get("app"), "remote_host": ctx.get("remote_host"),
+                        "country": ctx.get("country")}
+                writer.writerow([_csv_cell(flat.get(c)) for c in cols])
+            body, ctype, name = buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", "pynids-alerts.csv"
+        else:
+            lines = [json.dumps({k: v for k, v in a.items() if k != "about"}, default=_json_default)
+                     for a in rows]
+            body = ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
+            ctype, name = "application/x-ndjson; charset=utf-8", "pynids-alerts.jsonl"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _stream(self) -> None:
         q = self.ctx.live.subscribe()
@@ -1051,6 +1141,24 @@ def _threat_level(live: LiveState) -> str:
             break
         worst = max(worst, _SEV_NUM.get(a.get("severity"), 0))
     return {0: "ok", 1: "ok", 2: "notice", 3: "warning", 4: "critical"}[worst]
+
+
+def _csv_cell(value: Any) -> str:
+    """A spreadsheet-safe cell: formulas are neutralised (CSV injection)."""
+    if value is None:
+        return ""
+    text = str(value)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r") and not _is_number(text):
+        text = "'" + text
+    return text
+
+
+def _is_number(text: str) -> bool:
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
 
 
 def _json_default(obj: Any) -> Any:

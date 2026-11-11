@@ -1,0 +1,182 @@
+/* PyNIDS console theme.
+ * Loaded after the dashboard's inline styles and soc.css; colour tokens live
+ * in dashboard.html (:root = dark console, :root[data-theme="light"] = light).
+ * This file only restyles components — it defines no colours of its own
+ * beyond mixes of those tokens, so both themes stay in step. */
+
+/* ---------- page ---------- */
+body {
+  background:
+    radial-gradient(1200px 520px at 50% -180px, color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%),
+    linear-gradient(color-mix(in srgb, var(--accent) 3.5%, transparent) 1px, transparent 1px) 0 0 / 100% 32px,
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 3.5%, transparent) 1px, transparent 1px) 0 0 / 32px 100%,
+    var(--page);
+  background-attachment: fixed;
+}
+::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+* { scrollbar-width: thin; scrollbar-color: var(--axis) transparent; }
+a { text-underline-offset: 2px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- top bar ---------- */
+.topbar {
+  background: color-mix(in srgb, var(--page) 82%, transparent);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--accent) 18%, transparent), 0 10px 30px rgba(0, 0, 0, 0.18);
+}
+.brand {
+  font-family: var(--mono); font-size: 15px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+}
+.brand svg { filter: drop-shadow(0 0 6px var(--glow)); }
+.status-pill {
+  border-radius: 6px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.02em;
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+}
+.dot.live { box-shadow: 0 0 8px var(--good); }
+.dot.bad { box-shadow: 0 0 8px var(--critical); }
+.dot.warn { box-shadow: 0 0 8px var(--warning); }
+.nav { gap: 0; }
+.nav a {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.07em; text-transform: uppercase;
+  border-radius: 6px; padding: 7px 10px; position: relative;
+}
+.nav a[aria-current="page"] {
+  color: var(--accent); font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.nav a .n { border-radius: 4px; }
+.live-rate { font-family: var(--mono); font-size: 11.5px; }
+.live-rate b { color: var(--accent); }
+.icon-btn, .btn, .tabs-select, .toolbar input[type=search], .toolbar select { border-radius: 6px; }
+.icon-btn:hover, .btn:hover { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+
+/* ---------- cards ---------- */
+.card {
+  position: relative;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 96%, var(--accent)), var(--surface) 64px);
+}
+.card::before {
+  /* corner bracket: reads as an instrument panel, costs nothing */
+  content: ""; position: absolute; top: 0; left: 0; width: 16px; height: 16px; pointer-events: none;
+  border-top: 2px solid var(--accent); border-left: 2px solid var(--accent); border-top-left-radius: var(--radius);
+  opacity: 0.75;
+}
+.card-head h2, .section-title h1 {
+  font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.09em; font-weight: 650;
+}
+.card-head h2 { font-size: 12px; }
+.card-head h2::before { content: "// "; color: var(--accent); opacity: 0.85; }
+.section-title h1 { font-size: 16px; }
+.section-title h1::before { content: "> "; color: var(--accent); }
+.card-head .sub, .section-title .sub { font-size: 12px; }
+
+/* ---------- stat tiles ---------- */
+.tile .label { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.tile .value { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 650; letter-spacing: -0.01em; }
+.tile.hero .value { color: var(--accent); text-shadow: 0 0 18px var(--glow); }
+.tile.alarm .value { color: var(--critical); text-shadow: 0 0 18px color-mix(in srgb, var(--critical) 40%, transparent); }
+.tile.caution .value { color: var(--serious); }
+
+/* ---------- tables ---------- */
+th { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; }
+tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+tr.clickable:hover td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.chip { border-radius: 4px; font-family: var(--mono); font-size: 11px; }
+.chip.mitre { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.chip.rule { color: var(--ink-2); }
+.share .bar { box-shadow: 0 0 8px var(--glow); }
+
+/* ---------- severity ---------- */
+.sev { border-radius: 4px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; }
+.sev.MEDIUM { background: color-mix(in srgb, var(--warning) 16%, transparent); border-color: color-mix(in srgb, var(--warning) 40%, transparent); }
+.sev.MEDIUM svg { color: var(--warning); }
+.sev.HIGH { background: color-mix(in srgb, var(--serious) 18%, transparent); border-color: color-mix(in srgb, var(--serious) 45%, transparent); }
+.sev.CRITICAL { box-shadow: 0 0 12px color-mix(in srgb, var(--critical) 45%, transparent); }
+.sig.warn { color: var(--warning); }
+.risk { border-radius: 4px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase; }
+.verdict-pill { border-radius: 4px; font-size: 11.5px; }
+
+/* ---------- event stream ---------- */
+.event { border-left: 3px solid transparent; padding-left: 15px; }
+.event.sev-MEDIUM { border-left-color: var(--warning); }
+.event.sev-HIGH { border-left-color: var(--serious); }
+.event.sev-CRITICAL { border-left-color: var(--critical); background: color-mix(in srgb, var(--critical) 5%, transparent); }
+.event:hover, .event:focus-visible { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.event time { font-family: var(--mono); font-size: 11.5px; }
+.event .kind { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+.filter-chip { border-radius: 4px; font-family: var(--mono); font-size: 11.5px; }
+.filter-chip[aria-pressed="true"], .seg button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface)); color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.seg { border-radius: 6px; }
+.seg button { font-family: var(--mono); font-size: 11.5px; }
+
+/* ---------- buttons ---------- */
+a.btn { text-decoration: none; color: inherit; }
+.btn { font-size: 12.5px; }
+.btn.primary {
+  background: var(--accent); border-color: var(--accent); color: #04121a;
+  box-shadow: 0 0 16px var(--glow);
+}
+:root[data-theme="light"] .btn.primary { color: #fff; }
+.btn.danger { border-color: color-mix(in srgb, var(--critical) 45%, transparent); }
+
+/* ---------- drawer ---------- */
+.drawer { border-left: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); width: min(620px, 100vw); }
+.drawer h4 { font-family: var(--mono); letter-spacing: 0.1em; color: var(--accent); }
+.drawer h4::before { content: "// "; opacity: 0.8; }
+.kv dt { font-family: var(--mono); font-size: 11.5px; }
+pre.json, pre.payload {
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--page) 70%, var(--surface));
+}
+pre.payload {
+  border: 1px solid var(--border); border-left: 2px solid var(--accent); border-radius: 6px; margin: 0;
+  padding: 10px 12px; font: 11.5px/1.5 var(--mono); overflow: auto; white-space: pre; max-height: 260px;
+  color: var(--good-text);
+}
+.guide, .ai-box { border-radius: 8px; }
+.tooltip { border-radius: 6px; font-family: var(--mono); font-size: 11.5px; }
+.toast { border-radius: 6px; font-family: var(--mono); font-size: 12px; border: 1px solid var(--border); }
+footer { font-family: var(--mono); font-size: 11px; }
+
+/* ---------- map ---------- */
+#map .land { stroke: var(--page); }
+#map .pt { filter: drop-shadow(0 0 4px var(--glow)); }
+
+/* ---------- ATT&CK tactic strip (Detections) ---------- */
+.tactics { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
+.tactic {
+  border: 1px solid var(--border); border-radius: 6px; padding: 10px 10px 9px; background: var(--surface-2);
+  display: flex; flex-direction: column; gap: 6px; min-height: 74px; position: relative; overflow: hidden;
+}
+.tactic .name { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); line-height: 1.25; }
+.tactic .n { font-family: var(--mono); font-size: 22px; font-weight: 650; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tactic.hit { border-color: color-mix(in srgb, var(--serious) 55%, transparent); background: color-mix(in srgb, var(--serious) 9%, var(--surface)); }
+.tactic.hit .n { color: var(--ink); }
+.tactic.hit .name { color: var(--ink-2); }
+.tactic .heat { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--serious); }
+
+/* ---------- flows ---------- */
+.flowstate { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase; padding: 2px 7px; border-radius: 4px; border: 1px solid var(--border); white-space: nowrap; }
+.flowstate.established, .flowstate.active { color: var(--good-text); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+.flowstate.attempt, .flowstate.closing { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 40%, transparent); }
+.flowstate.rejected, .flowstate.reset { color: var(--serious); border-color: color-mix(in srgb, var(--serious) 45%, transparent); }
+.flowstate.closed { color: var(--muted); }
+.hist { font-family: var(--mono); font-size: 11px; color: var(--muted); letter-spacing: 0.08em; }
+.arrow { color: var(--accent); padding: 0 4px; }
+.proto { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); }
+.rule-status { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; }
+.rule-status.error { color: var(--critical); }
+.rule-status.disabled { color: var(--muted); }
+.rule-status.active { color: var(--good-text); }
+.problems { border: 1px solid color-mix(in srgb, var(--critical) 45%, transparent); background: color-mix(in srgb, var(--critical) 8%, var(--surface)); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; font-family: var(--mono); font-size: 12px; }
+.problems div + div { margin-top: 4px; }
+.matched td:first-child { font-family: var(--mono); font-size: 11.5px; color: var(--accent); white-space: nowrap; }
+.matched td { font-size: 12px; overflow-wrap: anywhere; }
+.keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 13px; }
+kbd { font-family: var(--mono); font-size: 11.5px; padding: 1px 6px; border: 1px solid var(--axis); border-bottom-width: 2px; border-radius: 4px; background: var(--surface-2); }
+
+@media (prefers-reduced-motion: reduce) { .dot.live { box-shadow: none; } }

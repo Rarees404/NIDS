@@ -48,6 +48,8 @@ behavioral:
   exfil_threshold_bytes: 104857600  # 100 MiB uploaded by one connection before a "large upload" alert
   beacon_min_connections: 6   # Minimum samples before beaconing analysis
   beacon_cv_threshold: 0.20   # Coefficient of variation below = beaconing
+  dga_nxdomain_threshold: 12  # Distinct domains answered NXDOMAIN for one client (0 = off)
+  dga_window: 60              # ... within this many seconds
 
 # ---------------------------------------------------------------------------
 # Stealth / X-Ray detectors — surface what browsers hide from DevTools
@@ -68,6 +70,7 @@ stealth:
 flow:
   max_flows: 100000           # Max concurrent tracked flows
   idle_timeout: 300           # Seconds of inactivity before flow expires
+  udp_session_gap: 60         # A UDP 5-tuple silent this long starts a new flow (0 = never)
 
 # ---------------------------------------------------------------------------
 # Threat intelligence feeds

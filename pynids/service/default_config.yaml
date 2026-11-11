@@ -16,6 +16,8 @@ daemon:
   record_max_mb: 50
   record_files: 10
   retention_days: 30       # delete stored alerts older than this (0 = keep forever)
+  rules: builtin           # signature rules: builtin | none | /path/to/rules.yaml
+                           # (rules.yaml in the data directory overrides single rules by id)
 
 notifications:
   enabled: true

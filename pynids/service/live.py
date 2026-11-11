@@ -23,6 +23,7 @@ from typing import Any, Deque, Dict, List, Optional
 from ..alerts.classify import KIND_LABELS, KINDS, classify
 from ..alerts.guide import describe
 from ..alerts.manager import BaseOutput
+from ..alerts.mitre import TACTICS, technique
 from ..alerts.model import Alert, Severity
 
 _TIMELINE_MINUTES = 60
@@ -39,6 +40,10 @@ class LiveState(BaseOutput):
         self.kind_counts: Counter = Counter()
         self.severity_counts: Counter = Counter()
         self.recent: Deque[Dict[str, Any]] = deque(maxlen=max_recent)
+        # Detection statistics for the "Detections" view (session totals).
+        self.mitre_counts: Counter = Counter()
+        self._detections: Dict[str, Dict[str, Any]] = {}   # rule id / detector → stats
+        self._sources: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()  # offending IP → stats
 
         # (unix_second, packets, bytes) — for the live throughput sparkline
         self._rate: Deque[List[float]] = deque(maxlen=_RATE_SECONDS)
@@ -137,10 +142,12 @@ class LiveState(BaseOutput):
         d = alert.to_dict()
         d["kind"] = classify(alert)
         d["about"] = describe(d)
+        d["mitre"] = technique(alert.mitre_technique)
         with self._lock:
             self.kind_counts[d["kind"]] += 1
             self.severity_counts[alert.severity.value] += 1
             self.recent.append(d)
+            self._count_detection(alert, d)
             bucket = self._bucket(alert.timestamp)
             bucket["events"] += 1
             if alert.severity >= Severity.HIGH or d["kind"] in ("threat", "attack"):
@@ -157,6 +164,76 @@ class LiveState(BaseOutput):
                 q.put_nowait({"type": "alert", "data": d})
             except queue.Full:
                 pass
+
+    def _count_detection(self, alert: Alert, d: Dict[str, Any]) -> None:
+        """Session totals per technique, per detection and per offending address."""
+        if alert.mitre_technique:
+            self.mitre_counts[str(alert.mitre_technique).upper()] += 1
+        name = alert.rule_id or _detector_label(alert)
+        det = self._detections.get(name)
+        if det is None:
+            if len(self._detections) >= 500:
+                return
+            det = self._detections[name] = {
+                "name": name, "type": alert.alert_type.value, "kind": d["kind"], "count": 0,
+                "severity": alert.severity.value, "mitre": alert.mitre_technique,
+                "first_seen": alert.timestamp, "example": alert.message,
+            }
+        det["count"] += 1
+        det["last_seen"] = alert.timestamp
+        det["example"] = alert.message
+        if alert.severity.numeric > Severity(det["severity"]).numeric:
+            det["severity"] = alert.severity.value
+
+        # Who keeps triggering detections: the remote side when known,
+        # otherwise the source address.  Privacy telemetry is left out.
+        if d["kind"] not in ("threat", "attack", "host"):
+            return
+        ip = alert.context.get("remote_ip") or alert.src_ip
+        if not ip:
+            return
+        src = self._sources.get(ip)
+        if src is None:
+            src = self._sources[ip] = {"ip": ip, "count": 0, "worst": alert.severity.value,
+                                       "detections": set(), "first_seen": alert.timestamp}
+            if len(self._sources) > 1000:
+                self._sources.popitem(last=False)
+        else:
+            self._sources.move_to_end(ip)
+        src["count"] += 1
+        src["last_seen"] = alert.timestamp
+        if len(src["detections"]) < 30:
+            src["detections"].add(name)
+        if alert.severity.numeric > Severity(src["worst"]).numeric:
+            src["worst"] = alert.severity.value
+        for key in ("remote_host", "country", "org"):
+            if alert.context.get(key):
+                src[key] = alert.context[key]
+
+    def detections(self) -> Dict[str, Any]:
+        """What fired this session: by ATT&CK tactic/technique, by detection, by address."""
+        with self._lock:
+            mitre = dict(self.mitre_counts)
+            dets = [dict(v) for v in self._detections.values()]
+            sources = [{**{k: v for k, v in s.items() if k != "detections"},
+                        "detections": sorted(s["detections"])} for s in self._sources.values()]
+        techniques = []
+        tactics: Dict[str, int] = {}
+        for tid, count in mitre.items():
+            info = technique(tid) or {"id": tid, "name": None, "tactic": None, "url": None}
+            techniques.append({**info, "count": count})
+            tactic = info.get("tactic") or "Other"
+            tactics[tactic] = tactics.get(tactic, 0) + count
+        techniques.sort(key=lambda t: -t["count"])
+        order = {name: i for i, name in enumerate(TACTICS)}
+        return {
+            "tactics": [{"tactic": t, "count": c} for t, c in
+                        sorted(tactics.items(), key=lambda kv: order.get(kv[0], 99))],
+            "tactic_order": list(TACTICS),
+            "techniques": techniques,
+            "detections": sorted(dets, key=lambda x: -x["count"]),
+            "sources": sorted(sources, key=lambda s: (-Severity(s["worst"]).numeric, -s["count"]))[:100],
+        }
 
     # ------------------------------------------------------------------
     # SSE subscriptions
@@ -295,6 +372,17 @@ class LiveState(BaseOutput):
     def recent_alerts(self, limit: int = 100) -> List[Dict[str, Any]]:
         with self._lock:
             return list(self.recent)[-limit:][::-1]
+
+
+def _detector_label(alert: Alert) -> str:
+    """A stable name for alerts that carry no rule id (built-in detectors)."""
+    tags = alert.tags or []
+    for tag in ("beaconing", "dga", "dns_tunneling", "brute_force", "host_sweep", "vertical_scan",
+                "volumetric", "sqli", "xss", "path_traversal", "scanner", "exfiltration",
+                "correlation", "threat_intel"):
+        if tag in tags:
+            return "detector:" + tag
+    return "detector:" + (tags[0] if tags else alert.alert_type.value)
 
 
 def _brief(alert: Dict[str, Any]) -> Dict[str, Any]:

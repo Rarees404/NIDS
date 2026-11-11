@@ -271,6 +271,17 @@ class PortScanDetector(BaseDetector):
         # client ports) belong to flows we opened and are skipped.
         if flow is not None and flow.packet_count > 1:
             return
+        # The first packet seen of a flow can be the server's answer (capture
+        # started mid-conversation); the tracker then names the real client.
+        if flow is not None and flow.src_ip and flow.src_ip != src_ip:
+            return
+        if meta.get("protocol") == "tcp":
+            flags = meta.get("tcp_flags") or 0
+            # Anything carrying ACK belongs to a conversation that already
+            # exists (a flow the table forgot, a reply): not a probe.  Bare
+            # SYN, FIN, NULL and XMAS probes carry no ACK and still count.
+            if flags & 0x10:
+                return
         if _is_loopback(src_ip) and _is_loopback(dst_ip):
             return  # local IPC; browser-driven localhost probing has its own detector
         if _is_multicast_or_broadcast(dst_ip):
@@ -370,7 +381,8 @@ class PortScanDetector(BaseDetector):
                     "unique_ports_scanned": unique_ports,
                     "target_host": dst_ip,
                     "window_seconds": elapsed,
-                    "sample_ports": sorted(state.vert[dst_ip])[:20],
+                    "sample_ports": sorted(state.vert[dst_ip])[:40],
+                    "ports_per_second": round(unique_ports / max(elapsed, 1.0), 2),
                 },
             )
 

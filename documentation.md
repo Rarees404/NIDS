@@ -112,7 +112,7 @@ PyNIDS/
 │   └── enterprise.yaml             # Full config with all tuneable parameters
 ├── rules/
 │   ├── sample_rules.yaml           # Minimal rule example
-│   └── enterprise_rules.yaml       # 20+ production-ready signature rules
+│   └── enterprise_rules.yaml       # Link to pynids/rules/default_rules.yaml (55 tuned rules, loaded by default)
 ├── intel/
 │   ├── known_bad_ips.yaml          # CIDR-based bad IP feed
 │   └── malicious_domains.yaml      # Domain/suffix blocklist feed
@@ -343,49 +343,87 @@ Convenience wrapper around `ipaddress` that returns one of `'loopback'`, `'priva
 
 ### 6.1 Flow Identification
 
-The `FlowTracker` maintains an in-memory **connection table** (`dict[flow_id → Flow]`). The flow ID is a canonical MD5 hash of the 5-tuple `(proto, lower_endpoint, higher_endpoint)` — endpoints are sorted so that A→B and B→A map to the **same flow entry** (bidirectional tracking).
+The `FlowTracker` maintains an in-memory **connection table** keyed on the canonical 5-tuple `(proto, lower_endpoint, higher_endpoint)` — endpoints are sorted so that A→B and B→A map to the **same flow entry** (bidirectional tracking). The table key is the tuple itself; the `flow_id` carried by alerts is its MD5, computed once when the flow is created rather than for every packet.
 
 ```python
 ep1 = (src_ip, src_port)
 ep2 = (dst_ip, dst_port)
 low, high = sorted([ep1, ep2])
-raw = f"{proto}:{low[0]}:{low[1]}:{high[0]}:{high[1]}"
-flow_id = md5(raw)
+key = (proto, low, high)                                  # table key
+flow_id = md5(f"{proto}:{low[0]}:{low[1]}:{high[0]}:{high[1]}")   # stable id for alerts
 ```
 
-### 6.2 `Flow` Dataclass
+### 6.2 Who opened the connection
+
+`Flow.src_ip / src_port` is the **initiator** (the client), which is normally the sender of the first packet. Capture can start mid-conversation, so the first packet seen may be the server's. The tracker corrects for that when the flow is created:
+
+| First packet seen | Initiator |
+|---|---|
+| TCP SYN (no ACK) | The sender |
+| TCP SYN-ACK | The **receiver** (the sender is answering) |
+| Anything else from a port below 1024 to a port of 1024 or above | The **receiver** (a reply from a well-known service) |
+| Anything else | The sender |
+
+When the initiator was worked out this way, `initiator_inferred` is `True`. Detectors that count connection attempts (port scan, beaconing) and the volumetric detector compare the packet's source with `flow.src_ip`, so a server's answer is never mistaken for an attempt or a flood by the server.
+
+### 6.3 `Flow` Dataclass
 
 | Field | Description |
 |---|---|
 | `flow_id` | MD5 of canonical 5-tuple |
 | `protocol` | `'tcp'`, `'udp'`, `'icmp'` |
-| `src_ip / src_port` | Initiating endpoint (first packet direction) |
+| `src_ip / src_port` | Initiating endpoint (see 6.2) |
 | `dst_ip / dst_port` | Responding endpoint |
 | `state` | `NEW → ESTABLISHED → CLOSING → CLOSED` |
 | `start_time / last_seen` | First/last packet timestamps |
-| `packet_count` | Cumulative packet count (both directions) |
-| `byte_count` | Cumulative payload bytes |
+| `packet_count` / `packets_from_src` | Packets in both directions / sent by the initiator |
+| `byte_count` / `bytes_from_src` | Payload bytes in both directions / sent by the initiator |
 | `tcp_flags_seen` | Bitmask union of all TCP flags seen in this flow |
+| `history` | Flag and data history, one letter per first occurrence: `S` syn, `H` syn-ack, `A` ack, `D` data, `F` fin, `R` reset. Upper case = initiator, lower case = responder. A normal session reads `ShADdFf` |
+| `initiator_inferred` | The client was worked out from flags / ports |
+| `app_proto`, `server_name`, `app` | Set by the engine: dissected protocol, SNI / Host / DNS name, owning program |
 
 Computed properties:
 - `duration`: `last_seen - start_time`
 - `avg_packet_size`: `byte_count / packet_count`
+- `bytes_to_src`, `packets_to_src`: the responder's share
+- `outcome`: what became of the connection
 
-### 6.3 TCP State Machine
+| `outcome` | Meaning |
+|---|---|
+| `attempt` | SYN sent, nothing came back (filtered port, dead host) |
+| `rejected` | The responder answered the SYN with a reset (closed port) |
+| `established` | Handshake completed, still open |
+| `reset` | Torn down by a reset after the handshake |
+| `closing` / `closed` | One side / both sides finished |
+| `active` | Non-TCP traffic, or TCP without flag information |
 
-The tracker advances a simple state machine per flow based on TCP flag bitmasks:
+`to_dict()` returns a JSON-safe snapshot; `FlowTracker.snapshot(limit, sort)` and `counts()` serve the dashboard's **Flows** tab through `/api/flows`.
+
+### 6.4 TCP State Machine
 
 ```
-NEW (SYN seen, no ACK) → ESTABLISHED (ACK seen after NEW) → CLOSING (FIN or RST seen)
+NEW (SYN seen, no ACK) → ESTABLISHED (ACK seen while NEW)
+                       → CLOSING (one side sent FIN) → CLOSED (both sides sent FIN)
+any state → CLOSED (RST)
 ```
 
-### 6.4 Memory Management
+### 6.5 New conversation on a known 5-tuple
+
+A 5-tuple can be reused. Without care, the second conversation would be added to the first one's counters and, having `packet_count > 1`, would be invisible to every detector that counts "the first packet of a flow". The tracker starts a **fresh flow** when:
+
+* **TCP:** a bare SYN arrives on a flow that is `CLOSING` or `CLOSED` (the port pair was reused). SYN retransmissions on a `NEW` flow do not restart it.
+* **Other protocols:** a packet arrives after more than `udp_session_gap` seconds of silence (default 60, `flow.udp_session_gap`, 0 disables). Periodic UDP check-ins on fixed ports therefore count as separate connections for the beacon detector.
+
+`FlowTracker.total_flows` counts every flow ever created.
+
+### 6.6 Memory Management
 
 The tracker runs garbage collection every 30 seconds (lazy, event-driven):
-1. All flows idle beyond `idle_timeout` seconds are deleted.
+1. All flows idle beyond `idle_timeout` seconds are deleted; closed TCP flows are deleted after `closed_linger` seconds (60).
 2. If the table still exceeds `max_flows`, the **oldest** flows (by `last_seen`) are evicted until the table is within capacity.
 
-Default limits: `max_flows=100 000`, `idle_timeout=300 s`.
+Idle time is measured on the packet clock, so replaying an old capture does not expire every flow at once. Default limits: `max_flows=100 000`, `idle_timeout=300 s`.
 
 ---
 
@@ -437,16 +475,39 @@ return alerts
 
 The lock covers steps 1–4 to ensure each packet is fully processed before the statistics counter advances. Step 5 (alert dispatch) happens outside the lock so slow output backends cannot cascade delays back into the packet processing path.
 
-### 7.3 Hot-Reload (`reload_rules()`)
+### 7.3 Rule files and hot-reload
 
-`reload_rules()` checks the modification time of the rules file. If the mtime has changed since the last load it:
-1. Calls `load_rules()` to parse the new YAML.
+`rules_path` is one file or a list of files. `load_rule_files()` merges them in order: a rule in a later file **replaces** the rule with the same `id`, and an entry without `match` is a partial override merged over the earlier rule (`{id: X, enabled: false}`, `{id: X, severity: LOW}`). A missing file is skipped.
+
+The daemon passes two files (`daemon.rule_files()`):
+
+1. the main set — `daemon.rules: builtin` (default, `engine.BUILTIN_RULES` = `pynids/rules/default_rules.yaml`), a path, or `none`;
+2. `rules.yaml` in the data directory, for per-machine overrides. It is listed even when absent, so creating it later is picked up.
+
+`reload_rules()` compares the modification times of all rule files with those of the last load. If anything changed it:
+1. Calls `load_rule_files()` to parse and merge the YAML.
 2. Acquires the engine lock.
-3. Calls `SignatureDetector.update_rules(new_rules)`, which atomically replaces the rule list and clears threshold tracking state.
+3. Calls `SignatureDetector.update_rules(new_rules)`, which compiles the new set, replaces the old one and clears threshold tracking state.
 
-No packets are ever evaluated against a partially loaded ruleset.
+No packets are ever evaluated against a partially loaded ruleset. The daemon calls it every 30 seconds and broadcasts a `rules` event on the SSE stream after a reload; `pynids live` does the same on `--reload-interval`.
 
-### 7.4 `stats` Property
+### 7.4 What the engine adds to alerts
+
+After the detectors run, every alert that concerns a connection (it has a `dst_ip` or a `flow_id`) receives:
+
+* `flow_id`, if the detector did not set one;
+* `context["flow"]`: `initiator`, `responder`, `state`, `outcome`, `history`, `packets`, `bytes_out`, `bytes_in`, `duration`, `app_proto`, `server_name`.
+
+The flow itself is annotated as packets arrive (`app_proto`, `server_name` from TLS SNI / QUIC SNI / HTTP Host / DNS name, `app` from process attribution).
+
+### 7.5 Introspection
+
+| Member | Returns |
+|---|---|
+| `stats` | See below |
+| `rules()` | `{"files", "rules": [{id, description, severity, mitre, tags, threshold, status, hits, last_hit}], "problems", "detectors"}`. `status` is `active`, `disabled` or `error` |
+| `flows(limit, sort)` | Connection-table snapshot; `sort` is `recent`, `bytes`, `duration` or `packets` |
+| `flow_counts()` | Flows by protocol and state, plus `total` ever created |
 
 ```python
 {
@@ -454,6 +515,9 @@ No packets are ever evaluated against a partially loaded ruleset.
     "packets_processed": int,
     "packets_per_second": float,
     "active_flows": int,
+    "total_flows": int,
+    "rules": int,            # compiled signature rules
+    "rule_problems": int,    # rules that failed to compile
     "alert_stats": {
         "total_seen": int,
         "total_suppressed": int,
@@ -479,18 +543,32 @@ def analyze(self, meta: dict, layer7: dict, flow: Optional[Flow]) -> Iterable[Al
 **File:** `detection/signature.py`  
 **Class:** `SignatureDetector`
 
+#### Compilation
+
+`compile_rules(rules)` turns each rule into a `CompiledRule` once, at load: the `match` tree becomes a chain of closures, regexes are compiled, CIDR lists parsed, `in` lists turned into sets, and severity, confidence and threshold validated. It returns `(compiled, problems)`. A rule that fails is **left out and described in `problems`** (logged as a warning, shown on the dashboard's Detections tab), so one typo never disables the rest of the set. Rules with `enabled: false` are skipped. A second rule with an already-used `id` is rejected.
+
+`validate_rules(rules)` (used by `pynids validate`) adds checks for a missing `id` and unknown keys.
+
 #### Rule Evaluation
 
-For each packet, every rule in the loaded set is evaluated:
+For each packet, every compiled rule is evaluated:
 
-1. The rule's `match` tree is recursively evaluated via `_eval_node`.
-2. If the match fails → no alert.
-3. If a `threshold` block is present → check that this rule has matched at least `count` times from this `src_ip` within `seconds`. If not → no alert yet.
-4. If threshold is met → emit an `Alert` of type `SIGNATURE`.
+1. **Payload pre-filter.** A rule that can only match when the packet carries data (its `match` requires `payload_bytes` or a `layer7.*` field through a positive operator) is skipped without evaluation on packets with no payload and no dissected fields. Most packets are bare ACKs.
+2. The compiled predicate runs. If it fails → no alert.
+3. If a `threshold` block is present → the hit is recorded under the rule's tracking key. Below `count` hits within `seconds` → no alert yet. On reaching it the alert fires and the counter **starts over**, so a sustained burst alerts once per `count` hits.
+4. An `Alert` of type `SIGNATURE` is emitted, with the flow id and this evidence:
 
-#### Condition Evaluator (`_eval_node`)
+| Evidence key | Content |
+|---|---|
+| `matched` | The leaf conditions that were true: `field`, `op`, `expected`, and the `actual` value (for payloads, a printable excerpt around the match) |
+| `threshold` | `hits`, `seconds`, `required`, `window`, `tracked_by` (only for threshold rules) |
+| `payload_preview`, `payload_len` | First 256 payload bytes and the total length |
+| `layer7` | Dissected fields, without the raw header dump, JA3 string and cipher lists |
+| `rule` | The rule's `why`, `response` and `references`, used by the plain-English guide |
 
-Supports three node types:
+`rule_stats()` returns every loaded rule with its status, hit count and last hit.
+
+#### Condition Evaluator
 
 | Node Type | Syntax | Semantics |
 |---|---|---|
@@ -500,35 +578,69 @@ Supports three node types:
 | Leaf condition | `{field: X, op: OP, value: V}` | Apply operator |
 | Shorthand | `{key: value, key2: value2}` | Implicit AND of equality checks |
 
+`_eval_node(node, meta, layer7, flow=None)` is the uncompiled, recursive form of the same logic (used by tests and for explaining a match).
+
 #### Field Addressing
 
-- Plain names (`src_ip`, `dst_port`, `protocol`, `payload_bytes`) → resolved from `meta` dict.
-- Dot notation starting with `layer7.` → resolved from the `layer7` dict. Example: `layer7.http.user_agent`, `layer7.dns.query_name`, `layer7.tls.sni`, `layer7.tls.ja3`.
+- Plain names (`src_ip`, `dst_port`, `protocol`, `payload_bytes`, `tcp_flags`, `ip_ttl`) → resolved from the `meta` dict.
+- `layer7.<proto>.<field>` → resolved from the `layer7` dict. Example: `layer7.http.user_agent`, `layer7.http.headers.authorization`, `layer7.dns.query_name`, `layer7.tls.sni`, `layer7.tls.ja3`.
+- Computed fields:
+
+| Field | Value |
+|---|---|
+| `payload_len` | Bytes of application payload in this packet |
+| `tcp.syn` | `true` for a connection attempt: SYN set, ACK clear. `None` for non-TCP |
+| `tcp.synack`, `tcp.ack`, `tcp.fin`, `tcp.rst` | Flag tests |
+| `tcp.null`, `tcp.xmas` | No flags at all / FIN+PSH+URG together (stealth scans) |
+| `direction` | `outbound`, `inbound`, `local`, `transit`; `None` without enrichment (PCAP replay) |
+| `src_scope`, `dst_scope` | `public`, `private`, `loopback`, `link_local`, `multicast` |
+| `context.<key>` | Enrichment: `app`, `process`, `remote_host`, `country`, `signature`, `system_process` … |
+| `flow.new` | First packet of its flow |
+| `flow.packets`, `flow.bytes`, `flow.bytes_out`, `flow.bytes_in`, `flow.duration`, `flow.state` | The flow so far |
+
+Note that Python's `ipaddress` classes the documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`) as private, so they have scope `private`.
 
 #### Operator Reference
 
-| Operator | Type check | Semantics |
+| Operator | Applies to | Semantics |
 |---|---|---|
 | `eq` | any | Exact equality |
 | `ne` | any | Not equal |
 | `lt / gt` | numeric | Less/greater than |
 | `lte / gte` | numeric | Less/greater than or equal |
 | `in` | any | Value is in list |
-| `not_in` | any | Value is not in list |
-| `contains` | str or bytes | Substring (bytes-aware) |
-| `startswith` | str | String prefix match |
-| `regex` | str | `re.search`, case-insensitive |
+| `not_in` | any | Value is not in list (a missing field does not match) |
+| `contains` | text, bytes, list | Substring, or list membership |
+| `not_contains` | text, bytes, list | Negated `contains` (a missing field does not match) |
+| `startswith` / `endswith` | text, bytes | Prefix / suffix |
+| `regex` | text, bytes | `re.search`, case-insensitive |
+| `cidr` | IP address | Inside a network, or any of a list of networks |
 | `exists` | any | Field is present and not None |
+
+**Bytes.** Text operators read a payload as Latin-1, one character per byte, so anchors (`^`, `$`) and offsets mean what they say. In a rule value, `\xNN` stands for one raw byte: `'\xffSMB\x72'` matches the SMBv1 negotiate header, and regexes can use `\x7fELF` directly. The payload is decoded at most once per packet.
 
 #### Threshold Gating
 
 ```yaml
 threshold:
-  count: 5      # Must match N times …
-  seconds: 30   # … within this sliding window
+  count: 5            # Must match N times …
+  seconds: 30         # … within this sliding window
+  track_by: src_ip    # src_ip (default) | dst_ip | pair | flow | global
 ```
 
-Per `(rule_id, src_ip)` pair, a `deque[float]` of match timestamps is maintained. Old entries are expired on each check. The alert fires only when `len(bucket) >= count`. This enables rate-sensitive rules (e.g., "alert if SYN to port 22 is seen 5 times in 30 seconds from the same IP") without generating alert storms.
+Per `(rule_id, tracking key)`, a `deque[float]` of match timestamps is maintained and old entries are expired on each check. The alert fires when `len(bucket) >= count`, after which the bucket is cleared. Timestamps are packet time, so thresholds behave the same in PCAP replay.
+
+#### Message templates and rule documentation
+
+`message: "FTP password sent in cleartext to {dst_ip}"` replaces `{field}` placeholders with the packet's values (any addressable field; a missing one renders as `?`). Without `message`, the `description` is used. `why`, `response` and `references` travel in the alert's evidence and become the explanation and first next step in the alert drawer.
+
+#### The built-in ruleset
+
+`pynids/rules/default_rules.yaml` holds 55 rules in nine groups: `SIG-REC` (reconnaissance), `SIG-EXP` (exploitation), `SIG-EXE` (shells and download cradles on the wire), `SIG-CRED` (credentials in cleartext), `SIG-LAT` (remote access and exposed services), `SIG-C2` (command and control, tunnelling, mining, tool transfer), `SIG-EXF` (exfiltration), `SIG-IMP` (amplification) and `SIG-POL` (outdated protocols). Its tuning principles:
+
+* **A port number alone is never an attack.** Port rules match the opening SYN only (one alert per connection, never on a reply whose ephemeral port happens to be 6667) and name the direction or scope that makes the connection reportable.
+* **No duplicates of the behavioural detectors.** SQL injection, XSS, path traversal and scanner user-agents are left to `HttpAttackDetector`.
+* **Confidence reflects how often the pattern is benign.**
 
 ### 8.2 Anomaly Detection
 
@@ -607,6 +719,18 @@ Alert fires when **any** of:
 Confidence is proportional to how far each metric exceeds its threshold.
 
 **MITRE:** `T1071.004`
+
+#### `DgaDetector` — Bursts of Failed Lookups
+
+Malware that locates its command server with a domain-generation algorithm asks for dozens of pseudo-random names; nearly all of them do not exist, so the resolver answers `NXDOMAIN` again and again.
+
+The detector looks at DNS **responses** with `rcode == 3` and attributes them to the client (the packet's destination). Per client it keeps a sliding window of `(time, registered domain, full name)` and alerts when the window holds `dga_nxdomain_threshold` (default 12) **distinct registered domains** within `dga_window` (default 60 s), at most once per window.
+
+Not counted: single-label names (search-suffix expansion, Chrome's random start-up probes), private zones (`.local`, `.arpa`, `.lan`, `.home`, `.internal`, `.corp` …), and service-discovery names. One broken domain retried many times is one domain.
+
+Severity: **HIGH** when the failing names look machine-generated (mean entropy of the registered label ≥ 3.0 bits and mean length ≥ 10), otherwise **MEDIUM**. The alert's `src_ip` is the client and its evidence lists up to 15 sample names.
+
+**MITRE:** `T1568.002`
 
 #### `HttpAttackDetector` — Web Application Attacks
 
@@ -848,6 +972,10 @@ Calls `output.emit(alert)` on every registered `BaseOutput`. Exceptions in one o
 #### Stage 5: Correlation
 After dispatch, the alert's `(src_ip, rule_id/alert_type)` is recorded in a sliding window. If `>= correlation_threshold` **distinct** rule signatures are seen from the same source in `correlation_window` seconds, a `CORRELATION` alert (severity CRITICAL) is generated and dispatched immediately. This is the system's multi-vector attack detection.
 
+Not every alert counts as a vector. Left out: `STEALTH-*` privacy telemetry, alerts below MEDIUM, hygiene findings (tag `policy`), and host baseline events (tags `host_risk`, `new_program`, `baseline`, `new_device`). Three of those in two minutes is an ordinary afternoon, not a coordinated attack.
+
+The correlation alert's evidence carries `chain` (the latest alert of each contributing detection, oldest first, with time, severity, technique and message) and `tactics` (the ATT&CK tactics they span, in order of appearance), which the dashboard renders as an attack chain. It deliberately has no `dst_ip`: auto-blocking acts on the source.
+
 ### 10.3 Output Backends
 
 All backends extend `BaseOutput` and must implement `emit(alert)`. They are registered with `alert_manager.register_output(backend)`.
@@ -1072,22 +1200,30 @@ Rules are defined in YAML under the top-level `rules:` key.
 
 ```yaml
 rules:
-  - id: "SIG-EXP-001"             # Required. Unique string identifier.
-    description: "Human message"   # Alert message text.
+  - id: "SIG-LAT-002"             # Required. Unique string identifier.
+    description: "Remote Desktop connection from the internet"
+    message: "RDP connection attempt from internet host {src_ip} to {dst_ip}"  # Optional template
     severity: HIGH                 # LOW | MEDIUM | HIGH | CRITICAL
     confidence: 0.9                # Float 0.0–1.0 (default 1.0)
-    mitre: "T1190"                 # MITRE ATT&CK technique ID
-    tags: [sqli, webapp]           # Free-form taxonomy tags
+    mitre: "T1021.001"             # MITRE ATT&CK technique ID
+    tags: [lateral_movement, rdp]  # Free-form taxonomy tags
     match:                         # Required. Condition tree.
       all:
-        - {field: protocol, op: eq, value: tcp}
-        - {field: dst_port, op: in, value: [80, 8080]}
-        - {field: layer7.http.sqli_suspect, op: eq, value: true}
+        - {field: tcp.syn, op: eq, value: true}
+        - {field: dst_port, op: eq, value: 3389}
+        - {field: src_scope, op: eq, value: public}
     threshold:                     # Optional. Rate gate.
       count: 5
       seconds: 30
+      track_by: src_ip             # src_ip | dst_ip | pair | flow | global
+    why: "Shown as the explanation in the alert drawer."
+    response: "Shown as the first next step."
+    references: ["https://attack.mitre.org/techniques/T1021/001/"]
+    enabled: true                  # false switches the rule off
     action: alert                  # Reserved for future use (currently ignored).
 ```
+
+Unknown keys are reported by `pynids validate`. See section 8.1 for operators, computed fields, byte matching and thresholds.
 
 ### Addressable Fields
 
@@ -1113,6 +1249,9 @@ rules:
 | `layer7.tls.sni` | layer7 | `"malware-c2.example"` |
 | `layer7.tls.ja3` | layer7 | `"abc123..."` |
 | `layer7.ssh.software` | layer7 | `"OpenSSH_7.2"` |
+| `layer7.http.headers.<name>` | layer7 | `layer7.http.headers.authorization` → `"Basic dXNlcjpwYXNz"` |
+| `layer7.dns.is_response`, `layer7.dns.rcode_name` | layer7 | `false`, `"NXDOMAIN"` |
+| `payload_len`, `tcp.syn`, `direction`, `src_scope`, `dst_scope`, `flow.*`, `context.*` | computed | see section 8.1 |
 
 ---
 
@@ -1148,7 +1287,7 @@ rules:
                        │  → [THREAT_INTEL Alert] if matched
                        ▼
 5.             SignatureDetector.analyze(meta, layer7, flow)
-                       │  → evaluates all 20+ rules; matches SIG-EXP-001
+                       │  → evaluates the compiled rules; e.g. matches SIG-EXP-005
                        │  → [SIGNATURE Alert | severity=CRITICAL]
                        ▼
 6.             AnomalyDetector.analyze(meta, …)
@@ -1290,9 +1429,14 @@ sniff_live(lo0) ─┴─► DetectionEngine.process_packet(meta)
 | `GET /api/widget` | — | Counts + latest alert headline for the sandboxed widget |
 | `GET /api/summary` | token | Counts by kind/severity, rates, top apps, status, threat level |
 | `GET /api/alerts?limit&min_severity&kind&q&app&since&until` | token | History from SQLite (FTS5 search) |
+| `GET /api/alerts?…&rule=<id>&mitre=<technique>` | token | The same, filtered to one rule id or ATT&CK technique (exact match) |
+| `GET /api/alerts/export?format=jsonl\|csv&…` | token | Download the alerts matching the same filters (up to 1000). CSV cells that could be read as formulas are neutralised |
 | `GET /api/alerts/{id}` | token | One alert |
+| `GET /api/flows?limit&sort&q&state` | token | The live connection table: `{counts, flows, total}`. `sort` is `recent`, `bytes`, `duration` or `packets`; `state` filters by outcome or state |
+| `GET /api/rules` | token | Loaded signature rules with status, hit counts and compile problems; rule files; detector names |
+| `GET /api/detections` | token | Session totals: alerts by ATT&CK tactic and technique, by rule / detector, and by offending address |
 | `GET /api/apps`, `/api/remotes`, `/api/timeline` | token | Live traffic views |
-| `GET /api/stream` | token (query) | Server-Sent Events: `alert`, `tick`, `block`, `unblock`, `intel` |
+| `GET /api/stream` | token (query) | Server-Sent Events: `alert`, `tick`, `block`, `unblock`, `intel`, `rules` |
 | `GET/POST /api/blocks`, `DELETE /api/blocks/{ip}` | token + Origin | pf blocks |
 | `POST /api/explain/{id}` | token + Origin | Claude explanation (cached in `explanations` table) |
 | `GET /api/intel`, `POST /api/intel/update` | token (+ Origin) | Feed status / refresh and hot-reload |
@@ -1310,6 +1454,7 @@ sniff_live(lo0) ─┴─► DetectionEngine.process_packet(meta)
 | `…/api-token` | API token (0644) |
 | `…/anthropic-key` | Claude API key (0600) |
 | `…/blocklist.json` | Block ledger |
+| `…/rules.yaml` | Optional overrides and additions to the built-in signature rules (merged by `id`, hot-reloaded) |
 | `…/captures/*.pcap` | Rolling capture window (only with `--record`) |
 | `/Library/Logs/PyNIDS/daemon.log` | Daemon log |
 

@@ -74,9 +74,17 @@ _config_option = click.option(
 _rules_option = click.option(
     "--rules", "-r",
     default=None,
-    help="Path to signature rules YAML file.",
+    help="Signature rules YAML file, or 'builtin' for the tuned set shipped with PyNIDS.",
     metavar="FILE",
 )
+
+
+def _resolve_rules(rules: Optional[str]) -> Optional[str]:
+    """``builtin`` → the packaged ruleset; anything else is a path."""
+    if rules and rules.strip().lower() == "builtin":
+        from .engine import BUILTIN_RULES
+        return str(BUILTIN_RULES)
+    return rules
 _output_option = click.option(
     "--output", "-o",
     type=click.Choice(["text", "json"]),
@@ -222,7 +230,7 @@ def _build_engine(
 
     return DetectionEngine(
         config=cfg,
-        rules_path=rules_path,
+        rules_path=_resolve_rules(rules_path),
         intel=intel,
         alert_manager=mgr,
         enricher=_make_enricher(processes=live_capture),
@@ -476,7 +484,7 @@ def xray(
 
     engine = DetectionEngine(
         config=cfg,
-        rules_path=rules,
+        rules_path=_resolve_rules(rules),
         intel=intel,
         alert_manager=mgr,
         enricher=_make_enricher(processes=not pcap),
@@ -767,7 +775,7 @@ def validate(file: str, file_type: str) -> None:
       pynids validate configs/enterprise.yaml --type config
     """
     import yaml as _yaml
-    from .detection.signature import load_rules as _load_rules
+    from .detection.signature import validate_rules as _validate_rules
 
     try:
         with open(file, encoding="utf-8") as f:
@@ -781,19 +789,13 @@ def validate(file: str, file_type: str) -> None:
         file_type = "rules" if "rules" in (data or {}) else "config"
 
     if file_type == "rules":
-        rules = (data or {}).get("rules", [])
-        errors = 0
-        for i, rule in enumerate(rules):
-            if "id" not in rule:
-                console.print(f"[yellow]Rule #{i}: missing 'id'[/yellow]")
-                errors += 1
-            if "match" not in rule:
-                console.print(f"[yellow]Rule {rule.get('id', f'#{i}')}: missing 'match'[/yellow]")
-                errors += 1
-            sev = rule.get("severity", "MEDIUM").upper()
-            if sev not in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
-                console.print(f"[yellow]Rule {rule.get('id')}: invalid severity '{sev}'[/yellow]")
-                errors += 1
+        rules = (data or {}).get("rules", []) or []
+        # Compiles every rule: bad operators, regexes, CIDRs, thresholds and
+        # unknown keys are reported, not just missing fields.
+        problems = _validate_rules(rules)
+        for problem in problems:
+            console.print(f"[yellow]{problem}[/yellow]")
+        errors = len(problems)
         if errors == 0:
             console.print(f"[green]✓ {len(rules)} rules validated — no errors[/green]")
         else:

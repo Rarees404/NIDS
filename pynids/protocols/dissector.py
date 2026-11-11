@@ -267,6 +267,9 @@ def _parse_http(payload: bytes) -> Dict[str, Any]:
         info["content_type"] = headers.get("content-type")
         info["content_length"] = headers.get("content-length")
         info["referer"] = headers.get("referer")
+        if info.get("direction") == "response":
+            info["server"] = headers.get("server")
+            info["location"] = headers.get("location")
         info["headers"] = headers
 
         # Security heuristics look at what a client sends — the request line,
@@ -308,6 +311,8 @@ def _parse_dns(payload: bytes, proto: str) -> Dict[str, Any]:
         info["is_response"] = bool(flags & 0x8000)
         info["opcode"] = (flags >> 11) & 0x0F
         info["rcode"] = flags & 0x000F
+        if info["is_response"]:
+            info["rcode_name"] = _DNS_RCODES.get(info["rcode"], str(info["rcode"]))
         qdcount = int.from_bytes(data[4:6], "big")
         ancount = int.from_bytes(data[6:8], "big")
         info["answer_count"] = ancount
@@ -365,8 +370,13 @@ def _dns_answers(data: bytes, pos: int, count: int) -> List[Dict[str, Any]]:
 
 
 _DNS_QTYPES: Dict[int, str] = {
-    1: "A", 2: "NS", 5: "CNAME", 6: "SOA", 12: "PTR",
-    15: "MX", 16: "TXT", 28: "AAAA", 33: "SRV", 255: "ANY",
+    1: "A", 2: "NS", 5: "CNAME", 6: "SOA", 10: "NULL", 12: "PTR", 13: "HINFO",
+    15: "MX", 16: "TXT", 28: "AAAA", 33: "SRV", 35: "NAPTR", 41: "OPT", 43: "DS",
+    46: "RRSIG", 48: "DNSKEY", 52: "TLSA", 64: "SVCB", 65: "HTTPS", 99: "SPF",
+    251: "IXFR", 252: "AXFR", 255: "ANY", 257: "CAA",
+}
+_DNS_RCODES: Dict[int, str] = {
+    0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP", 5: "REFUSED",
 }
 
 

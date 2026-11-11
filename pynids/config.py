@@ -43,10 +43,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "exfil_threshold_bytes": 100 * 1024 * 1024,
         "beacon_min_connections": 6,
         "beacon_cv_threshold": 0.20,
+        "dga_nxdomain_threshold": 12,   # distinct failing domains per client (0 = off)
+        "dga_window": 60,
     },
     "flow": {
         "max_flows": 100_000,
         "idle_timeout": 300,
+        "udp_session_gap": 60,          # a silent UDP 5-tuple restarts as a new flow
     },
     "intel": {
         "enabled": False,

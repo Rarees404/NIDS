@@ -29,13 +29,14 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Sequence, Union
 
 from .alerts.manager import AlertManager
 from .alerts.model import Alert, AlertType, Severity
 from .detection.anomaly import AnomalyDetector, PortScanDetector, BruteForceDetector
 from .detection.base import BaseDetector
 from .detection.behavioral import (
+    DgaDetector,
     DnsTunnelingDetector,
     HttpAttackDetector,
     DataExfiltrationDetector,
@@ -61,6 +62,54 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# The tuned ruleset shipped inside the package (``rules/enterprise_rules.yaml``
+# in a source checkout is a link to it).
+BUILTIN_RULES = Path(__file__).resolve().parent / "rules" / "default_rules.yaml"
+
+
+def load_rule_files(paths: Iterable[str]) -> List[Dict[str, Any]]:
+    """
+    Load several rule files into one ruleset.
+
+    A rule in a later file replaces the rule with the same ``id`` from an
+    earlier one, so a small local file can retune or switch off
+    (``enabled: false``) individual built-in rules.
+    """
+    merged: Dict[str, Dict[str, Any]] = {}
+    anonymous = 0
+    for path in paths:
+        if not Path(path).exists():
+            logger.debug("Rules file not present: %s", path)
+            continue
+        try:
+            rules = load_rules(path)
+        except Exception as exc:  # noqa: BLE001 — a broken file must not stop the others
+            logger.error("Could not load rules from %s: %s", path, exc)
+            continue
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            rule_id = rule.get("id")
+            if rule_id is None:
+                anonymous += 1
+                rule_id = f"__anonymous_{anonymous}"
+            previous = merged.get(str(rule_id))
+            if previous is not None and "match" not in rule and "when" not in rule:
+                # A partial override: {id: X, enabled: false} or {id: X, severity: LOW}.
+                rule = {**previous, **rule}
+            merged[str(rule_id)] = rule
+    return list(merged.values())
+
+
+def _mtimes(paths: Iterable[str]) -> tuple:
+    out = []
+    for path in paths:
+        try:
+            out.append(Path(path).stat().st_mtime)
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
 
 class DetectionEngine:
     """
@@ -68,7 +117,8 @@ class DetectionEngine:
 
     Args:
         config:         Full configuration dictionary (see ``configs/enterprise.yaml``).
-        rules_path:     Path to the signature rules YAML file (optional).
+        rules_path:     Path to the signature rules YAML file, or a list of files
+                        merged in order (later files override rules by id).
         intel:          Pre-configured :class:`~pynids.intel.ThreatIntel` instance.
         alert_manager:  Pre-configured :class:`~pynids.alerts.AlertManager` instance.
         enricher:       Optional :class:`~pynids.enrich.Enricher` that adds app,
@@ -80,14 +130,20 @@ class DetectionEngine:
     def __init__(
         self,
         config: Dict[str, Any],
-        rules_path: Optional[str] = None,
+        rules_path: Union[str, Sequence[str], None] = None,
         intel: Optional[ThreatIntel] = None,
         alert_manager: Optional[AlertManager] = None,
         enricher: Optional["Enricher"] = None,
         packet_observers: Optional[List[Callable[[dict, dict, dict], None]]] = None,
     ) -> None:
         self._config = config
-        self._rules_path = rules_path
+        if not rules_path:
+            self._rule_paths: List[str] = []
+        elif isinstance(rules_path, (str, Path)):
+            self._rule_paths = [str(rules_path)]
+        else:
+            self._rule_paths = [str(p) for p in rules_path if p]
+        self._rules_path = self._rule_paths[0] if self._rule_paths else None
         self._lock = threading.Lock()
 
         # --- Flow tracker ---
@@ -95,6 +151,7 @@ class DetectionEngine:
         self._flow_tracker = FlowTracker(
             max_flows=flow_cfg.get("max_flows", 100_000),
             idle_timeout=float(flow_cfg.get("idle_timeout", 300)),
+            udp_session_gap=float(flow_cfg.get("udp_session_gap", 60)),
         )
 
         # --- Threat intelligence ---
@@ -109,12 +166,10 @@ class DetectionEngine:
 
         # --- Detectors (ordered: cheapest / most likely to fire first) ---
         self._detectors: list = []
-        self._init_detectors(config, rules_path)
+        self._init_detectors(config)
 
         # Hot-reload state
-        self._rules_mtime: float = 0.0
-        if rules_path and Path(rules_path).exists():
-            self._rules_mtime = Path(rules_path).stat().st_mtime
+        self._rules_mtime: tuple = _mtimes(self._rule_paths)
 
         # Detector state pruning, driven by packet time (works for replay too)
         self._last_prune: float = 0.0
@@ -157,6 +212,8 @@ class DetectionEngine:
 
             # 2. Flow tracking
             flow = self._flow_tracker.update(meta)
+            if flow is not None and (layer7 or context):
+                _annotate_flow(flow, layer7, context)
 
             # 3. Threat intelligence checks
             try:
@@ -174,9 +231,18 @@ class DetectionEngine:
 
             self._maybe_prune(meta.get("timestamp") or time.time())
 
-            if context:
+            if alerts:
+                flow_info = _flow_context(flow) if flow is not None else None
                 for alert in alerts:
-                    alert.context = {**context, **alert.context}
+                    if context:
+                        alert.context = {**context, **alert.context}
+                    # Flow facts travel with the alert: how much was exchanged,
+                    # who opened the connection, how it ended.
+                    if flow_info is not None and (alert.dst_ip or alert.flow_id):
+                        if alert.flow_id is None:
+                            alert.flow_id = flow.flow_id
+                        if "flow" not in alert.context:
+                            alert.context = {**alert.context, "flow": flow_info}
 
             for observer in self._observers:
                 try:
@@ -197,29 +263,46 @@ class DetectionEngine:
         Returns True if rules were actually reloaded, False if the file
         has not changed since the last load.
         """
-        if not self._rules_path:
+        if not self._rule_paths:
             return False
-        path = Path(self._rules_path)
-        if not path.exists():
-            logger.warning("Rules file not found: %s", self._rules_path)
+        if not any(Path(p).exists() for p in self._rule_paths):
+            logger.debug("Rules file not found: %s", ", ".join(self._rule_paths))
             return False
-        mtime = path.stat().st_mtime
-        if mtime == self._rules_mtime:
+        mtimes = _mtimes(self._rule_paths)
+        if mtimes == self._rules_mtime:
             return False
 
-        new_rules = load_rules(self._rules_path)
+        new_rules = load_rule_files(self._rule_paths)
         with self._lock:
             for detector in self._detectors:
                 if isinstance(detector, SignatureDetector):
                     detector.update_rules(new_rules)
-                    self._rules_mtime = mtime
+                    self._rules_mtime = mtimes
                     logger.info(
                         "Hot-reloaded %d signature rules from %s",
                         len(new_rules),
-                        self._rules_path,
+                        ", ".join(self._rule_paths),
                     )
                     return True
         return False
+
+    def rules(self) -> Dict[str, Any]:
+        """The loaded signature rules with hit counts, plus every detector's name."""
+        out: Dict[str, Any] = {"files": list(self._rule_paths), "rules": [], "problems": [],
+                               "detectors": [d.name for d in self._detectors]}
+        for detector in self._detectors:
+            if isinstance(detector, SignatureDetector):
+                out["rules"] = detector.rule_stats()
+                out["problems"] = list(detector.problems)
+                break
+        return out
+
+    def flows(self, limit: int = 200, sort: str = "recent") -> List[Dict[str, Any]]:
+        """Snapshot of the connection table (most recent first by default)."""
+        return self._flow_tracker.snapshot(limit=limit, sort=sort)
+
+    def flow_counts(self) -> Dict[str, int]:
+        return self._flow_tracker.counts()
 
     @property
     def stats(self) -> Dict[str, Any]:
@@ -230,6 +313,9 @@ class DetectionEngine:
             "packets_processed": self._packets_processed,
             "packets_per_second": round(self._packets_processed / max(uptime, 1), 1),
             "active_flows": self._flow_tracker.active_count,
+            "total_flows": self._flow_tracker.total_flows,
+            "rules": sum(len(d._compiled) for d in self._detectors if isinstance(d, SignatureDetector)),
+            "rule_problems": sum(len(d.problems) for d in self._detectors if isinstance(d, SignatureDetector)),
             "alert_stats": self._alert_manager.stats,
         }
 
@@ -290,18 +376,14 @@ class DetectionEngine:
             except Exception as exc:
                 logger.error("Detector %s prune raised: %s", detector.name, exc)
 
-    def _init_detectors(
-        self, config: Dict[str, Any], rules_path: Optional[str]
-    ) -> None:
+    def _init_detectors(self, config: Dict[str, Any]) -> None:
         """Instantiate and register all configured detectors."""
 
         # Signature detector
-        if rules_path and Path(rules_path).exists():
-            rules = load_rules(rules_path)
-            self._detectors.append(SignatureDetector(rules))
-            logger.info("Loaded %d signature rules from %s", len(rules), rules_path)
-        else:
-            self._detectors.append(SignatureDetector([]))
+        rules = load_rule_files(self._rule_paths) if self._rule_paths else []
+        self._detectors.append(SignatureDetector(rules))
+        if self._rule_paths:
+            logger.info("Loaded %d signature rules from %s", len(rules), ", ".join(self._rule_paths))
 
         # Anomaly detectors
         anom_cfg = config.get("anomaly", {})
@@ -340,6 +422,12 @@ class DetectionEngine:
             DnsTunnelingDetector(
                 entropy_threshold=float(beh_cfg.get("dns_entropy_threshold", 3.5)),
                 length_threshold=int(beh_cfg.get("dns_length_threshold", 50)),
+            )
+        )
+        self._detectors.append(
+            DgaDetector(
+                nxdomain_threshold=int(beh_cfg.get("dga_nxdomain_threshold", 12)),
+                window=float(beh_cfg.get("dga_window", 60)),
             )
         )
         self._detectors.append(HttpAttackDetector())
@@ -514,4 +602,69 @@ class DetectionEngine:
                     )
                 )
 
+        # Check plaintext HTTP Host headers — malware often skips DNS it controls
+        http = layer7.get("http") or {}
+        host = http.get("host") if http.get("direction") == "request" else None
+        if host:
+            host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+            host = host.strip("[]").lower()
+        if host and host not in (dns_name, sni):
+            entry = self._intel.check_domain(host)
+            if entry:
+                alerts.append(
+                    Alert(
+                        alert_type=AlertType.THREAT_INTEL,
+                        severity=Severity(entry.severity),
+                        message=(
+                            f"HTTP request to known malicious host '{host}' "
+                            f"({entry.category}): {entry.description}"
+                        ),
+                        src_ip=src_ip,
+                        dst_ip=dst_ip,
+                        dst_port=meta.get("dst_port"),
+                        protocol=meta.get("protocol"),
+                        mitre_technique="T1071.001",
+                        tags=["threat_intel", "http", entry.category],
+                        confidence=1.0,
+                        evidence={
+                            "host": host,
+                            "uri": http.get("uri"),
+                            "user_agent": http.get("user_agent"),
+                            "matched_indicator": entry.indicator,
+                            "category": entry.category,
+                        },
+                    )
+                )
+
         return alerts
+
+
+def _annotate_flow(flow: Any, layer7: Dict[str, Any], context: Dict[str, Any]) -> None:
+    """Remember what the dissector and enricher learned about a flow."""
+    proto = layer7.get("app_proto")
+    if proto and flow.app_proto is None:
+        flow.app_proto = proto
+    if flow.server_name is None:
+        name = ((layer7.get("tls") or {}).get("sni") or (layer7.get("quic") or {}).get("sni")
+                or (layer7.get("http") or {}).get("host") or (layer7.get("dns") or {}).get("query_name")
+                or context.get("remote_host"))
+        if name:
+            flow.server_name = str(name)[:253]
+    if flow.app is None and context.get("app"):
+        flow.app = context["app"]
+
+
+def _flow_context(flow: Any) -> Dict[str, Any]:
+    return {
+        "initiator": flow.src_ip,
+        "responder": f"{flow.dst_ip}:{flow.dst_port}",
+        "state": flow.state.value,
+        "outcome": flow.outcome,
+        "history": flow.history,
+        "packets": flow.packet_count,
+        "bytes_out": flow.bytes_from_src,
+        "bytes_in": flow.bytes_to_src,
+        "duration": round(flow.duration, 2),
+        "app_proto": flow.app_proto,
+        "server_name": flow.server_name,
+    }

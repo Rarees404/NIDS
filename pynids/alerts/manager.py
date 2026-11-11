@@ -34,6 +34,7 @@ import time
 from collections import defaultdict, deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
+from .mitre import technique as _mitre
 from .model import Alert, AlertType, Severity
 
 logger = logging.getLogger(__name__)
@@ -129,8 +130,8 @@ class AlertManager:
         # Dedup: {dedup_key → (first_seen_ts, count, original alert)}
         self._dedup: Dict[str, Tuple[float, int, Alert]] = {}
 
-        # Correlation: {src_ip → deque[(timestamp, rule_id)]}
-        self._corr_window: Dict[str, Deque[Tuple[float, str]]] = defaultdict(deque)
+        # Correlation: {src_ip → deque[(timestamp, rule_id, severity, technique, message)]}
+        self._corr_window: Dict[str, Deque[Tuple[Any, ...]]] = defaultdict(deque)
         self._corr_alerted: Dict[str, float] = {}  # src_ip → last correlation alert ts
         self._last_prune: float = time.time()
 
@@ -218,7 +219,7 @@ class AlertManager:
         # excluded: it describes this machine's own browsing (trackers, QUIC,
         # DoH …) and would otherwise brand the local host a "multi-vector
         # attacker" several times an hour.
-        if alert.src_ip and not (alert.rule_id or "").startswith("STEALTH-"):
+        if alert.src_ip and self._correlates(alert):
             corr = self._update_correlation(alert)
             if corr is not None:
                 self.total_emitted += 1
@@ -268,6 +269,25 @@ class AlertManager:
                     exc,
                 )
 
+    # Tags of alerts that describe the machine or its hygiene, not an attack step.
+    _NON_ATTACK_TAGS = frozenset({"policy", "host_risk", "new_program", "baseline", "new_device"})
+
+    def _correlates(self, alert: Alert) -> bool:
+        """
+        Does *alert* count as one vector of a multi-vector attack?
+
+        Left out: X-Ray privacy telemetry (STEALTH-*), which describes this
+        machine's own browsing; LOW-severity notes; hygiene findings (old TLS,
+        default SNMP community); and host baseline events (a new program, a
+        new device).  Three of those in two minutes is an ordinary afternoon,
+        not a coordinated attack.
+        """
+        if (alert.rule_id or "").startswith("STEALTH-"):
+            return False
+        if alert.severity < Severity.MEDIUM or alert.alert_type == AlertType.CORRELATION:
+            return False
+        return not self._NON_ATTACK_TAGS.intersection(alert.tags or ())
+
     def _update_correlation(self, alert: Alert) -> Optional[Alert]:
         """Track alerts per source and emit a correlation alert if warranted."""
         src = alert.src_ip
@@ -278,7 +298,8 @@ class AlertManager:
         while window and (now - window[0][0]) > self.correlation_window:
             window.popleft()
 
-        window.append((now, alert.rule_id or alert.alert_type.value))
+        window.append((now, alert.rule_id or alert.alert_type.value, alert.severity.value,
+                       alert.mitre_technique, alert.message))
 
         # Count distinct rule IDs in the window
         distinct_rules = {entry[1] for entry in window}
@@ -291,13 +312,28 @@ class AlertManager:
             return None
 
         self._corr_alerted[src] = now
+        # One line per contributing detection (the latest of each), oldest first,
+        # and the ATT&CK tactics they span: the outline of what happened.
+        latest: Dict[str, Tuple[Any, ...]] = {}
+        for entry in window:
+            latest[entry[1]] = entry
+        chain = [
+            {"time": e[0], "detection": e[1], "severity": e[2], "mitre": e[3], "message": e[4]}
+            for e in sorted(latest.values(), key=lambda e: e[0])
+        ]
+        tactics: List[str] = []
+        for e in chain:
+            info = _mitre(e["mitre"])
+            if info and info.get("tactic") and info["tactic"] not in tactics:
+                tactics.append(info["tactic"])
+        span = f" spanning {', '.join(tactics)}" if len(tactics) > 1 else ""
         return Alert(
             alert_type=AlertType.CORRELATION,
             severity=Severity.CRITICAL,
             message=(
                 f"Multi-vector attack from {src}: "
                 f"{len(distinct_rules)} distinct detection signatures "
-                f"in {self.correlation_window:.0f}s"
+                f"in {self.correlation_window:.0f}s{span}"
             ),
             src_ip=src,
             mitre_technique="T1036",
@@ -307,5 +343,7 @@ class AlertManager:
                 "distinct_signatures": sorted(distinct_rules),
                 "event_count": len(window),
                 "window_seconds": self.correlation_window,
+                "tactics": tactics,
+                "chain": chain,
             },
         )

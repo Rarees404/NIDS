@@ -36,7 +36,7 @@ from ..alerts.manager import AlertManager
 from ..alerts.model import Severity
 from ..alerts.outputs.sqlite_out import SQLiteOutput
 from ..config import DEFAULT_CONFIG, _deep_merge, load_config
-from ..engine import DetectionEngine
+from ..engine import BUILTIN_RULES, DetectionEngine
 from ..alerts.allowlist import Allowlist
 from ..detection.hostrisk import BaselineDetector, BaselineStore, C2Correlator, ProcessRiskDetector
 from ..enrich import Enricher, GeoResolver, HostnameCache, ProcessResolver
@@ -75,6 +75,10 @@ DAEMON_DEFAULTS: Dict[str, Any] = {
         "record_max_mb": 50,
         "record_files": 10,
         "retention_days": 30,   # delete stored alerts older than this (0 = keep forever)
+        # Signature rules: "builtin" (the tuned set shipped with PyNIDS), "none",
+        # or a path.  "rules.yaml" in the data directory is always merged on
+        # top, so single rules can be retuned or switched off there.
+        "rules": "builtin",
     },
     "notifications": {
         "enabled": True,
@@ -238,6 +242,23 @@ def build_config(options: DaemonOptions) -> Dict[str, Any]:
     return cfg
 
 
+def local_rules_path() -> Path:
+    """Optional per-machine rule overrides, merged over the main ruleset."""
+    return data_dir() / "rules.yaml"
+
+
+def rule_files(options: DaemonOptions, cfg: Dict[str, Any]) -> List[str]:
+    """Rule files to load, in merge order (later files override rules by id)."""
+    choice = str(options.rules or cfg["daemon"].get("rules") or "builtin").strip()
+    if choice.lower() in ("none", "off", "false", "no"):
+        return []
+    files = [str(BUILTIN_RULES) if choice.lower() == "builtin" else choice]
+    # Listed even when absent, so creating the file later is picked up by the
+    # periodic reload without a restart.
+    files.append(str(local_rules_path()))
+    return files
+
+
 def _build_intel(cfg: Dict[str, Any]) -> ThreatIntel:
     intel_cfg = cfg.get("intel", {})
     intel = ThreatIntel(
@@ -337,7 +358,7 @@ class Daemon:
         # --- Engine ---
         self.engine = DetectionEngine(
             config=self.cfg,
-            rules_path=options.rules,
+            rules_path=rule_files(options, self.cfg),
             intel=_build_intel(self.cfg),
             alert_manager=self.alerts,
             enricher=self.enricher,
@@ -411,6 +432,7 @@ class Daemon:
             workbench=self.workbench,
             emails=self.emails,
             set_notifications=self.set_notifications,
+            engine=self.engine,
         )
         self.server = make_server(self.api_ctx, dcfg["api_host"], int(dcfg["api_port"]))
 
@@ -428,6 +450,8 @@ class Daemon:
             "uptime": round(time.time() - self.started),
             "packets": stats["packets_processed"],
             "active_flows": stats["active_flows"],
+            "rules": stats.get("rules", 0),
+            "rule_problems": stats.get("rule_problems", 0),
             "process_attribution": bool(self.processes and self.processes.available),
             "attributed_sockets": self.processes.size if self.processes else 0,
             "geoip": bool(self.geo and self.geo.available),
@@ -562,6 +586,12 @@ class Daemon:
                 # Started by hand: move the capture over in place.
                 self._restart_capture()
 
+    def _reload_rules(self) -> None:
+        """Pick up edits to the rule files (a cheap stat when nothing changed)."""
+        if self.engine.reload_rules():
+            info = self.engine.rules()
+            self.live.broadcast("rules", {"count": len(info["rules"]), "problems": info["problems"]})
+
     def _maybe_refresh_feeds(self, refresh_s: float) -> None:
         # A feed that keeps failing leaves the cache "stale" forever;
         # don't re-download every feed every 10 minutes because of it.
@@ -583,6 +613,8 @@ class Daemon:
                 self._step("LAN refresh", self.lan.refresh)
             if self.blocker and tick % 15 == 0:
                 self._step("block expiry", self._expire_blocks)
+            if tick % 15 == 0:
+                self._step("rule reload", self._reload_rules)
             if tick % 10 == 0 and self.interfaces and self.cfg["daemon"]["interface"] == "auto":
                 self._step("interface check", self._follow_default_route)
             if refresh_s > 0 and tick % 300 == 0 and not self.paused:
