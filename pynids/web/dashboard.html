@@ -637,7 +637,7 @@ a.ext::after { content: " ↗"; }
   <section data-tab="email" id="tab-email"></section>
 
   <footer>
-    PyNIDS <span id="ver"></span> · <button class="link" id="keysBtn">Keyboard shortcuts</button> · <button class="link" id="checkUpdateBtn">Check for updates</button> · data stays on this Mac unless you look up an IP or ask Claude · IP geolocation by <a href="https://db-ip.com" rel="noreferrer">DB-IP</a>
+    PyNIDS <span id="ver"></span> · <button class="link" id="keysBtn">Keyboard shortcuts</button> · <button class="link" id="checkUpdateBtn">Check for updates</button> · data stays on this Mac, except reputation and owner lookups for indicators behind alerts (lookups.mode) and what you ask Claude · IP geolocation by <a href="https://db-ip.com" rel="noreferrer">DB-IP</a>
   </footer>
 </main>
 
@@ -671,7 +671,7 @@ const KIND_LABELS = {
 };
 const TABS = ["overview", "connections", "events", "detections", "flows", "apps", "network", "protection", "investigate", "email"];
 const state = {
-  summary: null, alerts: [], kind: null, sev: "LOW", q: "", range: "live", app: null, group: true, rule: null, mitre: null,
+  summary: null, alerts: [], kind: null, sev: "LOW", q: "", range: "live", app: null, group: true, rule: null, mitre: null, tactic: null,
   remotes: [], timeline: [], rates: null, world: null, openAlert: null, tab: "overview",
   conns: null, connFilter: "internet", connQ: "", devices: null, nmap: false, allow: [], launch: null,
 };
@@ -1472,6 +1472,7 @@ function dossierView(d) {
         conn.length ? el("div", { class: "section" }, el("h4", { text: "Connected right now" }),
           table(["App", "Port", "State"], conn.map((c) => el("tr", {}, el("td", {}, progLink(c.app, c.exe)), el("td", { text: `${c.proto}/${c.remote_port}` }), el("td", { class: "muted", text: c.state || "" }))), { cls: "minitable" })) : null,
         el("h4", { text: "Owner & reputation" }), ...ext,
+        L.scope === "internet" && typeof reputationBox === "function" ? reputationBox(d.ip.includes(":") ? "ipv6" : "ipv4", d.ip) : null,
         alerts.length ? el("div", { class: "section" }, el("h4", { text: "Alerts involving this IP" }),
           el("div", {}, alerts.map((x) => el("div", { style: "font-size:12.5px;padding:3px 0;display:flex;gap:8px;align-items:center" }, sevBadge(x.severity), el("button", { class: "link", onclick: () => openAlertById(x.alert_id) }, x.message.slice(0, 100)), el("span", { class: "muted", text: fmtAgo(x.timestamp) }))))) : null,
       ].filter(Boolean);
@@ -1515,6 +1516,8 @@ function programView(p) {
         ["First used the network", p.first_network_use ? new Date(p.first_network_use * 1000).toLocaleString() : null],
         ["Usual countries", (p.usual_countries || []).join(", ")],
       ]),
+      p.sha256 && typeof reputationBox === "function" ? el("h4", { text: "Is this file known malware?" }) : null,
+      p.sha256 && typeof reputationBox === "function" ? reputationBox("sha256", p.sha256, { label: "SHA-256 " + p.sha256.slice(0, 16) + "…" }) : null,
       el("h4", { text: "Starts automatically" }),
       (p.launchd || []).length ? table(["Launch item", "Runs"], p.launchd.map((j) => el("tr", {},
         el("td", {}, el("div", { text: j.label }), el("div", { class: "path", text: j.plist })),
@@ -1734,6 +1737,7 @@ function renderKindFilters() {
   if (state.app) wrap.append(el("button", { class: "filter-chip", "aria-pressed": "true", onclick: () => { state.app = null; loadAlerts(); } }, "App: " + state.app + " ✕"));
   if (state.rule) wrap.append(el("button", { class: "filter-chip", "aria-pressed": "true", onclick: () => { state.rule = null; loadAlerts(); } }, "Rule: " + state.rule + " ✕"));
   if (state.mitre) wrap.append(el("button", { class: "filter-chip", "aria-pressed": "true", onclick: () => { state.mitre = null; loadAlerts(); } }, "ATT&CK: " + state.mitre + " ✕"));
+  if (state.tactic) wrap.append(el("button", { class: "filter-chip", "aria-pressed": "true", onclick: () => { state.tactic = null; loadAlerts(); } }, "Tactic: " + state.tactic + " ✕"));
 }
 function setKind(k) { state.kind = k; renderKindFilters(); loadAlerts(); }
 function alertMatches(a) {
@@ -1742,6 +1746,7 @@ function alertMatches(a) {
   if (state.app && (a.context || {}).app !== state.app) return false;
   if (state.rule && a.rule_id !== state.rule) return false;
   if (state.mitre && a.mitre_technique !== state.mitre) return false;
+  if (state.tactic && ((a.mitre && a.mitre.tactic) || (a.mitre_technique ? "Other" : "")) !== state.tactic) return false;
   if (state.q) {
     const hay = [a.message, a.src_ip, a.dst_ip, (a.context || {}).app, (a.context || {}).remote_host, (a.context || {}).remote_ip, a.rule_id].join(" ").toLowerCase();
     if (!state.q.toLowerCase().split(/\s+/).every((w) => hay.includes(w))) return false;
@@ -1756,6 +1761,7 @@ async function loadAlerts() {
   if (state.app) params.set("app", state.app);
   if (state.rule) params.set("rule", state.rule);
   if (state.mitre) params.set("mitre", state.mitre);
+  if (state.tactic) params.set("tactic", state.tactic);
   if (state.range !== "live") params.set("since", String(Date.now() / 1000 - Number(state.range)));
   else if (state.summary) params.set("since", String(Date.now() / 1000 - state.summary.uptime - 5));
   // Filters change faster than queries return: only the newest request may paint.
@@ -1796,6 +1802,7 @@ function exportParams() {
   if (state.app) params.set("app", state.app);
   if (state.rule) params.set("rule", state.rule);
   if (state.mitre) params.set("mitre", state.mitre);
+  if (state.tactic) params.set("tactic", state.tactic);
   if (state.range !== "live") params.set("since", String(Math.floor(Date.now() / 1000 - Number(state.range))));
   else if (state.summary) params.set("since", String(Math.floor(Date.now() / 1000 - state.summary.uptime - 5)));
   return params;
@@ -2154,5 +2161,6 @@ if (document.readyState === "loading") document.addEventListener("DOMContentLoad
 <script src="/static/soc.js"></script>
 <script src="/static/mail.js"></script>
 <script src="/static/ops.js"></script>
+<script src="/static/incidents.js"></script>
 </body>
 </html>

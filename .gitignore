@@ -19,6 +19,16 @@ macos/build.noindex/
 .env.*
 *anthropic-key*
 api-token
+soc-keys.json
+evidence/
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+.netrc
+.pypirc
 sslkeys*.log
 *keylog*.log
 *.pcap

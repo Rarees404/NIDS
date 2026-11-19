@@ -126,6 +126,7 @@ class Source:
     external = True                 # sends the indicator to a third party
     ttl = 6 * 3600                  # cache lifetime in seconds
     per_minute: Optional[int] = None  # rate limit of the free tier
+    per_day: Optional[int] = None     # daily quota of the free tier (automatic checks stay below it)
 
     def supports(self, ioc: Ioc) -> bool:
         return ioc.type in self.types
@@ -139,7 +140,7 @@ class Source:
             "homepage": self.homepage, "types": list(self.types), "key": self.key,
             "key_optional": self.key_optional, "key_help": self.key_help,
             "configured": configured or not self.key, "active": self.active,
-            "per_minute": self.per_minute,
+            "per_minute": self.per_minute, "per_day": self.per_day,
         }
 
     # --- helpers --------------------------------------------------------

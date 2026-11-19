@@ -20,7 +20,7 @@ import time
 from collections import Counter, OrderedDict, deque
 from typing import Any, Deque, Dict, List, Optional
 
-from ..alerts.classify import KIND_LABELS, KINDS, classify
+from ..alerts.classify import KIND_LABELS, KINDS, classify, detector_label
 from ..alerts.guide import describe
 from ..alerts.manager import BaseOutput
 from ..alerts.mitre import TACTICS, technique
@@ -227,6 +227,7 @@ class LiveState(BaseOutput):
         techniques.sort(key=lambda t: -t["count"])
         order = {name: i for i, name in enumerate(TACTICS)}
         return {
+            "since": self.started,
             "tactics": [{"tactic": t, "count": c} for t, c in
                         sorted(tactics.items(), key=lambda kv: order.get(kv[0], 99))],
             "tactic_order": list(TACTICS),
@@ -376,13 +377,7 @@ class LiveState(BaseOutput):
 
 def _detector_label(alert: Alert) -> str:
     """A stable name for alerts that carry no rule id (built-in detectors)."""
-    tags = alert.tags or []
-    for tag in ("beaconing", "dga", "dns_tunneling", "brute_force", "host_sweep", "vertical_scan",
-                "volumetric", "sqli", "xss", "path_traversal", "scanner", "exfiltration",
-                "correlation", "threat_intel"):
-        if tag in tags:
-            return "detector:" + tag
-    return "detector:" + (tags[0] if tags else alert.alert_type.value)
+    return detector_label(alert.tags or [], alert.alert_type.value)
 
 
 def _brief(alert: Dict[str, Any]) -> Dict[str, Any]:

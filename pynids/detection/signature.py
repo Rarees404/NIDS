@@ -149,6 +149,8 @@ def _flow_field(name: str, flow: Optional[Flow], meta: dict) -> Any:
         return getattr(flow.state, "value", flow.state)
     if name == "initiator":
         return flow.src_ip
+    if name == "app_proto":
+        return flow.app_proto
     return None
 
 

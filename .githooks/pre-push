@@ -1,0 +1,16 @@
+#!/bin/sh
+# Second line of defence: scan every commit that is about to leave this machine,
+# including ones made with `git commit --no-verify` or before the hooks existed.
+root=$(git rev-parse --show-toplevel) || exit 1
+zero=0000000000000000000000000000000000000000
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue          # deleting a remote branch
+    if [ "$remote_sha" = "$zero" ]; then
+        # New branch: everything the remote doesn't already have.
+        python3 "$root/scripts/check_secrets.py" --range "$local_sha" --not --remotes || status=1
+    else
+        python3 "$root/scripts/check_secrets.py" --range "$remote_sha..$local_sha" || status=1
+    fi
+done
+exit $status

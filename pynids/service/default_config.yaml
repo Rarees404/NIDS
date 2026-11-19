@@ -51,6 +51,19 @@ lookups:
   #   manual — only when you click "Look up" in the dashboard or run `pynids lookup`
   mode: alerts
   min_severity: MEDIUM
+  # Reputation: ask VirusTotal, AbuseIPDB, AlienVault OTX, GreyNoise and abuse.ch
+  # (URLhaus, ThreatFox, MalwareBazaar) about the IPs, domains, URLs and program
+  # hashes behind alerts, following "mode" above.  Sources that need an API key
+  # stay unused until you add one (dashboard → Investigate → Sources & keys).
+  # A confirmed-malicious answer raises a
+  # threat-intel alert.  Only the SHA-256 of a program is sent, never the file.
+  reputation: true
+  reputation_sources: []   # e.g. [virustotal, abuseipdb]; empty = all of them
+  reputation_per_hour: 60  # indicators checked automatically per hour, at most
+
+incidents:
+  gap_minutes: 30          # alerts about one address / domain / program stay in the
+                           # same incident until it has been quiet this long
 
 updates:
   # Check GitHub for new commits; the dashboard / menu bar app shows an

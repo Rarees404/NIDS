@@ -57,6 +57,20 @@ def classify_parts(rule_id: str, tags: Iterable[str], alert_type: str) -> str:
     return "other"
 
 
+_DETECTOR_TAGS = ("beaconing", "dga", "dns_tunneling", "brute_force", "host_sweep", "vertical_scan",
+                  "volumetric", "sqli", "xss", "path_traversal", "scanner", "exfiltration",
+                  "correlation", "threat_intel")
+
+
+def detector_label(tags: Iterable[str], alert_type: str) -> str:
+    """A stable name (``detector:<what>``) for alerts that carry no rule id."""
+    tags = list(tags or ())
+    for tag in _DETECTOR_TAGS:
+        if tag in tags:
+            return "detector:" + tag
+    return "detector:" + (tags[0] if tags else alert_type)
+
+
 def classify(alert: Union[Alert, Dict[str, Any]]) -> str:
     if isinstance(alert, Alert):
         return classify_parts(alert.rule_id or "", alert.tags, alert.alert_type.value)

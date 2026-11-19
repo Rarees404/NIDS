@@ -31,7 +31,7 @@ function pivotEvents(what) {
   const f = typeof what === "string" ? { q: what } : (what || {});
   state.q = f.q || ""; $("search").value = state.q;
   state.kind = f.kind || null; state.app = null;
-  state.rule = f.rule || null; state.mitre = f.mitre || null;
+  state.rule = f.rule || null; state.mitre = f.mitre || null; state.tactic = f.tactic || null;
   state.range = "86400"; $("rangeFilter").value = "86400";
   if (typeof closeDrawer === "function") closeDrawer();
   go("events"); loadAlerts();
@@ -106,6 +106,7 @@ function alertExtras(a) {
   if (a.flow_id) pivots.push(el("button", { class: "btn", onclick: () => { closeDrawer(); OPS.flowQ = remote || a.dst_ip || ""; go("flows"); } }, "Show in Flows"));
   pivots.push(el("button", { class: "btn", onclick: () => copyText(JSON.stringify(a, (k, v) => (k === "about" ? undefined : v), 2), "alert JSON") }, "Copy JSON"));
   out.push(el("h4", { text: "Pivot" }), el("div", { class: "actions", style: "margin-top:0" }, pivots));
+  if (typeof alertIncidentExtras === "function") out.unshift(...alertIncidentExtras(a));
   return out;
 }
 
@@ -119,18 +120,19 @@ function detectionsRoot() {
       el("h1", { text: "Detections" }), el("span", { class: "sub", id: "detSub", text: "what fired this session, mapped to MITRE ATT&CK" }),
       el("div", { class: "right" }, el("button", { class: "btn", onclick: () => loadDetections() }, icon("i-refresh"), "Refresh"))),
     el("div", { class: "grid kpis", id: "detKpis", style: "grid-template-columns:repeat(auto-fit,minmax(170px,1fr))" }),
+    typeof incidentsCard === "function" ? incidentsCard() : null,
     el("div", { class: "grid row-1" }, el("div", { class: "card" },
-      el("div", { class: "card-head" }, el("h2", { text: "ATT&CK tactics" }), el("span", { class: "sub", text: "kill-chain order · alerts per tactic" })),
+      el("div", { class: "card-head" }, el("h2", { text: "ATT&CK tactics" }), el("span", { class: "sub", text: "kill-chain order · alerts per tactic · click a tactic to see its incidents and alerts" })),
       el("div", { class: "card-body" }, el("div", { class: "tactics", id: "detTactics" })))),
     el("div", { class: "grid row-2" },
       el("div", { class: "card" },
-        el("div", { class: "card-head" }, el("h2", { text: "Techniques seen" }), el("span", { class: "sub", text: "click an id for the ATT&CK page" })),
+        el("div", { class: "card-head" }, el("h2", { text: "Techniques seen" }), el("span", { class: "sub", text: "click a row for its alerts, an id for the ATT&CK page" })),
         el("div", { class: "card-body table-wrap", id: "detTechniques" })),
       el("div", { class: "card" },
         el("div", { class: "card-head" }, el("h2", { text: "Top offenders" }), el("span", { class: "sub", text: "addresses behind threat, attack and host alerts" })),
         el("div", { class: "card-body table-wrap", id: "detSources" }))),
     el("div", { class: "grid row-1" }, el("div", { class: "card" },
-      el("div", { class: "card-head" }, el("h2", { text: "What fired" }), el("span", { class: "sub", text: "every rule and detector with at least one alert · click to see its events" })),
+      el("div", { class: "card-head" }, el("h2", { text: "What fired" }), el("span", { class: "sub", text: "every rule and detector with at least one alert · click one for its incidents and alerts" })),
       el("div", { class: "card-body table-wrap", id: "detFired" }))),
     el("div", { class: "grid row-1" }, el("div", { class: "card" },
       el("div", { class: "card-head" }, el("h2", { text: "Signature rules" }), el("span", { class: "sub", id: "rulesSub" })),
@@ -151,6 +153,7 @@ async function loadDetectionsNow() {
     return;
   }
   renderDetections(); renderRules();
+  if (typeof loadIncidents === "function") loadIncidents();
 }
 function renderDetections() {
   const d = OPS.det; if (!d) return;
@@ -172,18 +175,20 @@ function renderDetections() {
   const maxT = Math.max(1, ...byTactic.values());
   $("detTactics").replaceChildren(...order.map((name) => {
     const n = byTactic.get(name) || 0;
-    return el("div", { class: "tactic" + (n ? " hit" : ""), title: n ? `${n} alert${n === 1 ? "" : "s"} mapped to ${name}` : "No alerts mapped to " + name },
+    const open = () => openAlertSet({ tactic: name });
+    return el(n ? "button" : "div", { class: "tactic" + (n ? " hit" : ""), type: n ? "button" : null, onclick: n ? open : null,
+      title: n ? `${n} alert${n === 1 ? "" : "s"} mapped to ${name} — click to see every incident and alert` : "No alerts mapped to " + name },
       el("div", { class: "name", text: name }), el("div", { class: "n", text: n ? fmtNum(n) : "·" }),
       n ? el("div", { class: "heat", style: `width:${Math.max(6, (n / maxT) * 100).toFixed(0)}%` }) : null);
   }));
 
   const tech = d.techniques || [];
   $("detTechniques").replaceChildren(tech.length ? table(["Technique", "Name", "Tactic", { label: "Alerts", num: true }],
-    tech.map((t) => el("tr", {},
-      el("td", {}, safeHref(t.url) ? el("a", { href: safeHref(t.url), target: "_blank", rel: "noreferrer noopener", class: "mono ext", text: t.id }) : el("span", { class: "mono", text: t.id })),
+    tech.map((t) => el("tr", { class: "clickable", onclick: () => openAlertSet({ mitre: t.id, title: t.id + (t.name ? " · " + t.name : "") }) },
+      el("td", {}, safeHref(t.url) ? el("a", { href: safeHref(t.url), target: "_blank", rel: "noreferrer noopener", class: "mono ext", text: t.id, onclick: (e) => e.stopPropagation() }) : el("span", { class: "mono", text: t.id })),
       el("td", { text: t.name || "—" }),
       el("td", { class: "muted", text: t.tactic || "—" }),
-      el("td", { class: "num" }, el("button", { class: "link", title: "Show these events", onclick: () => pivotEvents({ mitre: t.id }) }, fmtNum(t.count))))))
+      el("td", { class: "num", text: fmtNum(t.count) }))))
     : emptyBox("No alert carried an ATT&CK technique yet."));
 
   const src = d.sources || [];
@@ -200,7 +205,7 @@ function renderDetections() {
   $("detFired").replaceChildren(fired.length ? table(["Detection", "Type", "Worst", "ATT&CK", { label: "Alerts", num: true }, "Last seen", "Latest example"],
     fired.map((x) => {
       const builtin = x.name.startsWith("detector:");
-      return el("tr", { class: "clickable", onclick: () => pivotEvents(builtin ? { kind: x.kind } : { rule: x.name }) },
+      return el("tr", { class: "clickable", onclick: () => openAlertSet(builtin ? { detector: x.name.replace(/^detector:/, ""), kind: x.kind } : { rule: x.name }) },
         el("td", { class: "mono", text: x.name.replace(/^detector:/, "") }),
         el("td", { class: "muted", text: builtin ? "built-in detector" : x.type.replace("_", " ") }),
         el("td", {}, sevBadge(x.severity)),

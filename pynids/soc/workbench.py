@@ -261,10 +261,24 @@ class Workbench:
             self._remember(iocs[0])
         return {"input": text, "iocs": out, "single": len(iocs) == 1}
 
+    def stored(self, source: str, kind: str, value: str) -> Optional[Dict[str, Any]]:
+        """The last answer *source* gave for an indicator, however old — never a new request."""
+        if not self.db_path:
+            return None
+        try:
+            conn = self._conn()
+            row = conn.execute("SELECT data FROM soc_lookups WHERE source=? AND kind=? AND value=?",
+                               (source, kind, value)).fetchone()
+            conn.close()
+            return json.loads(row["data"]) if row else None
+        except (sqlite3.Error, ValueError):
+            return None
+
     def lookup(self, source: str, kind: str, value: str, refresh: bool = False,
-               send_query: bool = False) -> Dict[str, Any]:
+               send_query: bool = False, remember: bool = True) -> Dict[str, Any]:
         """Run one source.  Indicators that only mean something on this network are never sent
-        out, and a URL goes out without its query string and fragment unless *send_query*."""
+        out, and a URL goes out without its query string and fragment unless *send_query*.
+        *remember* = False keeps the lookup out of the analyst's history (automatic checks)."""
         src = self.sources.get(source)
         if src is None:
             raise KeyError(f"unknown source: {source}")
@@ -312,7 +326,7 @@ class Workbench:
             res.message = "looked up without the query string (it often carries tokens or the recipient's address)"
         data = {**res.to_dict(), **extra}
         self._store(src, sent, data)
-        if res.status == "ok":
+        if res.status == "ok" and remember:
             self._remember(ioc, res.verdict)
         return data
 

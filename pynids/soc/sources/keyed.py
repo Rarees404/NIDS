@@ -19,6 +19,7 @@ class VirusTotal(Source):
     key = "virustotal"
     key_help = "Free key: sign up at https://www.virustotal.com, then Profile → API key (4 lookups/min)"
     per_minute = 4
+    per_day = 500
 
     def query(self, ioc: Ioc, ctx: Ctx) -> Result:
         if ioc.type in IPS and not is_public_ip(ioc.value):
@@ -96,6 +97,7 @@ class AbuseIpDb(Source):
     types = IPS
     key = "abuseipdb"
     key_help = "Free key: https://www.abuseipdb.com/register, then Account → API (1,000 checks/day)"
+    per_day = 1000
 
     def query(self, ioc: Ioc, ctx: Ctx) -> Result:
         if not is_public_ip(ioc.value):

@@ -50,7 +50,7 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .. import __version__
-from ..alerts.classify import classify
+from ..alerts.classify import classify, detector_label
 from ..alerts.guide import describe
 from ..alerts.mitre import technique as mitre_technique
 from .live import LiveState, _brief
@@ -139,6 +139,8 @@ class ServiceContext:
         emails: Any = None,
         set_notifications: Optional[Callable[[bool], bool]] = None,
         engine: Any = None,
+        incidents: Any = None,
+        reputation: Any = None,
     ) -> None:
         self.live = live
         self.token = token
@@ -159,6 +161,8 @@ class ServiceContext:
         self.emails = emails
         self.set_notifications = set_notifications
         self.engine = engine
+        self.incidents = incidents
+        self.reputation = reputation
         self._widget_lock = threading.Lock()
         self._widget_cache: Optional[tuple] = None  # (monotonic time, payload)
         self._explain_lock = threading.Lock()
@@ -424,9 +428,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._blocks(method, path)
         elif method == "POST" and path.startswith("/api/explain/"):
             self._explain(unquote(path[len("/api/explain/"):]))
+        elif path == "/api/incidents" or path.startswith("/api/incidents/"):
+            self._incidents(method, path, query)
+        elif path == "/api/reputation":
+            self._reputation(method, query)
         elif method == "GET" and path.startswith("/api/alerts/"):
             alert = ctx.find_alert(unquote(path[len("/api/alerts/"):]))
             if alert:
+                if ctx.incidents is not None:
+                    alert = {**alert, "incident_id": ctx.incidents.incident_of(alert["alert_id"])}
                 self._send_json(alert)
             else:
                 self._error(HTTPStatus.NOT_FOUND, "alert not found")
@@ -581,13 +591,30 @@ class _Handler(BaseHTTPRequestHandler):
         limit = _num(query, "limit", 200, lo=1, hi=1000)
         kind = q1("kind")
         conn = self.ctx.db()
-        rule, mitre = q1("rule"), q1("mitre")
+        rule, mitre, tactic = q1("rule"), q1("mitre"), (q1("tactic") or "").strip()
+        # Built-in detectors carry no rule id: "detector=beaconing" selects them by their label.
+        detector = (q1("detector") or "").strip()
+        if detector and not detector.startswith("detector:"):
+            detector = "detector:" + detector
+
+        def by_detector(a: Dict[str, Any]) -> bool:
+            return not a.get("rule_id") and detector_label(a.get("tags") or (), a.get("alert_type") or "") == detector
+
+        def in_tactic(technique_id: Optional[str]) -> bool:
+            if not technique_id:
+                return False
+            info = mitre_technique(technique_id) or {}
+            return (info.get("tactic") or "Other").lower() == tactic.lower()
+
         if conn is None:
-            rows = self.ctx.live.recent_alerts(limit=limit if not (kind or rule or mitre) else 1000)
+            rows = self.ctx.live.recent_alerts(
+                limit=limit if not (kind or rule or mitre or tactic or detector) else 1000)
             return [r for r in rows
                     if (not kind or r.get("kind") == kind)
+                    and (not detector or by_detector(r))
                     and (not rule or r.get("rule_id") == rule)
-                    and (not mitre or r.get("mitre_technique") == mitre)][:limit]
+                    and (not mitre or r.get("mitre_technique") == mitre)
+                    and (not tactic or in_tactic(r.get("mitre_technique")))][:limit]
         clauses, params = [], []
         min_sev = (q1("min_severity") or "LOW").upper()
         if _SEV_NUM.get(min_sev, 1) > 1:
@@ -610,13 +637,18 @@ class _Handler(BaseHTTPRequestHandler):
         if mitre:
             clauses.append("mitre_technique = ?")
             params.append(mitre)
+        if detector:
+            clauses.append("(rule_id IS NULL OR rule_id = '')")
+        if tactic:
+            # Sub-techniques inherit the tactic of their parent, so match on the parent id too.
+            clauses.append("mitre_technique IS NOT NULL AND mitre_technique != ''")
         if q1("q"):
             fts = _fts_query(q1("q"))
             if fts:
                 clauses.append("rowid IN (SELECT rowid FROM alerts_fts WHERE alerts_fts MATCH ?)")
                 params.append(fts)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        fetch = limit if not kind else min(limit * 10, 5000)
+        fetch = limit if not (kind or tactic or detector) else min(limit * 10, 5000)
         try:
             rows = conn.execute(
                 f"SELECT * FROM alerts {where} ORDER BY timestamp DESC LIMIT ?",
@@ -630,6 +662,10 @@ class _Handler(BaseHTTPRequestHandler):
         out = [_row_to_alert(r) for r in rows]
         if kind:
             out = [a for a in out if a["kind"] == kind]
+        if tactic:
+            out = [a for a in out if in_tactic(a.get("mitre_technique"))]
+        if detector:
+            out = [a for a in out if by_detector(a)]
         return out[:limit]
 
     def _flows(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
@@ -1011,6 +1047,72 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"name": name, "configured": wb.keys.configured(name)})
             else:
                 self._error(HTTPStatus.NOT_FOUND, "not found")
+        else:
+            self._error(HTTPStatus.NOT_FOUND, "not found")
+
+    def _incidents(self, method: str, path: str, query: Dict[str, List[str]]) -> None:
+        tracker = self.ctx.incidents
+        if tracker is None:
+            self._error(HTTPStatus.NOT_IMPLEMENTED, "incident tracking is unavailable")
+            return
+        q1 = lambda name: (query.get(name) or [None])[0]  # noqa: E731
+        if path == "/api/incidents":
+            if method != "GET":
+                self._error(HTTPStatus.NOT_FOUND, "not found")
+                return
+            self._send_json(tracker.list(
+                since=_num(query, "since", cast=float), until=_num(query, "until", cast=float),
+                status=q1("status"), min_severity=q1("min_severity") or "LOW", tactic=q1("tactic"),
+                technique_id=q1("technique"), rule=q1("rule"), entity=q1("entity"),
+                limit=_num(query, "limit", 100, lo=1, hi=500)))
+            return
+        incident_id = unquote(path[len("/api/incidents/"):])
+        if method == "POST":
+            body = self._body()
+            status = body.get("status")
+            note = body.get("note")
+            try:
+                found = tracker.update(incident_id, status=str(status) if status is not None else None,
+                                       note=str(note) if note is not None else None)
+            except ValueError as exc:
+                raise _BadRequest(str(exc)) from None
+            if not found:
+                self._error(HTTPStatus.NOT_FOUND, "incident not found")
+                return
+        elif method != "GET":
+            self._error(HTTPStatus.NOT_FOUND, "not found")
+            return
+        incident = tracker.get(incident_id)
+        if incident is None:
+            self._error(HTTPStatus.NOT_FOUND, "incident not found")
+            return
+        rep = self.ctx.reputation
+        if rep is not None:
+            # What is already known about each indicator — no request leaves the machine here.
+            for ioc in incident["iocs"]:
+                if ioc["public"]:
+                    ioc["reputation"] = rep.summary(ioc["type"], ioc["value"])
+            incident["reputation_status"] = rep.status()
+        self._send_json(incident)
+
+    def _reputation(self, method: str, query: Dict[str, List[str]]) -> None:
+        rep = self.ctx.reputation
+        if rep is None:
+            self._error(HTTPStatus.NOT_IMPLEMENTED, "reputation checks are unavailable")
+            return
+        if method == "GET":
+            kind = (query.get("type") or [""])[0]
+            value = (query.get("value") or [""])[0]
+            if not value:
+                self._send_json(rep.status())
+            else:
+                self._send_json(rep.summary(kind, value))
+        elif method == "POST":
+            body = self._body()
+            value = str(body.get("value") or "")[:4000]
+            if not value:
+                raise _BadRequest("value is required")
+            self._send_json(rep.check(str(body.get("type") or ""), value, refresh=bool(body.get("refresh"))))
         else:
             self._error(HTTPStatus.NOT_FOUND, "not found")
 

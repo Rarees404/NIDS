@@ -79,6 +79,8 @@ walkthrough, with what each step does and how to check it worked, is in
 | **Attacks & anomalies** | Port scans and host sweeps, brute force (SSH, RDP, VNC, mail …), SQL injection / XSS / path traversal, DNS tunnelling, C2 beaconing, large uploads, unsolicited traffic floods, DGA-style bursts of failed DNS lookups, and 55 tuned, MITRE-tagged signature rules (exploits, reverse shells, cleartext credentials, exposed services, C2 and tunnelling, crypto-mining, amplification) |
 | **Live threat intelligence** | Every IP, DNS name, and TLS/QUIC hostname is checked against abuse.ch Feodo (botnet C2) and URLhaus (malware), Spamhaus DROP, and Tor exit lists, refreshed every 6 hours |
 | **Correlation** | Several different attack signatures from one source become a single CRITICAL "multi-vector attack" alert that lists the contributing detections in order and the ATT&CK tactics they span. Low-severity notes, hygiene findings and baseline events don't count |
+| **Incidents** | Alerts about the same address, domain or program are kept together as one incident: a timeline, the ATT&CK tactics it spans, every indicator involved, and a status (open, acknowledged, closed) with your notes. One port scan is one row, not forty |
+| **Automatic reputation** | The IPs, domains, URLs and program hashes behind notable alerts are checked with VirusTotal, AbuseIPDB, AlienVault OTX, GreyNoise and abuse.ch as soon as you add a free API key for them. A confirmed-malicious answer raises its own HIGH or CRITICAL alert. Only the SHA-256 of a program is sent, never the file |
 | **Connection tracking** | Every flow is followed both ways: who really opened it (even when capture starts mid-conversation), how it ended (open, no answer, refused, reset, closed), bytes and packets in each direction, and the TCP flag history. These facts are attached to every alert |
 | **Untrusted programs** | Every program that reaches the internet has its code signature checked (Apple, App Store, Developer ID, ad-hoc, unsigned, or tampered) and its location judged (`/tmp`, hidden folders, `/Users/Shared`, Downloads …). Homebrew, pip, npm and other dev-tool locations are recognised, so ordinary developer tools stay quiet |
 | **Likely command-and-control** | One CRITICAL alert when independent signals line up for the same program and server: regular check-ins, a bare IP never looked up in DNS, a blocklist hit, an untrusted binary, a brand-new program, or a server Shodan tags as C2 |
@@ -326,7 +328,7 @@ pynids pcap --file capture.pcap                 # analyse a capture file
 | **Overview** | **Needs your attention**: the few things worth a look right now (serious alerts from the last hour, untrusted programs, exposed ports, new devices), or "All clear". **Ask Claude**. Then the counters, live throughput, events per minute, and events by kind |
 | **Connections** | Every program with an open socket, riskiest first, with its signature and flags; every live connection (app, remote host, country, network owner, signature, alerts), filterable by Internet / Flagged / All; and **What's exposed**: listening ports and who can reach them. Click a program for its verified signature, SHA-256 (with a VirusTotal link), the launch items that start it, and its sockets |
 | **Events** | Live stream you can filter by kind, severity, and time range, with full-text search. Similar events are grouped (×N) and the current selection downloads as JSON lines or CSV. Click one to see **What this means** and what to do, the app and program, the connection's state and traffic, **why the rule matched** (the fields and values that triggered it), the payload excerpt, the MITRE technique with a link, **Explain with Claude**, **Block IP**, **Mark as expected**, and pivots: all events for that address, the same rule, the same technique, or the flow itself |
-| **Detections** | What fired this session, mapped to MITRE ATT&CK: a tactic strip in kill-chain order, the techniques seen, every rule and detector with its alert count, the addresses behind the most alerts, and the full signature ruleset with hit counts and load errors. Every count is a link to the matching events |
+| **Detections** | **Incidents** first: related alerts grouped per address, domain or program, most urgent on top; click one for its timeline, ATT&CK path, indicators with reputation, triage status and notes. Below that, what fired this session mapped to MITRE ATT&CK: a tactic strip in kill-chain order, the techniques seen, every rule and detector with its alert count, the addresses behind the most alerts, and the full signature ruleset with hit counts and load errors. Every tactic tile, technique and detection opens the incidents and alerts behind it |
 | **Flows** | The live connection table as seen on the wire: client → server, service and server name, owning app, state (open, no answer, refused, reset, closed) with TCP flag history, packets, bytes each way and duration. Filter by text or state, sort by recency, data, duration or packets |
 | **Apps** | Each app's upload and download, endpoints, alerts, hosts and countries. Click an app for its hosts, countries, remote IPs and learned "usual countries" |
 | **Network** | World map of every remote endpoint (click a dot for its IP dossier) and the devices on your LAN, with optional nmap scans |
@@ -342,6 +344,16 @@ the event stream, `Enter` opens the focused event, and `Esc` closes the drawer.
 Every IP address anywhere in the dashboard is clickable and opens its dossier. The IP
 dossier and every alert also have an **Investigate** button that opens the indicator in
 the workbench.
+
+### Working an incident: a walkthrough
+
+1. Open **Detections**. The **Incidents** table lists every group of related alerts, most urgent first. The filter above it switches between this session, 24 hours, 7 and 30 days, and between active and closed incidents.
+2. Or start from the ATT&CK strip: click **Credential Access**, **Command and Control** or any other lit tactic to see every incident and every alert mapped to it. Techniques and the rows of **What fired** open the same view.
+3. Click an incident. The drawer shows what happened in one sentence, the ATT&CK path, the apps and programs involved, and the **timeline** of every alert. Click an alert for its evidence (matched rule conditions, payload, connection state); the back arrow returns to the incident.
+4. **Indicators** lists each IP, domain, URL and hash the alerts mention, with what the reputation sources say. **Check** asks them now; internal addresses are marked and never sent.
+5. Decide: **Block** the address, **Acknowledge** while you look into it, or **Close** when it is handled or harmless (new alerts about the same subject then open a new incident). Notes are saved with the incident, and **Copy report** puts a Markdown summary on the clipboard.
+
+Incidents survive restarts and follow `daemon.retention_days`, like the alerts they are made of.
 
 ### Investigating an indicator: a walkthrough
 
@@ -537,14 +549,15 @@ every rule with its hit count.
 | Prefix | Covers | Examples |
 |---|---|---|
 | `SIG-REC-*` | Reconnaissance | Xmas / null scan packets, lookups of what-is-my-IP services, frequently abused top-level domains |
-| `SIG-EXP-*` | Exploitation | Shellshock, Log4Shell (including obfuscated forms), Spring4Shell, SMBv1 negotiation, probes for `.env` / `.git` / key files, shell command injection, known IoT and web RCE paths |
-| `SIG-EXE-*` | Shells on the wire | bash / netcat / Python reverse shells, PowerShell download cradles, a Windows prompt banner or `uid=0(root)` inside a TCP stream |
-| `SIG-CRED-*` | Credentials in cleartext | FTP, Telnet, HTTP Basic, password form posts, mail logins without TLS, NTLM or SMB offered to an internet host |
+| `SIG-EXP-*` | Exploitation | Shellshock, Log4Shell (including obfuscated forms), Spring4Shell, SMBv1 negotiation, probes for `.env` / `.git` / key files, shell command injection, known IoT and web RCE paths, exploit paths for VPN gateways and edge appliances (Fortinet, Citrix, Ivanti, F5, Exchange ProxyShell), OGNL injection (Struts, Confluence), PHP-CGI argument injection, commands sent to a web shell, SSRF aimed at the cloud metadata service, out-of-band callback domains (interactsh, Burp Collaborator) |
+| `SIG-EXE-*` | Shells on the wire | bash / netcat / Python reverse shells, PowerShell download cradles, a Windows prompt banner or `uid=0(root)` inside a TCP stream, `curl … \| sh` and `wget …; chmod +x` download-and-run one-liners, `osascript` password-prompt and shell commands (macOS stealers) |
+| `SIG-CRED-*` | Credentials in cleartext | FTP, Telnet, HTTP Basic, password form posts, mail logins without TLS, NTLM or SMB offered to an internet host; LDAP simple binds, API keys and tokens in a cleartext URL, AWS keys / GitHub and Slack tokens / private keys leaving for the internet unencrypted |
 | `SIG-LAT-*` | Remote access and exposure | SMB, RDP, SSH, VNC, WinRM, or a database / admin port reached from the internet; PsExec-style service execution |
-| `SIG-C2-*` | Command and control | IRC, legacy Internet Explorer user-agents, `.onion` lookups, dynamic DNS, reverse-tunnel services, paste and file-drop sites, the Telegram Bot API, Stratum mining and mining pools, executables fetched from a bare IP or delivered over plain HTTP, TLS without a server name, SSH on odd ports, ICMP tunnels |
-| `SIG-EXF-*` | Exfiltration | High rate of DNS TXT queries, DNS NULL-record queries |
-| `SIG-IMP-*` | Impact | NTP monlist, memcached over UDP, bursts of DNS ANY queries |
+| `SIG-C2-*` | Command and control | IRC, legacy Internet Explorer user-agents, `.onion` lookups, dynamic DNS, reverse-tunnel services, paste and file-drop sites, the Telegram Bot API, Stratum mining and mining pools, executables fetched from a bare IP or delivered over plain HTTP, TLS without a server name, SSH on odd ports, ICMP tunnels, remote-access tool relays (AnyDesk, TeamViewer, ScreenConnect, RustDesk …), the PowerShell Empire default profile |
+| `SIG-EXF-*` | Exfiltration | High rate of DNS TXT queries, DNS NULL-record queries, webhook and request-capture services (webhook.site, Pipedream …), MEGA cloud storage, FTP uploads to the internet |
+| `SIG-IMP-*` | Impact | NTP monlist, memcached over UDP, bursts of DNS ANY queries, a burst of direct-to-MX SMTP connections (spam bot), SSDP discovery arriving from the internet |
 | `SIG-POL-*` | Hygiene | TLS 1.0 / 1.1, SSH protocol 1, SNMP with the `public` community, TFTP |
+| `INTEL-REPUTATION` | Reputation | An indicator behind an earlier alert (IP, domain, URL, program hash) that VirusTotal, AbuseIPDB or abuse.ch calls malicious. HIGH from one source, CRITICAL when two agree |
 
 SQL injection, XSS, path traversal and scanner user-agents are reported by the HTTP
 behavioural detector, which knows request direction, so they are not duplicated as signatures.
@@ -717,6 +730,7 @@ For one indicator, every source that understands its type is asked **in parallel
 * **Copy report** puts a defanged Markdown summary on the clipboard for a ticket.
 * Results are cached (6 h for most sources), and free-tier rate limits are respected with automatic retry.
 * Add keys under **Sources & API keys**. They are stored in the data folder (0600), and the dashboard can only see whether a key is set.
+* A stored key also switches on **automatic reputation checks** for that source: the indicators behind notable alerts are checked without a click, and the verdict appears on the alert, the incident, the IP dossier and the program view. See [Privacy & security](#-privacy--security) for exactly what is sent, and `lookups.reputation` to turn it off.
 
 From the terminal: `pynids investigate 'hxxps://evil[.]com/login'` (add `--web` to open it in the dashboard, or `--json`).
 
@@ -773,6 +787,16 @@ response:
   min_severity: CRITICAL
   ttl: 3600
   never_block: []          # extra IPs/CIDRs to protect
+
+lookups:
+  mode: alerts             # alerts | always | manual: what may be looked up without a click
+  min_severity: MEDIUM
+  reputation: true         # VirusTotal, AbuseIPDB, OTX, GreyNoise, abuse.ch for indicators behind alerts
+  reputation_sources: []   # e.g. [virustotal, abuseipdb]; empty = every source you gave a key
+  reputation_per_hour: 60  # indicators checked automatically per hour, at most
+
+incidents:
+  gap_minutes: 30          # quiet time after which the same subject starts a new incident
 
 alert_manager:
   dedup_window: 60
@@ -877,7 +901,7 @@ sudo .venv/bin/pynids query --db "/Library/Application Support/PyNIDS/events.db"
 
 ## 🔐 Privacy & security
 
-* **Everything stays on your Mac.** The only outbound requests are feed and GeoIP downloads, IP lookups, and, only when you ask, Claude.
+* **Everything stays on your Mac.** The only outbound requests are feed and GeoIP downloads, IP lookups, reputation checks with the providers you added a key for, and, only when you ask, Claude.
 * **IP lookups are limited on purpose.** Reverse DNS, RDAP and Shodan InternetDB lookups tell those services (and, for reverse DNS, whoever runs the IP's zone, possibly an attacker) that you are interested in an address. By default they run automatically only for IPs in MEDIUM-or-worse alerts (at most 40 an hour) and when you click **Look up**; private addresses are never sent. Set `lookups.mode: manual` to only look up on request.
 * **nmap scans are refused for internet hosts.** Only private / link-local addresses and this Mac can be scanned, and only when you click.
 * **The API listens on `127.0.0.1` only**, and a malicious webpage can't use it:
@@ -886,7 +910,8 @@ sudo .venv/bin/pynids query --db "/Library/Application Support/PyNIDS/events.db"
   * an **Origin check** protects every action that changes something
   * **no CORS headers** are sent, so other origins can't read responses
 * **`/api/widget`** is the only open route, because the sandboxed widget can't read the token. It returns counts and alert headlines only.
-* **Investigate and Email are passive.** Lookups go only to the sources listed in the dashboard (private IPs are never sent), and only when you investigate. Emails are parsed in memory. Nothing in them is opened, rendered, fetched or run unless you click **Render safely** (sandboxed, no network) or **Download .bin**.
+* **Investigate and Email are passive.** Lookups go only to the sources listed in the dashboard (private IPs are never sent), when you investigate, plus the automatic reputation checks described next. Emails are parsed in memory. Nothing in them is opened, rendered, fetched or run unless you click **Render safely** (sandboxed, no network) or **Download .bin**.
+* **Automatic reputation checks are opt-in per provider.** For alerts at or above `lookups.min_severity`, the remote IP, domain, URL (without its query string) and the SHA-256 of the program involved are sent to the reputation sources **you have stored an API key for**, and to no others. Without keys nothing is sent. Private addresses and internal names never leave, each indicator is asked about at most once an hour, at most 60 indicators an hour, and automatic checks stay under 80% of a provider's free daily quota. `lookups.mode: manual` or `lookups.reputation: false` switches them off; the **Check** buttons in the dashboard still work.
 * **The Thunderbird add-on** is the only non-dashboard origin the API accepts, only for submitting a message, and it still needs the token.
 * **Secrets live outside the repo**, in `/Library/Application Support/PyNIDS/`, and `.gitignore` also blocks keys, key logs, captures, and databases.
 
@@ -956,6 +981,26 @@ Remove the Thunderbird add-on from **Add-ons and Themes → PyNIDS Email Analysi
 
 ## 🧪 For developers
 
+### Keep keys out of git
+
+Run this once in every clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It turns on two hooks backed by `scripts/check_secrets.py`. `pre-commit` refuses a commit that
+adds something shaped like an API key, token or private key, or a file that holds secrets
+(`soc-keys.json`, `anthropic-key`, `.env`, `*.pem` …) even with `git add -f`. `pre-push` scans
+every commit about to leave the machine, so a commit made with `--no-verify` is still stopped.
+
+```bash
+python3 scripts/check_secrets.py --all             # scan every tracked file
+python3 scripts/check_secrets.py --range --all     # scan the whole history
+```
+
+A deliberate fake (a test fixture) is let through by putting `secret-scan: allow` on its line.
+
 ### Tests
 
 ```bash
@@ -989,10 +1034,10 @@ pynids/
 ├── enrich/              app attribution (psutil + nettop), hostnames, GeoIP
 ├── host/                code signatures, socket table, launch items, IP dossiers, LAN inventory
 ├── intel/               threat intel index + live feeds
-├── alerts/              alert model, manager, plain-English guide, MITRE catalogue, outputs (SQLite, JSON, syslog, terminal)
+├── alerts/              alert model, manager, plain-English guide, MITRE catalogue, incidents, outputs (SQLite, JSON, syslog, terminal)
 ├── response/            pf blocking, macOS notifications
 ├── ai/                  Explain with Claude, Ask Claude (investigation agent)
-├── soc/                 Investigate (indicators, sources, workbench) and mail/ (lossless MIME parser, phishing analysis, evidence store)
+├── soc/                 Investigate (indicators, sources, workbench), automatic reputation checks, and mail/ (lossless MIME parser, phishing analysis, evidence store)
 ├── integrations/        Thunderbird add-on, VS Code .eml grammar
 ├── service/             daemon, local API, live stats, launchd, PCAP recorder
 ├── web/dashboard.html   web dashboard (app/: theme, Detections + Flows, Investigate + Email tabs; vendor/: offline map libraries)

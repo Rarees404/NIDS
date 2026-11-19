@@ -222,6 +222,109 @@ rules:
     response: "Background noise against a patched server. If the target is a router, camera or old web app, patch or isolate it."
     action: alert
 
+  - id: "SIG-EXP-011"
+    description: "Exploit attempt against a VPN gateway or edge appliance (Fortinet, Citrix, Ivanti, F5, Exchange)"
+    message: "Edge-appliance exploit attempt from {src_ip}: {layer7.http.uri}"
+    severity: HIGH
+    confidence: 0.85
+    mitre: "T1190"
+    tags: [exploit, edge_device, vpn]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: layer7.http.uri, op: regex,
+           value: '(/remote/fgt_lang\?lang=/\.\./|/vpn/(\.\./|%2e%2e/)vpns/|/dana-na/\.\./dana/html5acc|/api/v1/totp/user-backup-code/\.\./|/tmui/login\.jsp/\.\.;/|/mgmt/tm/util/bash|/autodiscover/autodiscover\.json\?[^ ]{0,40}@|/owa/auth/[a-z0-9]{1,12}\.aspx\?[^ ]{0,60}(cmd|exec)=)'}
+    why: "These paths only exist to exploit known holes in VPN gateways, load balancers and mail servers (CVE-2018-13379, CVE-2019-19781, CVE-2023-46805, CVE-2020-5902, CVE-2022-1388, ProxyShell). Ransomware crews scan the whole internet for them."
+    response: "Against a device you own: patch it now and check it for compromise, a response other than 404 is bad news. From your own machine: something on it is attacking others."
+    action: alert
+
+  - id: "SIG-EXP-012"
+    description: "OGNL / expression-language injection (Struts, Confluence)"
+    message: "Expression-injection exploit attempt from {src_ip} to {dst_ip}"
+    severity: CRITICAL
+    confidence: 0.9
+    mitre: "T1190"
+    tags: [exploit, rce, ognl]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - any:
+            - {field: layer7.http.uri, op: regex,
+               value: '(\$|%24|%25|%)(\{|%7b)\s*\(?(#|%23)(_memberAccess|context|dm|cmd|ognl|request|a\s*=)'}
+            - {field: layer7.http.uri, op: regex,
+               value: '^/(\$\{|%24%7b)[^ ]{0,400}(java\.lang|getRuntime|ScriptEngine|ProcessBuilder|javax\.script)'}
+            - {field: layer7.http.content_type, op: regex,
+               value: '[%$]\{\s*\(?#(_memberAccess|context|cmd|dm|ognl)'}
+    why: "The request carries an OGNL expression where a path or Content-Type should be. That is how Apache Struts (the Equifax breach) and Atlassian Confluence (CVE-2022-26134) are taken over without a password."
+    response: "If the target is your server, patch it and assume the command ran. Look at the source address in the incident for what else it tried."
+    action: alert
+
+  - id: "SIG-EXP-013"
+    description: "PHP-CGI argument injection (CVE-2012-1823 / CVE-2024-4577)"
+    message: "PHP-CGI argument-injection attempt from {src_ip} to {dst_ip}"
+    severity: CRITICAL
+    confidence: 0.9
+    mitre: "T1190"
+    tags: [exploit, rce, php]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: layer7.http.uri, op: regex,
+           value: '\?(%ad|-)d(\+|%20)(allow_url_include|auto_prepend_file|cgi\.force_redirect)(%3d|=)'}
+    why: "A query string that starts with -d and a PHP setting makes a vulnerable PHP-CGI run the request body as code. The 2024 variant (CVE-2024-4577) hit Windows servers within a day of disclosure."
+    response: "Patch PHP on the target. A 200 answer means the attacker's code probably ran."
+    action: alert
+
+  - id: "SIG-EXP-014"
+    description: "Command sent to a web shell"
+    message: "Web-shell command from {src_ip}: {layer7.http.uri}"
+    severity: HIGH
+    confidence: 0.8
+    mitre: "T1505.003"
+    tags: [webshell, post_exploitation]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: layer7.http.uri, op: regex,
+           value: '\.(php\d?|phtml|jspx?|aspx?|ashx|cfm|cgi)\?([^ ]{0,200}&)?(cmd|exec|command|execute|shell|c|x)=(whoami|id|uname(%20|\+)-a|ipconfig|ifconfig|hostname|systeminfo|pwd|net(%20|\+)user|cat(%20|\+)/etc/passwd|ls(%20|\+)-la?|dir)(&|;|%3b|%20|\+|$)'}
+    why: "A script on the server is being handed an operating-system command (whoami, id, ipconfig …) as a parameter. That is what a planted web shell looks like the first time the intruder tries it."
+    response: "On your server: find the file named in the path, take it offline and look for how it got there. Elsewhere it is a scanner looking for shells others left behind."
+    action: alert
+
+  - id: "SIG-EXP-015"
+    description: "Server-side request forgery aimed at a cloud metadata service"
+    message: "Request from {src_ip} tries to reach the cloud metadata service via {layer7.http.host}"
+    severity: HIGH
+    confidence: 0.85
+    mitre: "T1552.005"
+    tags: [exploit, ssrf, cloud]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: layer7.http.uri, op: regex,
+           value: '(=|%3d)(https?(:|%3a)(/|%2f){2})?(169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200|\[?fd00:ec2::254\]?)'}
+    why: "A parameter points the server at 169.254.169.254, the address where cloud machines hand out their own access keys. Getting a web application to fetch it is how the Capital One breach worked."
+    response: "On your service: check whether the request was answered with credentials, and rotate them if so. Require IMDSv2 on AWS."
+    action: alert
+
+  - id: "SIG-EXP-016"
+    description: "Lookup of an out-of-band exploit callback domain"
+    message: "Exploit callback domain contacted from {src_ip}"
+    severity: HIGH
+    confidence: 0.7
+    mitre: "T1190"
+    tags: [exploit, oast, callback]
+    match:
+      any:
+        - all:
+            - {field: layer7.dns.is_response, op: eq, value: false}
+            - {field: layer7.dns.query_name, op: regex, value: &oast_hosts '(^|\.)(oast\.(pro|live|site|online|fun|me)|oastify\.com|burpcollaborator\.net|interact\.sh|interactsh\.com|dnslog\.(cn|store)|ceye\.io|requestrepo\.com)$'}
+        - {field: layer7.tls.sni, op: regex, value: *oast_hosts}
+        - {field: layer7.http.host, op: regex, value: *oast_hosts}
+    why: "These domains exist for one purpose: proving that an injected command or lookup ran (Burp Collaborator, interactsh, dnslog). A machine that contacts one has usually just executed something an attacker or a scanner injected into it."
+    response: "Find the app that made the request. Unless you are running a penetration test from this machine, treat the app as exploited: Log4Shell, command injection and SSRF all show up this way."
+    action: alert
+
   # =========================================================================
   # Execution — shells and download cradles seen on the wire
   # =========================================================================
@@ -311,6 +414,59 @@ rules:
         - {field: payload_bytes, op: regex, value: 'uid=0\(root\)\s+gid=0\((root|wheel)\)'}
     why: "Attackers run 'id' first thing after an exploit lands. Its output crossing the network unencrypted means someone has a root shell on the sender."
     response: "Investigate the sending host immediately."
+    action: alert
+
+  - id: "SIG-EXE-007"
+    description: "Download-and-run shell one-liner on the wire"
+    message: "Download-and-run command seen between {src_ip} and {dst_ip}"
+    severity: HIGH
+    confidence: 0.7
+    mitre: "T1059.004"
+    tags: [execution, download_cradle, dropper]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        # Never on loopback: local tools, proxies and this dashboard's own API pass such
+        # text around (an alert quoting the command would otherwise raise the next alert).
+        - {field: src_scope, op: ne, value: loopback}
+        - {field: dst_scope, op: ne, value: loopback}
+        # In a web conversation only a request counts; pages and downloads that merely
+        # contain the text (install guides, this alert's own JSON) do not.
+        - any:
+            - {not: {field: flow.app_proto, op: eq, value: http}}
+            - {field: layer7.http.direction, op: eq, value: request}
+        - any:
+            - {field: payload_bytes, op: regex,
+               value: '\b(curl|wget)\s[^\n|;]{0,200}https?://[^\s|;"'']{4,200}["'']?\s*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b'}
+            - {field: payload_bytes, op: regex,
+               value: '\b(curl|wget)\s[^\n;]{0,200}https?://\S{4,200}\s*(;|&&)\s*chmod\s+(\+x|[0-7]{3,4})\s'}
+    why: "A command that downloads a script and runs it at once (curl … | sh, or wget followed by chmod +x) is travelling over the network in clear text: inside an exploit, a remote shell, or a botnet's infection step."
+    response: "Find which side sent it. Fetch the URL only in a sandbox. The machine that received the command should be checked for the downloaded file."
+    action: alert
+
+  - id: "SIG-EXE-008"
+    description: "AppleScript command line on the wire (macOS stealer technique)"
+    message: "AppleScript execution command seen between {src_ip} and {dst_ip}"
+    severity: HIGH
+    confidence: 0.7
+    mitre: "T1059.002"
+    tags: [execution, macos, applescript]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        # Never on loopback: local tools, proxies and this dashboard's own API pass such
+        # text around (an alert quoting the command would otherwise raise the next alert).
+        - {field: src_scope, op: ne, value: loopback}
+        - {field: dst_scope, op: ne, value: loopback}
+        # In a web conversation only a request counts; pages and downloads that merely
+        # contain the text (install guides, this alert's own JSON) do not.
+        - any:
+            - {not: {field: flow.app_proto, op: eq, value: http}}
+            - {field: layer7.http.direction, op: eq, value: request}
+        - {field: payload_bytes, op: regex,
+           value: 'osascript\s+(-l\s+\w+\s+)?-e\s[^\n]{0,300}(do shell script|hidden answer|with administrator privileges|keystroke)'}
+    why: "macOS malware (Atomic Stealer and its relatives) uses osascript to pop up a fake password prompt and to run shell commands. Seeing such a command line in clear text means it is being delivered or relayed over the network."
+    response: "If this Mac received it, do not type your password into unexpected prompts, and check Protection → Launch items and the app behind the connection."
     action: alert
 
   # =========================================================================
@@ -430,6 +586,62 @@ rules:
         - {field: src_scope, op: ne, value: public}
     why: "File sharing to an internet address is almost never intended. Attackers plant links to remote shares so the system sends its login hash automatically."
     response: "Find the document, e-mail or page that referenced the share. Block outbound port 445 at the router."
+    action: alert
+
+  - id: "SIG-CRED-009"
+    description: "LDAP login with a cleartext password (simple bind)"
+    message: "LDAP password sent in cleartext to {dst_ip}"
+    severity: MEDIUM
+    confidence: 0.75
+    mitre: "T1552"
+    tags: [cleartext, credentials, ldap]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: eq, value: 389}
+        - {field: dst_scope, op: ne, value: loopback}
+        - {field: payload_bytes, op: regex,
+           value: '^0[\s\S]{1,5}\x02\x01[\s\S]\x60[\s\S]{1,5}\x02\x01[\x02\x03]\x04[\x01-\x7f][\s\S]{1,127}?\x80[\x01-\x7f]'}
+    why: "An LDAP simple bind sends the account name and password unencrypted. Anyone on the path (or anyone who poisoned name resolution) can read a directory account's password."
+    response: "Switch the client to LDAPS (port 636) or StartTLS. Change the password if the network is not fully trusted."
+    action: alert
+
+  - id: "SIG-CRED-010"
+    description: "API key or token sent in an unencrypted web address"
+    message: "Secret in a cleartext URL sent to {layer7.http.host}"
+    severity: MEDIUM
+    confidence: 0.6
+    mitre: "T1552"
+    tags: [cleartext, credentials, token]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: dst_scope, op: eq, value: public}
+        - {field: layer7.http.uri, op: regex,
+           value: '[?&](api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|secret[_-]?key|password|passwd)=[^&\s]{8,}'}
+    why: "The request carries a key, token or password in its address, over plain HTTP. It can be read on the way, and it ends up in proxy and server logs."
+    response: "Find the app and switch it to HTTPS. Rotate the key: it must be considered public."
+    action: alert
+
+  - id: "SIG-CRED-011"
+    description: "Cloud key, access token or private key sent unencrypted to the internet"
+    message: "Secret sent in cleartext from {src_ip} to {dst_ip}"
+    severity: HIGH
+    confidence: 0.8
+    mitre: "T1552.001"
+    tags: [cleartext, credentials, exfiltration, secrets]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_scope, op: eq, value: public}
+        - {field: src_scope, op: ne, value: public}
+        - any:
+            - {field: payload_bytes, op: regex, value: '\bAKIA[0-9A-Z]{16}\b'}
+            - {field: payload_bytes, op: regex, value: '\bgh[pousr]_[A-Za-z0-9]{36}\b'}
+            - {field: payload_bytes, op: regex, value: '\bxox[baprs]-[0-9]{8,}-[0-9A-Za-z-]{16,}'}
+            - {field: payload_bytes, op: regex, value: '-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY( BLOCK)?-----'}
+    why: "An AWS access key, a GitHub or Slack token, or a private key left this machine without encryption. Information stealers collect exactly these files and post them to their server; a misconfigured script can leak them the same way."
+    response: "Identify the app. Revoke and replace the key or token now, then check the provider's access log for use you do not recognise."
     action: alert
 
   # =========================================================================
@@ -829,6 +1041,40 @@ rules:
     response: "Check both ends. Path-MTU tests and some monitoring tools also send large pings, briefly."
     action: alert
 
+  - id: "SIG-C2-017"
+    description: "Remote-access tool session (AnyDesk, TeamViewer, ScreenConnect, RustDesk and others)"
+    message: "Remote-access tool in use from {src_ip} ({dst_ip})"
+    severity: MEDIUM
+    confidence: 0.5
+    mitre: "T1219"
+    tags: [remote_access, rmm, c2]
+    match:
+      any:
+        - {field: layer7.tls.sni, op: regex, value: &rmm_hosts '(^|\.)((router|master)\d{0,3}\.teamviewer\.com|net\.anydesk\.com|[a-z0-9-]+-relay\.screenconnect\.com|rs-[a-z0-9-]+\.rustdesk\.com|relay\.splashtop\.com|agent-api\.atera\.com|getscreen\.me|node\d{0,4}\.dwservice\.net|rl\.ammyy\.com|nanosystems\.it)$'}
+        - all:
+            - {field: layer7.dns.is_response, op: eq, value: false}
+            - {field: layer7.dns.query_name, op: regex, value: *rmm_hosts}
+    why: "A remote-control program is connecting to its relay. Support staff use these tools, and so do tech-support scammers and ransomware crews, because the traffic looks legitimate and gives full control of the screen."
+    response: "Fine if you started a support session. If nobody should be controlling this machine, quit the program, remove it, and change passwords typed while it ran."
+    action: alert
+
+  - id: "SIG-C2-018"
+    description: "PowerShell Empire default HTTP profile"
+    message: "Empire-style command-and-control request from {src_ip} to {layer7.http.host}"
+    severity: HIGH
+    confidence: 0.8
+    mitre: "T1071.001"
+    tags: [c2, empire, malware]
+    match:
+      all:
+        - {field: layer7.http.direction, op: eq, value: request}
+        - {field: layer7.http.user_agent, op: eq,
+           value: 'Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko'}
+        - {field: layer7.http.uri, op: regex, value: '^/(login/process\.php|admin/get\.php|news\.php)(\?|$)'}
+    why: "This exact pairing of user-agent and address is the out-of-the-box profile of the Empire post-exploitation framework. Operators who do not change the defaults are caught by it."
+    response: "Treat the source machine as compromised: find the process, isolate the machine, and block the server."
+    action: alert
+
   # =========================================================================
   # Exfiltration
   # =========================================================================
@@ -865,6 +1111,54 @@ rules:
         - {field: layer7.dns.query_type, op: in, value: ["NULL", "10"]}
     why: "The NULL record type has no legitimate use today. The tunnelling tool iodine prefers it because it carries the most data per packet."
     response: "Identify the program. Block the queried domain."
+    action: alert
+
+  - id: "SIG-EXF-003"
+    description: "Data sent to a webhook or request-capture service"
+    message: "Request-capture service contacted from {src_ip} ({dst_ip})"
+    severity: MEDIUM
+    confidence: 0.5
+    mitre: "T1567"
+    tags: [exfiltration, webhook]
+    match:
+      any:
+        - {field: layer7.tls.sni, op: regex, value: &capture_hosts '(^|\.)(webhook\.site|pipedream\.net|requestbin\.(com|net)|requestcatcher\.com|beeceptor\.com|hookbin\.com|webhook\.cool|mockbin\.(org|io))$'}
+        - {field: layer7.quic.sni, op: regex, value: *capture_hosts}
+        - {field: layer7.http.host, op: regex, value: *capture_hosts}
+    why: "These services give anyone a throw-away address that records whatever is sent to it. Developers test webhooks with them; stealers and malicious packages use them as a free drop for passwords and tokens."
+    response: "Check which app connected. A developer tool you were using is fine; a package install script, a document or an unknown process is not."
+    action: alert
+
+  - id: "SIG-EXF-004"
+    description: "Connection to MEGA cloud storage"
+    message: "MEGA cloud storage contacted from {src_ip} ({dst_ip})"
+    severity: LOW
+    confidence: 0.3
+    mitre: "T1567.002"
+    tags: [exfiltration, cloud_storage]
+    match:
+      any:
+        - {field: layer7.tls.sni, op: regex, value: &mega_hosts '(^|\.)(mega\.(nz|io|co\.nz)|userstorage\.mega\.co\.nz)$'}
+        - {field: layer7.quic.sni, op: regex, value: *mega_hosts}
+    why: "MEGA is an ordinary storage service, and also the destination ransomware groups use most to carry data out (with rclone or MEGAsync) because uploads are end-to-end encrypted."
+    response: "Nothing to do if you use MEGA. Otherwise check the app and how much it sent (Flows)."
+    action: alert
+
+  - id: "SIG-EXF-005"
+    description: "File uploaded to an internet FTP server"
+    message: "FTP upload from {src_ip} to {dst_ip}"
+    severity: MEDIUM
+    confidence: 0.5
+    mitre: "T1048.003"
+    tags: [exfiltration, ftp, cleartext]
+    match:
+      all:
+        - {field: protocol, op: eq, value: tcp}
+        - {field: dst_port, op: eq, value: 21}
+        - {field: dst_scope, op: eq, value: public}
+        - {field: payload_bytes, op: regex, value: '^(STOR|STOU|APPE)\s+\S'}
+    why: "A file is being stored on an FTP server on the internet, unencrypted. Older stealers and keyloggers (Agent Tesla, for one) still deliver their loot by FTP."
+    response: "Expected for a web-hosting upload you started. Otherwise find the app and see which file names it sends."
     action: alert
 
   # =========================================================================
@@ -918,6 +1212,42 @@ rules:
     threshold: {count: 10, seconds: 20}
     why: "ANY asks for every record of a name, giving the largest possible answer. Resolvers and browsers never use it in bulk."
     response: "From your own machine: find the tool. Towards your DNS server: rate-limit or refuse ANY."
+    action: alert
+
+  - id: "SIG-IMP-004"
+    description: "Burst of direct connections to mail servers (spam-bot behaviour)"
+    message: "{src_ip} is opening many SMTP connections to internet mail servers"
+    severity: MEDIUM
+    confidence: 0.6
+    mitre: "T1071.003"
+    tags: [spam, botnet, smtp]
+    match:
+      all:
+        - {field: tcp.syn, op: eq, value: true}
+        - {field: dst_port, op: eq, value: 25}
+        - {field: dst_scope, op: eq, value: public}
+        - {field: src_scope, op: ne, value: public}
+    threshold: {count: 15, seconds: 60}
+    why: "Mail programs hand their mail to one provider on port 587 or 465. A workstation that contacts many mail servers on port 25 itself is behaving like a spam bot."
+    response: "Find the process. A mail server you run on purpose is the only harmless explanation."
+    action: alert
+
+  - id: "SIG-IMP-005"
+    description: "SSDP discovery request from the internet (amplification abuse)"
+    message: "SSDP discovery request from internet host {src_ip}"
+    severity: MEDIUM
+    confidence: 0.8
+    mitre: "T1498.002"
+    tags: [ddos, amplification, ssdp]
+    match:
+      all:
+        - {field: protocol, op: eq, value: udp}
+        - {field: dst_port, op: eq, value: 1900}
+        - {field: src_scope, op: eq, value: public}
+        - {field: dst_scope, op: ne, value: public}
+        - {field: payload_bytes, op: startswith, value: 'M-SEARCH '}
+    why: "UPnP discovery belongs on the local network only. When it arrives from the internet, someone is looking for devices to use as amplifiers in a denial-of-service attack, with the victim's address forged as the sender."
+    response: "Your router is letting UDP 1900 in: switch off UPnP on its internet side or block the port."
     action: alert
 
   # =========================================================================

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Refuse commits that add API keys or secret files. Enable once per clone with:
+#   git config core.hooksPath .githooks
+root=$(git rev-parse --show-toplevel) || exit 1
+exec python3 "$root/scripts/check_secrets.py" --staged

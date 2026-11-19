@@ -988,6 +988,15 @@ All backends extend `BaseOutput` and must implement `emit(alert)`. They are regi
 | `SyslogOutput` | `outputs/syslog_out.py` | Forwards alerts to a remote syslog server over UDP or TCP. RFC-5424 compatible. |
 | `XRayDashboard` | `outputs/xray_dashboard.py` | Multi-panel Rich Live terminal dashboard for stealth-class alerts. See § 10.4. |
 
+The daemon registers two more outputs:
+
+| Backend | File | Description |
+|---|---|---|
+| `IncidentTracker` | `alerts/incidents.py` | Files each security-relevant alert (kinds `threat`, `attack`, `host`, `localhost`, or anything HIGH and above) under an incident. The subject is a program (host findings), the registered domain of a DNS query, or the remote address; alerts about the same subject stay in one incident until it has been quiet for `incidents.gap_minutes`. Tables `incidents` (subject, first / last alert, worst severity, status, note) and `incident_alerts` (alert → incident) live in the alerts database. Tactics, rules, apps and indicators are computed from the member alerts on every read. Closing an incident makes the next alert about its subject open a new one. Stored alerts are filed once at first start (`backfill`). |
+| `ReputationOutput` | `soc/reputation.py` | Queues the remote IP, host names, cleartext URL and program path of alerts at or above `lookups.min_severity` for `Reputation`, which asks the workbench sources that give a verdict (VirusTotal, AbuseIPDB, OTX, GreyNoise, URLhaus, ThreatFox, MalwareBazaar). Unattended, only sources with a stored API key are used; per indicator once an hour, `lookups.reputation_per_hour` indicators an hour, 80% of a source's free daily quota, and a failing source is skipped for 15 minutes. A `malicious` verdict from VirusTotal (3+ engines), AbuseIPDB (75%+) or abuse.ch raises an `INTEL-REPUTATION` threat-intel alert once a week per indicator, with the original alert's context: HIGH from one source, CRITICAL when two agree. |
+
+API routes: `GET /api/incidents` (filters `since`, `until`, `status`, `min_severity`, `tactic`, `technique`, `rule`, `entity`), `GET` / `POST /api/incidents/<id>` (detail; set `status` or `note`), `GET /api/reputation?type=&value=` (what is already known, never a new request), `POST /api/reputation` (ask the sources now). `/api/alerts` also takes `tactic=` and `detector=`.
+
 ### 10.4 X-Ray Live Dashboard
 
 **File:** `alerts/outputs/xray_dashboard.py`

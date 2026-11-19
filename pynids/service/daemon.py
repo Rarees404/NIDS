@@ -114,6 +114,17 @@ DAEMON_DEFAULTS: Dict[str, Any] = {
     "lookups": {
         "mode": "alerts",
         "min_severity": "MEDIUM",
+        # Reputation checks (VirusTotal, AbuseIPDB, OTX, GreyNoise, abuse.ch) for the
+        # IPs, domains, URLs and program hashes behind alerts.  Follows "mode";
+        # a source that needs an API key is only used once a key is stored.
+        "reputation": True,
+        "reputation_sources": [],       # empty = every reputation source
+        "reputation_per_hour": 60,
+    },
+    # Alerts about the same address / domain / program are kept together as one
+    # incident until nothing new arrives for this long.
+    "incidents": {
+        "gap_minutes": 30,
     },
     # In-app updates: check GitHub for new commits; the dashboard / menu bar
     # app shows an Update button.  Nothing is installed without a click.
@@ -319,6 +330,11 @@ class Daemon:
         self.alerts.register_output(self.live)
         self.store = SQLiteOutput(path=str(db_path()), batch_size=100, flush_interval=2.0)
         self.alerts.register_output(self.store)
+        from ..alerts.incidents import IncidentTracker
+        self.incidents = IncidentTracker(
+            db_path(), gap=float(self.cfg.get("incidents", {}).get("gap_minutes", 30)) * 60,
+            before_read=self.store.flush)
+        self.alerts.register_output(self.incidents)
         self.alerts.register_output(LookupPrefetch(
             self.lookups, min_severity=Severity(str(lcfg.get("min_severity", "MEDIUM")).upper())))
         if hcfg.get("c2_correlation", True):
@@ -410,6 +426,17 @@ class Daemon:
             local=LocalSource(intel=lambda: self.engine.intel, inspector=self.inspector,
                               live=self.live, db_path=db_path()),
         )
+        from ..host import codesign
+        from ..soc.reputation import Reputation, ReputationOutput
+        self.reputation = Reputation(
+            self.workbench, mode=str(lcfg.get("mode", "alerts")),
+            enabled=bool(lcfg.get("reputation", True)),
+            sources=lcfg.get("reputation_sources") or None,
+            emit=self.alerts.add, hasher=codesign.sha256_file, db_path=db_path(),
+            max_auto_per_hour=int(lcfg.get("reputation_per_hour", 60)),
+        )
+        self.alerts.register_output(ReputationOutput(
+            self.reputation, min_severity=Severity(str(lcfg.get("min_severity", "MEDIUM")).upper())))
         from ..soc.mail.store import EmailStore
         self.emails = EmailStore(evidence_dir() / "email", db_path())
         self.token = ensure_token()
@@ -433,6 +460,8 @@ class Daemon:
             emails=self.emails,
             set_notifications=self.set_notifications,
             engine=self.engine,
+            incidents=self.incidents,
+            reputation=self.reputation,
         )
         self.server = make_server(self.api_ctx, dcfg["api_host"], int(dcfg["api_port"]))
 
@@ -622,6 +651,8 @@ class Daemon:
             if tick % 1800 == 0:  # hourly
                 self._step("retention", lambda: self.store.prune(
                     float(self.cfg["daemon"].get("retention_days") or 0)))
+                self._step("incident retention", lambda: self.incidents.prune(
+                    float(self.cfg["daemon"].get("retention_days") or 0)))
 
     def _start_capture(self) -> None:
         dcfg = self.cfg["daemon"]
@@ -690,6 +721,8 @@ class Daemon:
         if self.signatures:
             self.signatures.start()
         self.lookups.start()
+        self.reputation.start()
+        threading.Thread(target=self.incidents.backfill, name="incident-backfill", daemon=True).start()
         if self.lan is not None and not self.paused:
             threading.Thread(target=self.lan.refresh, name="lan", daemon=True).start()
         if self.blocker:
@@ -761,6 +794,10 @@ class Daemon:
                 stop_lookups()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("lookup shutdown failed: %s", exc)
+        try:
+            self.reputation.stop()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("reputation shutdown failed: %s", exc)
         from ..host.lan import kill_scans
         kill_scans()
         if self.baseline is not None:
