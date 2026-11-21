@@ -32,6 +32,15 @@ Text operators work on raw payload bytes too: the payload is read as
 Latin-1 (one character per byte), and ``\\xNN`` escapes in a rule value
 stand for raw bytes, so ``"\\x00\\x00\\x00\\x85\\xffSMB"`` matches binary data.
 
+Patterns split across TCP segments
+----------------------------------
+When the engine supplies the bytes that preceded a segment on its stream
+(``meta['stream_prefix']``), a rule with a ``contains`` / ``regex`` test on
+``payload_bytes`` that does not match the packet alone is tried once more
+on *previous bytes + this packet*.  It fires only if that match needs this
+packet — a pattern lying wholly in the earlier bytes already had its turn.
+``startswith`` / ``endswith`` and ``payload_len`` always mean the packet.
+
 Field addressing
 ----------------
 Plain names (``src_ip``, ``dst_port``, ``protocol``, ``payload_bytes``) map
@@ -334,24 +343,43 @@ class RuleError(ValueError):
 class _Packet:
     """One packet under evaluation; decodes the payload to text at most once."""
 
-    __slots__ = ("meta", "layer7", "flow", "_payload_text")
+    __slots__ = ("meta", "layer7", "flow", "_payload_text", "_packet_text", "window")
 
-    def __init__(self, meta: dict, layer7: dict, flow: Optional[Flow]) -> None:
+    def __init__(self, meta: dict, layer7: dict, flow: Optional[Flow],
+                 window: Optional[bytes] = None) -> None:
         self.meta = meta
         self.layer7 = layer7
         self.flow = flow
+        # When set, ``contains`` / ``regex`` on the payload read these bytes
+        # (stream bytes around the packet) instead of the packet's own.
+        self.window = window
         self._payload_text: Optional[str] = None
+        self._packet_text: Optional[str] = None
+
+    def payload(self) -> bytes:
+        """The bytes searched by ``contains`` / ``regex``."""
+        return self.window if self.window is not None else (self.meta.get("payload_bytes") or b"")
 
     def get(self, field: str) -> Any:
+        if field == "payload_bytes" and self.window is not None:
+            return self.window
         return _get_field(field, self.meta, self.layer7, self.flow)
 
     def text(self, field: str) -> Optional[str]:
         if field == "payload_bytes":
             if self._payload_text is None:
-                self._payload_text = _text(self.meta.get("payload_bytes") or b"")
+                self._payload_text = _text(self.payload())
             return self._payload_text
         value = self.get(field)
         return None if value is None else _text(value)
+
+    def packet_text(self) -> str:
+        """The packet's own payload as text (``startswith`` / ``endswith``)."""
+        if self.window is None:
+            return self.text("payload_bytes") or ""
+        if self._packet_text is None:
+            self._packet_text = _text(self.meta.get("payload_bytes") or b"")
+        return self._packet_text
 
 
 Predicate = Callable[[_Packet], bool]
@@ -395,11 +423,10 @@ def _compile_leaf(field: Any, op: Any, value: Any) -> Predicate:
                 return False
             if op != "startswith" and op != "endswith" and isinstance(raw, (list, tuple, set, frozenset)):
                 return (value in raw) != negate
+            if op == "startswith" or op == "endswith":
+                text = pkt.packet_text() if field == "payload_bytes" else (pkt.text(field) or "")
+                return text.startswith(needle) if op == "startswith" else text.endswith(needle)
             text = pkt.text(field) or ""
-            if op == "startswith":
-                return text.startswith(needle)
-            if op == "endswith":
-                return text.endswith(needle)
             return (needle in text) != negate
         return _textual
 
@@ -466,6 +493,18 @@ def _requires_data(node: Any) -> bool:
     return any(_needs_data(str(k)) and bool(v) for k, v in node.items())
 
 
+def _searches_payload(node: Any) -> bool:
+    """True when the rule has a ``contains`` / ``regex`` test on the payload."""
+    if not isinstance(node, dict):
+        return False
+    for key in ("all", "any"):
+        if key in node:
+            return any(_searches_payload(child) for child in node[key] or [])
+    if "not" in node:
+        return _searches_payload(node["not"])
+    return node.get("field") == "payload_bytes" and node.get("op") in ("contains", "regex")
+
+
 def _matched_conditions(node: Any, pkt: _Packet, out: List[Dict[str, Any]]) -> None:
     """Collect the leaf conditions that are true for *pkt* (explains a match)."""
     if not isinstance(node, dict) or len(out) >= 12:
@@ -483,6 +522,8 @@ def _matched_conditions(node: Any, pkt: _Packet, out: List[Dict[str, Any]]) -> N
         leaves = [(k, "eq", v) for k, v in node.items()]
     for field, op, value in leaves:
         actual = pkt.get(str(field))
+        if field == "payload_bytes" and op in ("startswith", "endswith"):
+            actual = pkt.meta.get("payload_bytes")
         if not _apply_op(op, actual, value):
             continue
         if isinstance(actual, (bytes, bytearray)):
@@ -517,7 +558,8 @@ class CompiledRule:
     """A validated rule, ready to evaluate."""
 
     __slots__ = ("rule", "rule_id", "severity", "confidence", "tags", "mitre", "description",
-                 "message", "predicate", "needs_data", "count", "window", "track_by", "info")
+                 "message", "predicate", "needs_data", "searches_payload", "count", "window",
+                 "track_by", "info")
 
     def __init__(self, rule: Dict[str, Any]) -> None:
         if not isinstance(rule, dict):
@@ -541,6 +583,7 @@ class CompiledRule:
         self.message = rule.get("message")
         self.predicate = _compile_node(match)
         self.needs_data = _requires_data(match)
+        self.searches_payload = _searches_payload(match)
 
         self.count, self.window, self.track_by = 0, 0.0, "src_ip"
         thresh = rule.get("threshold")
@@ -721,13 +764,27 @@ class SignatureDetector(BaseDetector):
         # dissected fields without evaluating it.
         has_data = bool(meta.get("payload_bytes")) or any(k != "context" for k in layer7)
         pkt = _Packet(meta, layer7, flow)
+        # Bytes that preceded this segment on its stream (set by the engine).
+        prefix: Optional[bytes] = meta.get("stream_prefix") if meta.get("payload_bytes") else None
+        joined: Optional[_Packet] = None
+        before: Optional[_Packet] = None
         for rule in self._compiled:
             if rule.needs_data and not has_data:
                 continue
             try:
+                hit = pkt
                 if not rule.predicate(pkt):
-                    continue
-                alert = self._fire(rule, pkt)
+                    if not (prefix and rule.searches_payload):
+                        continue
+                    # Not in this packet alone: does it complete something the
+                    # previous segment started?
+                    if joined is None:
+                        joined = _Packet(meta, layer7, flow, window=prefix + meta["payload_bytes"])
+                        before = _Packet(meta, layer7, flow, window=prefix)
+                    if not rule.predicate(joined) or rule.predicate(before):
+                        continue
+                    hit = joined
+                alert = self._fire(rule, hit)
             except Exception as exc:  # noqa: BLE001 — one rule must not stop the others
                 logger.error("Rule %r raised: %s", rule.rule_id, exc)
                 continue
@@ -771,7 +828,13 @@ class SignatureDetector(BaseDetector):
         _matched_conditions(rule.rule.get("match"), pkt, matched)
         payload = meta.get("payload_bytes") or b""
         evidence["matched"] = matched
-        if payload:
+        if pkt.window is not None:
+            # Matched across a segment boundary: show the bytes around the join.
+            cut = max(0, len(pkt.window) - len(payload) - 128)
+            evidence["reassembled"] = True
+            evidence["payload_preview"] = pkt.window[cut:cut + 256]
+            evidence["payload_len"] = len(payload)
+        elif payload:
             evidence["payload_preview"] = payload[:256]
             evidence["payload_len"] = len(payload)
         l7 = _layer7_evidence(pkt.layer7)
@@ -841,6 +904,7 @@ def _layer7_evidence(layer7: dict) -> Dict[str, Any]:
             continue
         if isinstance(value, dict):
             value = {k: v for k, v in value.items()
-                     if k not in ("headers", "ja3_string", "cipher_suites", "extensions") and v is not None}
+                     if k not in ("headers", "ja3_string", "ja3s_string", "cipher_suites", "extensions")
+                     and v is not None}
         out[key] = value
     return out

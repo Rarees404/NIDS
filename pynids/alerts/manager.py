@@ -298,7 +298,7 @@ class AlertManager:
         while window and (now - window[0][0]) > self.correlation_window:
             window.popleft()
 
-        window.append((now, alert.rule_id or alert.alert_type.value, alert.severity.value,
+        window.append((now, alert.detection_id, alert.severity.value,
                        alert.mitre_technique, alert.message))
 
         # Count distinct rule IDs in the window

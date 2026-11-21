@@ -506,6 +506,8 @@ def analyze(data: bytes, name: Optional[str] = None) -> Dict[str, Any]:
                                    f["detail"], lines.span(part.start, part.body_start), part.id))
             for u in tri.get("pdf_uris") or []:
                 add_link(u, part, "inside PDF")
+            for u in tri.get("urls") or []:
+                add_link(u, part, "inside attachment")
             if tri.get("detected", "") and tri["detected"].startswith(("HTML", "SVG")):
                 p = _Html()
                 try:
@@ -665,7 +667,17 @@ def analyze(data: bytes, name: Optional[str] = None) -> Dict[str, Any]:
         if l["host"]:
             add_ioc(l["host"], "link host")
     for a in attachments:
-        add_ioc(a["hashes"]["sha256"], f"attachment {a['filename'] or a['part']}")
+        label = a["filename"] or a["part"]
+        add_ioc(a["hashes"]["sha256"], f"attachment {label}")
+        for item in a["triage"].get("iocs") or []:
+            add_ioc(item["value"], f"inside attachment {label}")
+
+        def inner_hashes(nodes: Any, depth: int = 0) -> None:
+            for node in (nodes or [])[:50]:
+                add_ioc(node["sha256"], f"{node['name']} inside attachment {label}")
+                if depth < 3:
+                    inner_hashes(node.get("nested"), depth + 1)
+        inner_hashes(a["triage"].get("nested"))
 
     if limits:
         findings.append(_f("info", "structure", "Analysis limits reached — part of this message wasn't examined",

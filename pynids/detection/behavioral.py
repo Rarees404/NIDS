@@ -603,28 +603,44 @@ class BeaconingDetector(BaseDetector):
     """
     Identify C2 beaconing via inter-arrival time regularity analysis.
 
-    For each (src_ip, dst_ip, dst_port) tuple, the detector records the
-    timestamps of connection events.  Once a minimum number of samples
-    is collected, the coefficient of variation (CV = stddev/mean) of the
-    inter-arrival intervals is computed.  A very low CV indicates highly
-    regular, automated traffic consistent with beaconing malware.
+    The detector records when each client opens a connection to each server
+    and, once it has enough samples, computes the coefficient of variation
+    (CV = stddev/mean) of the gaps.  A very low CV is machine-timed traffic.
+
+    Who "the server" is:
+
+    * the **host name**, when DNS vouched for it — so a beacon whose domain
+      rotates through many addresses (a CDN, fast flux, round-robin DNS)
+      still adds up to one regular series;
+    * otherwise the **IP address** (a name only claimed in the client's own
+      SNI / Host header does not count: malware picks that freely).
+
+    Gaps much longer than the usual one (a sleeping laptop, a missed beat)
+    are set aside before judging regularity, and check-ins up to
+    ``max_interval_seconds`` apart are followed, so slow beacons (hourly and
+    beyond) are caught as well.
 
     Args:
         min_connections:         Minimum events before analysis is performed.
         cv_threshold:            CV below this value triggers an alert (default 0.2).
-        max_interval_seconds:    Ignore intervals longer than this (connection gaps).
+        max_interval_seconds:    Longest gap that still belongs to a series; also
+                                 how long a silent pair is remembered (default 24 h).
+        max_pairs:               Upper bound on tracked (client, server, port) series.
     """
 
     def __init__(
         self,
         min_connections: int = 6,
         cv_threshold: float = 0.20,
-        max_interval_seconds: float = 3600.0,
+        max_interval_seconds: float = 86400.0,
+        max_pairs: int = 50_000,
     ) -> None:
         self.min_connections = min_connections
         self.cv_threshold = cv_threshold
         self.max_interval_seconds = max_interval_seconds
-        # {(src_ip, dst_ip, dst_port) → deque[timestamps]}
+        self.max_pairs = max_pairs
+        # {(src_ip, server, dst_port) → deque[timestamps]}; server is an IP
+        # or "host:<name>"
         self._history: Dict[Tuple[str, str, int], Deque[float]] = defaultdict(
             lambda: deque(maxlen=30)
         )
@@ -641,6 +657,12 @@ class BeaconingDetector(BaseDetector):
                     if not h or now - h[-1] > self.max_interval_seconds]:
             del self._history[key]
             self._alerted.discard(key)
+        if len(self._history) > self.max_pairs:
+            # Over budget: forget the series that have been quiet the longest.
+            stale = sorted(self._history, key=lambda k: self._history[k][-1])
+            for key in stale[:len(self._history) - int(self.max_pairs * 0.9)]:
+                del self._history[key]
+                self._alerted.discard(key)
 
     def analyze(
         self,
@@ -676,8 +698,16 @@ class BeaconingDetector(BaseDetector):
         if context.get("system_process"):
             return
 
+        host = context.get("remote_host")
+        # A name taken from the client's own SNI / Host header, never
+        # confirmed by a DNS answer for this IP, is whatever the program
+        # chose to send — it must not make the alert quieter, nor decide
+        # which connections count as "the same server".
+        verified = bool(host) and not context.get("remote_host_unverified")
+
         ts = meta.get("timestamp", time.time())
-        key: Tuple[str, str, int] = (src_ip, dst_ip, dst_port)
+        server = f"host:{str(host).lower()}" if verified else dst_ip
+        key: Tuple[str, str, int] = (src_ip, server, dst_port)
         hist = self._history[key]
         hist.append(ts)
 
@@ -691,6 +721,15 @@ class BeaconingDetector(BaseDetector):
             for i in range(1, len(hist))
             if (hist[i] - hist[i - 1]) <= self.max_interval_seconds
         ]
+        # Set aside gaps far beyond the usual one: the machine slept, or a
+        # beat was missed.  Most of the series must still be regular.
+        skipped = 0
+        if len(intervals) >= 3:
+            median = sorted(intervals)[len(intervals) // 2]
+            kept = [x for x in intervals if x <= 3 * median]
+            if len(kept) >= 0.7 * len(intervals):
+                skipped = len(intervals) - len(kept)
+                intervals = kept
         if len(intervals) < self.min_connections - 1:
             return
 
@@ -705,11 +744,6 @@ class BeaconingDetector(BaseDetector):
         if cv <= self.cv_threshold:
             self._alerted.add(key)
             app = context.get("app")
-            host = context.get("remote_host")
-            # A name taken from the client's own SNI / Host header, never
-            # confirmed by a DNS answer for this IP, is whatever the program
-            # chose to send — it must not make the alert quieter.
-            verified = bool(host) and not context.get("remote_host_unverified")
             # Apps that poll a named server (mail sync, update checks, chat
             # presence) are the common benign case.  Malware more often calls
             # home to a bare IP it never looked up in DNS.
@@ -740,6 +774,8 @@ class BeaconingDetector(BaseDetector):
                     "stddev_seconds": round(stddev, 2),
                     "coefficient_of_variation": round(cv, 4),
                     "sample_count": len(hist),
+                    "tracked_by": "hostname" if verified else "address",
+                    "long_gaps_set_aside": skipped,
                     "hostname_known": verified,
                     "hostname_claimed": host if host and not verified else None,
                 },

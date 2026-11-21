@@ -822,6 +822,9 @@ class TrackerDetector(BaseDetector):
         elif "dns" in layer7 and layer7["dns"].get("query_name") and not layer7["dns"].get("is_response"):
             host = layer7["dns"]["query_name"]
             source = "DNS"
+        elif "dns" in layer7 and layer7["dns"].get("answers"):
+            yield from self._cname_cloaked(meta, layer7["dns"])
+            return
 
         if not host:
             return
@@ -858,6 +861,51 @@ class TrackerDetector(BaseDetector):
                 "source": source,
             },
         )
+
+    def _cname_cloaked(self, meta: dict, dns: dict) -> Iterable[Alert]:
+        """
+        A first-party-looking name (``metrics.shop.example``) that is only an
+        alias for a tracker's host.  Blocklists and the query-name check
+        above see the innocent name; the answer shows where it really goes.
+        """
+        query = str(dns.get("query_name") or "").lower().rstrip(".")
+        if not query or self._match(query):
+            return  # the name itself is a tracker: reported from the query
+        client = meta.get("dst_ip") or "?"   # the answer travels resolver → client
+        for answer in dns["answers"][:16]:
+            if answer.get("type") != "CNAME":
+                continue
+            target = str(answer.get("data") or "").lower().rstrip(".")
+            match = self._match(target) if target else None
+            if not match:
+                continue
+            key = (client, query)
+            if key in self._reported:
+                return
+            self._reported.add(key)
+            category, suffix = match
+            invasive = "Cryptomining" in category or "FingerprintingInvasive" in category
+            yield Alert(
+                alert_type=AlertType.BEHAVIORAL,
+                severity=Severity.MEDIUM if invasive else Severity.LOW,
+                message=f"Disguised tracker: {query} is an alias for {target} ({category})",
+                src_ip=meta.get("dst_ip"),
+                dst_ip=meta.get("src_ip"),
+                dst_port=meta.get("src_port"),
+                protocol=meta.get("protocol"),
+                rule_id="STEALTH-TRACKER",
+                mitre_technique="T1071.001",
+                tags=["tracker", "analytics", "privacy", "stealth", "cname_cloaking"],
+                confidence=0.9,
+                evidence={
+                    "host": query,
+                    "cname_target": target,
+                    "category": category,
+                    "matched_suffix": suffix,
+                    "source": "DNS answer (CNAME)",
+                },
+            )
+            return
 
     def _match(self, host: str) -> Optional[Tuple[str, str]]:
         # Walk label suffixes, most specific first: a.b.example.com,

@@ -76,8 +76,9 @@ walkthrough, with what each step does and how to check it worked, is in
 
 | | |
 |---|---|
-| **Attacks & anomalies** | Port scans and host sweeps, brute force (SSH, RDP, VNC, mail …), SQL injection / XSS / path traversal, DNS tunnelling, C2 beaconing, large uploads, unsolicited traffic floods, DGA-style bursts of failed DNS lookups, and 55 tuned, MITRE-tagged signature rules (exploits, reverse shells, cleartext credentials, exposed services, C2 and tunnelling, crypto-mining, amplification) |
-| **Live threat intelligence** | Every IP, DNS name, and TLS/QUIC hostname is checked against abuse.ch Feodo (botnet C2) and URLhaus (malware), Spamhaus DROP, and Tor exit lists, refreshed every 6 hours |
+| **Attacks & anomalies** | Port scans and host sweeps, brute force (SSH, RDP, VNC, mail …), SQL injection / XSS / path traversal, DNS tunnelling, C2 beaconing, large uploads, unsolicited traffic floods, DGA-style bursts of failed DNS lookups, and 77 tuned, MITRE-tagged signature rules (exploits, reverse shells, cleartext credentials, exposed services, C2 and tunnelling, crypto-mining, amplification, suspicious TLS certificates). Slow scans are caught through the connections that were refused or never answered, and attacks split across packets are put back together before they are judged |
+| **Local network attacks** | ARP spoofing (your router's address answering from a different device, two devices fighting over one address, one device answering for many), ARP and ping sweeps, a second DHCP server, and a second IPv6 router: the ways someone on the same Wi-Fi gets between you and the internet |
+| **Live threat intelligence** | Every IP, DNS name, DNS alias (CNAME), TLS/QUIC hostname, TLS client fingerprint (JA3), server certificate and plaintext web address is checked against about 50,000 indicators: abuse.ch Feodo and SSLBL, C2IntelFeeds, Spamhaus DROP, Emerging Threats, blocklist.de, OpenPhish, and every Tor relay and exit, refreshed every 6 hours. A listed address that only knocks and gets no answer is a LOW note, not an alarm |
 | **Correlation** | Several different attack signatures from one source become a single CRITICAL "multi-vector attack" alert that lists the contributing detections in order and the ATT&CK tactics they span. Low-severity notes, hygiene findings and baseline events don't count |
 | **Incidents** | Alerts about the same address, domain or program are kept together as one incident: a timeline, the ATT&CK tactics it spans, every indicator involved, and a status (open, acknowledged, closed) with your notes. One port scan is one row, not forty |
 | **Automatic reputation** | The IPs, domains, URLs and program hashes behind notable alerts are checked with VirusTotal, AbuseIPDB, AlienVault OTX, GreyNoise and abuse.ch as soon as you add a free API key for them. A confirmed-malicious answer raises its own HIGH or CRITICAL alert. Only the SHA-256 of a program is sent, never the file |
@@ -106,7 +107,8 @@ walkthrough, with what each step does and how to check it worked, is in
 ### Visibility inside encrypted traffic
 
 * **QUIC decryption.** PyNIDS decrypts the first packet of every HTTP/3 connection (RFC 9001) to read which site it is for. Your data stays encrypted; only the handshake is read.
-* **TLS reassembly.** Modern post-quantum handshakes are split across several packets. PyNIDS stitches them back together to read the hostname, ALPN, and whether Encrypted Client Hello is in use.
+* **TLS reassembly, on any port.** Modern post-quantum handshakes are split across several packets. PyNIDS stitches them back together to read the hostname, ALPN, the TLS version really offered, and whether Encrypted Client Hello is in use. The handshake is recognised by its bytes, so TLS on 8080, 4443 or 9001 is read just like 443.
+* **Server certificates.** Up to TLS 1.2 the server's reply is read too: negotiated version and cipher, JA3S, and the certificate's subject, issuer, names, validity and fingerprints. PyNIDS checks it against the name the client asked for and flags self-signed, expired, mismatching and known attack-tool certificates. (TLS 1.3 encrypts the certificate, so there only the version and JA3S are visible.)
 * **Hostnames everywhere.** IPs are turned back into names using the DNS answers and handshakes your Mac already sees, not reverse DNS.
 
 ### Context on every event
@@ -139,11 +141,11 @@ It's generated locally and instantly, with no network calls. The dashboard, menu
 | | |
 |---|---|
 | **Investigate** | One search box for IPs, domains, URLs, file hashes, email addresses, ASNs and CVEs (defanged input welcome). Up to 13 sources answer in parallel: VirusTotal, AbuseIPDB, AlienVault OTX, GreyNoise, urlscan.io, URLhaus, ThreatFox, MalwareBazaar, Shodan InternetDB, RDAP/WHOIS, DNS, Certificate Transparency, and what *this Mac* saw. Each source shows a verdict, a summary, pivots, and its untouched raw response |
-| **Bulk extraction** | Paste a whole alert, ticket or threat report. Every indicator is extracted, de-duplicated, and ready to copy defanged, export as CSV, or investigate |
+| **Bulk extraction** | Paste a whole alert, ticket or threat report. Every indicator is extracted, de-duplicated, and ready to copy defanged, export as CSV, or investigate: addresses (with their port), network ranges, domains, URLs, emails, hashes, CVEs, crypto wallets, file paths and registry keys |
 | **Pivoting** | Click any value in any result (resolved IP, name server, payload hash, certificate name) to investigate it. Your pivot trail stays visible |
 | **Email forensics** | Drop an `.eml`, paste raw source, or send from Thunderbird. The original is stored unchanged and identified by its SHA-256. A lossless MIME parser decodes every part and records the raw lines behind each header, part and finding |
 | **Phishing checks** | SPF/DKIM/DMARC and alignment, a display name hiding another address, Reply-To mismatches, look-alike and punycode domains, link text that lies about the target (SafeLinks/Proofpoint unwrapped), hidden HTML, forms, tracking pixels, invisible characters |
-| **Attachment triage** | Real file type vs. extension, double extensions, right-to-left-override names, macros, encrypted archives (with contents), PDF active content, RTF exploits, HTML smuggling, plus hashes, hex and strings. Nothing is ever executed |
+| **Attachment triage** | Real file type vs. extension, double extensions, right-to-left-override names, macros, encrypted archives (with contents), PDF active content, RTF exploits, HTML smuggling, shortcuts that launch a command, plus hashes, hex and strings. PyNIDS looks inside: compressed PDF streams, archives within archives (ZIP, gzip, tar), and the links and addresses buried in a document or binary. Nothing is ever executed |
 | **Raw viewer** | The exact message source with colour-coded header groups, MIME boundaries, hidden zones, folded base64, clickable indicators, and invisible characters made visible |
 | **Integrations** | Thunderbird add-on ("Analyze in PyNIDS"), VS Code `.eml` highlighting, and `pynids investigate` / `pynids mail analyze` in the terminal |
 
@@ -537,6 +539,13 @@ particular event.
 | `HOST-NEW-PROGRAM` | A program used the internet for the first time after the 24 h learning period (MEDIUM if untrusted) |
 | `BASELINE-NEW-COUNTRY` | A non-browser app contacted a country it never used before (LOW) |
 | `LAN-NEW-DEVICE` | A new MAC address appeared on your local network (LOW) |
+| `LAN-ARP-GATEWAY` | Your router's IP address started answering from a different MAC address: the signature of ARP spoofing (HIGH) |
+| `LAN-ARP-CONFLICT` | An address changed hands twice within 5 minutes: two devices claim it (MEDIUM) |
+| `LAN-ARP-MULTI` | One device answers for 5 or more addresses within a minute (HIGH) |
+| `LAN-ARP-SWEEP` | One device asked for 50 or more addresses within a minute: it is mapping the network (LOW) |
+| `LAN-DHCP-ROGUE` | Two DHCP servers answered within 10 minutes of each other (HIGH) |
+| `LAN-RA-ROUTER` | A second IPv6 router is advertising itself (MEDIUM) |
+| `INTEL-INBOUND-PROBE` | A blocklisted address tried to connect and got no answer (LOW). The full-severity alert follows only if your Mac replies |
 | `HOST-C2-LIKELY` | Two or more independent C2 signals for the same program and server, at least one of them network-side (CRITICAL) |
 
 ### Signature rule IDs
@@ -556,7 +565,8 @@ every rule with its hit count.
 | `SIG-C2-*` | Command and control | IRC, legacy Internet Explorer user-agents, `.onion` lookups, dynamic DNS, reverse-tunnel services, paste and file-drop sites, the Telegram Bot API, Stratum mining and mining pools, executables fetched from a bare IP or delivered over plain HTTP, TLS without a server name, SSH on odd ports, ICMP tunnels, remote-access tool relays (AnyDesk, TeamViewer, ScreenConnect, RustDesk …), the PowerShell Empire default profile |
 | `SIG-EXF-*` | Exfiltration | High rate of DNS TXT queries, DNS NULL-record queries, webhook and request-capture services (webhook.site, Pipedream …), MEGA cloud storage, FTP uploads to the internet |
 | `SIG-IMP-*` | Impact | NTP monlist, memcached over UDP, bursts of DNS ANY queries, a burst of direct-to-MX SMTP connections (spam bot), SSDP discovery arriving from the internet |
-| `SIG-POL-*` | Hygiene | TLS 1.0 / 1.1, SSH protocol 1, SNMP with the `public` community, TFTP |
+| `SIG-TLS-*` | TLS certificates | The default certificate of an attack framework or remote-access trojan (Cobalt Strike, AsyncRAT, Quasar, DcRat, VenomRAT, Orcus, BitRAT, Covenant), a self-signed certificate from an internet server, a certificate that does not cover the name that was requested |
+| `SIG-POL-*` | Hygiene | TLS 1.0 / 1.1, SSH protocol 1, SNMP with the `public` community, TFTP, expired certificates |
 | `INTEL-REPUTATION` | Reputation | An indicator behind an earlier alert (IP, domain, URL, program hash) that VirusTotal, AbuseIPDB or abuse.ch calls malicious. HIGH from one source, CRITICAL when two agree |
 
 SQL injection, XSS, path traversal and scanner user-agents are reported by the HTTP
@@ -566,13 +576,16 @@ Other detectors worth knowing:
 
 * **Failed-lookup bursts (DGA).** A client that gets "no such domain" for 12 or more *different* domains in a minute is flagged: MEDIUM when the names look like words, HIGH when they look machine-generated, the pattern of malware hunting for its command server. One broken domain retried many times, single-label names and private zones (`.local`, `.lan` …) don't count.
 * **Brute force** counts new connection attempts only, not packets inside a session. Attempts *against your Mac* are HIGH ("Brute force on SSH"). Many connections *from your Mac* to one service are MEDIUM ("Many SSH connections"), since that's usually git over SSH or a mail client reconnecting.
-* **Beaconing** (regular check-ins) is MEDIUM when the app polls a named server it looked up, and HIGH when it polls a **bare IP with no DNS lookup**, the more malware-like pattern.
+* **Beaconing** (regular check-ins) is MEDIUM when the app polls a named server it looked up, and HIGH when it polls a **bare IP with no DNS lookup**, the more malware-like pattern. Check-ins are followed by host name, so a server that rotates through many addresses still adds up to one series; beacons up to a day apart are followed, and a night with the lid closed doesn't reset the count.
+* **Slow scans.** Connection attempts that are refused or never answered are remembered for 15 minutes. Failing against 15 ports of one host, or 20 hosts on one port, is a scan however slowly it runs.
+* **Split attacks.** An HTTP request cut across several packets is parsed once it is whole, and signature rules also match a pattern that straddles two packets, so `UNION SEL` + `ECT` is still SQL injection.
+* **Disguised trackers.** A first-party-looking name that is only an alias (CNAME) for a tracker's host is reported as a tracker.
 
 ### Built to stay quiet on a normal Mac
 
 These detectors were tuned against real traffic so everyday use doesn't raise alarms:
 
-* **Traffic spikes** only count traffic you *didn't* ask for (not your downloads), and only above 100 packets/s.
+* **Traffic spikes** only count traffic you *didn't* ask for (not your downloads), and only above 100 packets/s. Each 10-second window is compared with the windows before it, and alerts once.
 * **Port scans** count new connection attempts only, so replies (like your router's DNS answers) and stray ACKs from connections the table has forgotten don't count. Local app-to-app traffic on loopback is ignored, and browsing many HTTPS sites isn't a "host sweep".
 * **Signature rules never fire on a port number alone.** Port rules match the opening SYN only (one alert per connection, never on replies) and require a direction or address scope: SMB inside your LAN is silent, SMB to or from the internet is not.
 * **Large uploads** count bytes *you send*, from 100 MiB per connection. Video and voice calls through WebRTC relays are excluded.
@@ -580,6 +593,7 @@ These detectors were tuned against real traffic so everyday use doesn't raise al
 * **Brute force** ignores the packets of an ongoing SSH or mail session.
 * **Localhost probes** from ordinary apps talking to their own helpers aren't reported one by one; a scan is still caught, per app. Local IPC (a program connecting to a socket it just opened), PyNIDS's own dashboard port, and broadcasts are ignored, and the same app → port probe is reported at most once an hour (the next alert says how many repeats were skipped).
 * **iCloud Private Relay** is reported once, as LOW, not as a stream of encrypted-DNS alerts.
+* **ARP and DHCP** alerts forget what they learned when your Mac gets a new lease, so joining another network that reuses `192.168.1.1` isn't reported as spoofing. One address moving to a new device is a lease changing hands, not a conflict.
 * **Correlation** ignores privacy telemetry, LOW-severity notes, hygiene findings and baseline events, so your own browsing or a new program never makes your Mac look like an "attacker".
 * **QUIC** is reported once per site, not once per CDN server.
 
@@ -602,7 +616,7 @@ If something is still noisy on your network, silence it with a suppression rule 
                            enrich ───────► app · hostname · country · ASN
                               │
                               ▼
-                     flow tracking + detect ► 55 signature rules · 17 detectors · threat intel
+                     flow tracking + detect ► 77 signature rules · 20 detectors · threat intel
                               │
                               ▼
                         alert manager ───► dedup · suppress · correlate · plain-English guide
@@ -616,7 +630,7 @@ If something is still noisy on your network, silence it with a suppression rule 
 
 * **Background service.** A launchd daemon running as root (`/Library/LaunchDaemons/com.pynids.daemon.plist`). It restarts itself on crashes and on network changes. Detection can be paused without stopping the service (`POST /api/detection`, used by the menu bar app).
 * **Capture.** A reader thread drains the BPF socket (`AF_PACKET` on Linux) into a bounded queue; the engine thread decodes raw frames itself. If the engine falls behind, packets are dropped and counted rather than piling up in memory.
-* **Flow tracking.** [`pynids/flow/tracker.py`](pynids/flow/tracker.py) keeps one entry per conversation. A flow first seen through its SYN-ACK, or through a reply from a well-known port, is still attributed to the real client. A reused port pair (a new SYN after a close, or a UDP exchange after 60 s of silence) starts a fresh flow, so each connection is counted once by the scan, brute-force and beacon detectors.
+* **Flow tracking.** [`pynids/flow/tracker.py`](pynids/flow/tracker.py) keeps one entry per conversation. A flow first seen through its SYN-ACK, or through a reply from a well-known port, is still attributed to the real client. A reused port pair (a new SYN after a close, or a UDP exchange after 60 s of silence) starts a fresh flow, so each connection is counted once by the scan, brute-force and beacon detectors. Retransmitted bytes are not counted twice, and the TLS facts of a connection (requested name, JA3, negotiated version, certificate) are kept on the flow.
 * **Signature rules.** Compiled and validated once at load; a rule that fails to compile is skipped and reported, and the rest keep working. Rules needing payload are skipped outright on bare ACK packets. The daemon re-reads the rule files within 30 seconds of a change.
 * **Alert guide.** [`pynids/alerts/guide.py`](pynids/alerts/guide.py) turns each alert into a summary, verdict, explanation, and next steps. The API attaches it as `about` on every alert.
 * **Storage.** Alerts go to SQLite with full-text search at `/Library/Application Support/PyNIDS/events.db`.
@@ -625,11 +639,19 @@ If something is still noisy on your network, silence it with a suppression rule 
   | Feed | Source | Used for |
   |---|---|---|
   | `feodo` | abuse.ch Feodo Tracker | botnet C2 IPs (CRITICAL) |
+  | `c2intel_ips` / `c2intel_domains` | C2IntelFeeds | command-and-control servers seen in the last 30 days (HIGH) |
   | `spamhaus_drop_v4` / `_v6` | Spamhaus DROP | hijacked / criminal netblocks (HIGH) |
-  | `tor_exits` | Tor Project | Tor exit relays (LOW) |
-  | `urlhaus` | abuse.ch URLhaus | malware-distribution hosts (HIGH) |
+  | `et_compromised` | Emerging Threats | compromised hosts used for attacks (MEDIUM) |
+  | `blocklist_de` | blocklist.de | hosts reported for attacking servers (LOW) |
+  | `tor_relays` / `tor_exits` | Tor Project | every Tor relay (a connection to one means Tor is in use) and exit (LOW) |
+  | `openphish` | OpenPhish | phishing pages: the whole host for a site root, otherwise that exact page (HIGH) |
+  | `sslbl_certs` | abuse.ch SSLBL | SHA-1 of certificates used by malware (HIGH) |
+  | `sslbl_ja3` | abuse.ch SSLBL | TLS client fingerprints of malware (MEDIUM) |
   | `disconnect` | Disconnect.me | 4,000+ tracker domains |
   | `doh_domains` / `doh_ipv4` | dibdot DoH lists | encrypted-DNS resolvers |
+
+  abuse.ch's URLhaus and ThreatFox bulk downloads now require an account key, so they are no
+  longer fetched as feeds; both remain available as keyed lookups in **Investigate**.
 
 See [`documentation.md`](documentation.md) for the full technical reference.
 
@@ -743,7 +765,7 @@ Drop an `.eml` file, paste the raw source, or click **Analyze in PyNIDS** in Thu
 * **Decoding.** Handles base64 (and reports junk, padding problems and appended data), quoted-printable, uuencode, RFC 2047 encoded headers, RFC 2231 file names and every charset. Defects are reported, never silently repaired. Decoding is cross-checked against Python's email library in the tests.
 * **Sender & authentication.** Shows the SPF/DKIM/DMARC verdicts and DKIM alignment. It flags a display name that hides another address, Reply-To or Return-Path mismatches, look-alike and punycode domains (`paypa1`, Cyrillic `а`), and invisible characters. The Received chain is shown as a hop table with delays and time anomalies.
 * **Links from everywhere:** text, HTML attributes, CSS, PDFs and HTML attachments. SafeLinks, Proofpoint and Google redirects are unwrapped. Links are flagged for text that shows one site but goes to another, bare IPs, `user@host` tricks, shorteners, free hosting abused for phishing, and brand look-alikes.
-* **Attachments, triaged in memory.** Real type from the file's bytes vs. its extension, double extensions, right-to-left override names, macros, password-protected archives (with contents), PDF active content (including hex-escaped keywords), RTF objects, HTML smuggling, plus hashes, hex view and strings. Downloads are saved as `.bin` only after a warning.
+* **Attachments, triaged in memory.** Real type from the file's bytes vs. its extension, double extensions, right-to-left override names, macros, password-protected archives (with contents), PDF active content (including hex-escaped keywords and whatever sits inside compressed streams), RTF objects, HTML smuggling, shortcuts that launch PowerShell or `cmd`, plus hashes, hex view and strings. Archives inside archives (ZIP, gzip, tar) are opened up to three levels deep and each member is triaged in turn; RAR and 7-Zip are flagged as not examined. Links, email addresses and public IPs found *inside* an attachment are listed with the message's own, along with the SHA-256 of every nested file. Downloads are saved as `.bin` only after a warning.
 * **HTML preview** only on request, in a sandbox with scripts, forms, links and *all* remote content blocked, so tracking pixels never tell the sender you looked.
 * **Indicators** found anywhere in the message can be investigated together in one click.
 
@@ -810,8 +832,14 @@ behavioral:
   exfil_threshold_bytes: 104857600   # 100 MiB uploaded by one connection
   dga_nxdomain_threshold: 12         # distinct failing domains per client in dga_window (0 = off)
   dga_window: 60
+  beacon_max_interval: 86400         # longest gap between check-ins still followed
+scan:
+  slow_window: 900                   # refused / unanswered attempts count this long (0 = off)
 flow:
   udp_session_gap: 60                # a UDP 5-tuple silent this long starts a new flow
+  stream_window_bytes: 1024          # bytes kept per TCP direction to match split patterns (0 = off)
+lan:
+  enabled: true                      # ARP spoofing, sweeps, rogue DHCP servers and IPv6 routers
 
 host:
   signatures: true               # check code signatures of programs on the network
@@ -1027,10 +1055,10 @@ request shape.
 pynids/
 ├── engine.py            detection pipeline
 ├── sniffer.py           live capture (raw BPF frames + decoder) / PCAP replay
-├── protocols/           HTTP, DNS, TLS, QUIC (+ decryption), STUN, SSH, SMTP
-├── detection/           signature, anomaly, behavioural (incl. DGA), X-Ray (stealth) detectors
+├── protocols/           HTTP, DNS, TLS (client + server side), QUIC (+ decryption), STUN, SSH, SMTP, DHCP
+├── detection/           signature, anomaly, behavioural (incl. DGA), local-network (ARP, DHCP), X-Ray (stealth) detectors
 ├── rules/               default_rules.yaml: the built-in signature ruleset
-├── flow/                connection table: direction, state, per-side counters
+├── flow/                connection table: direction, state, per-side counters; stream window for split patterns
 ├── enrich/              app attribution (psutil + nettop), hostnames, GeoIP
 ├── host/                code signatures, socket table, launch items, IP dossiers, LAN inventory
 ├── intel/               threat intel index + live feeds
@@ -1087,7 +1115,8 @@ one raw byte, so `'\xffSMB\x72'` matches binary data.
 | Field | Meaning |
 |---|---|
 | `src_ip`, `dst_ip`, `src_port`, `dst_port`, `protocol`, `payload_bytes`, `payload_len` | The packet |
-| `layer7.http.*`, `layer7.dns.*`, `layer7.tls.*`, `layer7.quic.*`, `layer7.ssh.*`, `layer7.smtp.*` | Dissected fields, e.g. `layer7.http.uri`, `layer7.http.headers.authorization`, `layer7.dns.query_name`, `layer7.dns.query_type`, `layer7.tls.sni`, `layer7.tls.ja3` |
+| `layer7.http.*`, `layer7.dns.*`, `layer7.tls.*`, `layer7.quic.*`, `layer7.ssh.*`, `layer7.smtp.*`, `layer7.dhcp.*` | Dissected fields, e.g. `layer7.http.uri`, `layer7.http.headers.authorization`, `layer7.dns.query_name`, `layer7.dns.query_type`, `layer7.tls.sni`, `layer7.tls.ja3` |
+| `layer7.tls.cert.*`, `layer7.tls.ja3s`, `layer7.tls.negotiated_version` | The server's side of a TLS handshake (certificate up to TLS 1.2): `subject`, `issuer`, `subject_cn`, `san`, `sha256`, `sha1`, `self_signed`, `expired`, `matches_sni` |
 | `tcp.syn`, `tcp.synack`, `tcp.fin`, `tcp.rst`, `tcp.null`, `tcp.xmas` | TCP flag tests; `tcp.syn` is a connection attempt (SYN without ACK) |
 | `direction` | `outbound`, `inbound`, `local` or `transit` (needs process/host enrichment) |
 | `src_scope`, `dst_scope` | `public`, `private`, `loopback`, `link_local` or `multicast` |
@@ -1134,11 +1163,11 @@ catalogue ([`pynids/alerts/mitre.py`](pynids/alerts/mitre.py)).
 | Reconnaissance | T1595, T1595.003, T1592.004 | `HttpAttackDetector` (scanner user-agents), `SIG-EXP-008`, `WebRtcLeakDetector` |
 | Initial Access | T1190 | `HttpAttackDetector`, `SIG-EXP-*`, `SIG-LAT-006` |
 | Execution | T1059.001 / .003 / .004 / .006 / .007, T1569.002 | `SIG-EXE-*`, `SIG-LAT-007`, `HttpAttackDetector` (XSS) |
-| Credential Access | T1110, T1187, T1552, T1557.001 | `BruteForceDetector`, `SIG-CRED-*`, `SIG-C2-003` |
-| Discovery | T1046, T1016, T1083 | `PortScanDetector`, `LocalhostProbeDetector`, `SIG-REC-*`, `HttpAttackDetector` |
+| Credential Access | T1110, T1187, T1552, T1557, T1557.001 / .002 / .003 | `BruteForceDetector`, `SIG-CRED-*`, `SIG-C2-003`, `ArpSpoofDetector`, `RogueServiceDetector`, `SIG-TLS-003` |
+| Discovery | T1046, T1016, T1018, T1083 | `PortScanDetector`, `PingSweepDetector`, `ArpSpoofDetector` (sweeps), `LocalhostProbeDetector`, `SIG-REC-*`, `HttpAttackDetector` |
 | Lateral Movement | T1021.001 / .002 / .004 / .005 / .006, T1210 | `SIG-LAT-*`, `SIG-EXP-006` |
 | Collection | T1602.001 | `SIG-POL-003` |
-| Command and Control | T1071, T1071.001, T1071.004, T1090.003, T1095, T1102, T1105, T1568, T1568.002, T1571, T1572, T1573 | `BeaconingDetector`, `DnsTunnelingDetector`, `DgaDetector`, `DohDetector`, threat intel, `SIG-C2-*` |
+| Command and Control | T1071, T1071.001, T1071.004, T1090.003, T1095, T1102, T1105, T1568, T1568.002, T1571, T1572, T1573, T1573.002 | `BeaconingDetector`, `DnsTunnelingDetector`, `DgaDetector`, `DohDetector`, threat intel (addresses, names, JA3, certificates), `SIG-C2-*`, `SIG-TLS-*` |
 | Exfiltration | T1041, T1048.003 | `DataExfiltrationDetector`, `SIG-EXF-*` |
 | Impact | T1496, T1498, T1498.002 | `AnomalyDetector`, `SIG-C2-009` / `-010` (mining), `SIG-IMP-*` |
 

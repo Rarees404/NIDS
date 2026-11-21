@@ -78,7 +78,7 @@ class TestDetectorPruning:
         assert len(scan._state) <= 1 and len(bf._attempts) == 0 and len(vol._per_source) <= 1
 
     def test_beaconing_keeps_active_pairs(self):
-        det = BeaconingDetector()
+        det = BeaconingDetector(max_interval_seconds=3600)
         det._history[("a", "b", 1)].append(1000.0)
         det._history[("a", "c", 1)].append(5000.0)
         det.prune(5000.0 + 60)

@@ -59,6 +59,8 @@ class Flow:
         app_proto:        Application protocol the dissector recognised (http, tls, dns …).
         server_name:      TLS SNI / HTTP Host / DNS name seen on the flow.
         app:              Local program that owns the flow, when attributed.
+        tls:              TLS facts seen on the flow: ``sni``, ``ja3``, ``version``,
+                          ``cipher``, ``ja3s``, ``cert_subject``, ``cert_issuer`` …
     """
 
     flow_id: str
@@ -80,6 +82,7 @@ class Flow:
     app_proto: Optional[str] = None
     server_name: Optional[str] = None
     app: Optional[str] = None
+    tls: Optional[Dict[str, Any]] = None
     _fin_sides: int = 0  # bit 0: initiator sent FIN, bit 1: responder sent FIN
 
     @property
@@ -159,6 +162,7 @@ class Flow:
             "app_proto": self.app_proto,
             "server_name": self.server_name,
             "app": self.app,
+            "tls": dict(self.tls) if self.tls else None,
             "initiator_inferred": self.initiator_inferred,
         }
 
@@ -247,7 +251,8 @@ class FlowTracker:
             self._newest = ts
         from_src = src_ip == flow.src_ip and src_port == flow.src_port
         flow.packet_count += 1
-        payload_len = len(meta.get("payload_bytes") or b"")
+        # A retransmitted segment carries bytes already counted once.
+        payload_len = 0 if meta.get("tcp_retransmit") else len(meta.get("payload_bytes") or b"")
         flow.byte_count += payload_len
         if from_src:
             flow.packets_from_src += 1

@@ -79,7 +79,7 @@ _CVE = [
 def links(ioc: Ioc) -> List[Dict[str, str]]:
     table = {"ipv4": _IP, "ipv6": _IP, "domain": _DOMAIN, "url": _URL, "email": _EMAIL,
              "asn": _ASN, "cve": _CVE}.get(ioc.type)
-    if table is None and len(ioc.value) in HASH_TYPES:
+    if table is None and ioc.type in HASH_TYPES.values():
         table = _HASH
     if not table:
         return []

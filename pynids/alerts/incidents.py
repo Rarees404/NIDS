@@ -199,7 +199,7 @@ def _candidates(alert: Dict[str, Any]) -> Iterable[Tuple[str, Any]]:
     yield "HTTP host", str(host).split(":")[0] if host else None
     if host and http.get("uri") and str(http.get("uri")).startswith("/"):
         yield "URL", f"http://{host}{http['uri']}"
-    for key in ("sni", "url", "indicator", "leaked_ip", "resolver"):
+    for key in ("sni", "url", "indicator", "leaked_ip", "resolver", "cname_target"):
         yield key.replace("_", " "), ev.get(key)
     for key in ("sha256", "sha1", "md5"):
         yield "file hash", ev.get(key) or ctx.get(key)

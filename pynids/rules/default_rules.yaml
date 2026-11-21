@@ -14,6 +14,9 @@
 #              endswith regex cidr exists
 #   Fields     src_ip dst_ip src_port dst_port protocol payload_bytes payload_len
 #              layer7.<proto>.<field>   (http, dns, tls, quic, ssh, smtp)
+#              layer7.tls.cert.<field>  (server certificate, TLS <= 1.2: subject issuer
+#                                        subject_cn issuer_cn san sha256 sha1 self_signed
+#                                        expired matches_sni validity_days)
 #              tcp.syn  tcp.null  tcp.xmas          (a "syn" is a connection attempt)
 #              direction                            (outbound | inbound | local | transit)
 #              src_scope  dst_scope                 (public | private | loopback | link_local | multicast)
@@ -1251,6 +1254,60 @@ rules:
     action: alert
 
   # =========================================================================
+  # TLS certificates — what the server presents.  Readable up to TLS 1.2;
+  # TLS 1.3 encrypts the certificate, so these rules cannot see it there.
+  # The packet carrying the certificate travels server -> client, so
+  # src_ip is the server.
+  # =========================================================================
+
+  - id: "SIG-TLS-001"
+    description: "TLS certificate carrying the default name of an attack framework or remote-access trojan"
+    message: "Attack-tool default certificate ({layer7.tls.cert.subject_cn}) presented by {src_ip}:{src_port}"
+    severity: HIGH
+    confidence: 0.9
+    mitre: "T1573.002"
+    tags: [c2, tls, certificate]
+    match:
+      any:
+        - {field: layer7.tls.cert.subject, op: regex, value: &c2_certs 'Major Cobalt Strike|O=cobaltstrike|AsyncRAT Server|Quasar Server CA|DcRat Server|DcRat By qwqdanchun|VenomRAT Server|Orcus Server|CN=BitRAT|CN=Covenant(,|$)'}
+        - {field: layer7.tls.cert.issuer, op: regex, value: *c2_certs}
+    why: "Cobalt Strike, AsyncRAT, Quasar, DcRat, VenomRAT, Orcus, BitRAT and Covenant generate a certificate with a recognisable built-in name unless the operator replaces it. No legitimate service uses these names."
+    response: "Treat the program that opened this connection as compromised: identify it, isolate the machine and block the server address."
+    references: ["https://sslbl.abuse.ch/"]
+    action: alert
+
+  - id: "SIG-TLS-002"
+    description: "Self-signed TLS certificate presented by an internet server"
+    message: "Self-signed certificate ({layer7.tls.cert.subject_cn}) from {src_ip}:{src_port}"
+    severity: LOW
+    confidence: 0.4
+    mitre: "T1573.002"
+    tags: [tls, certificate, self_signed]
+    match:
+      all:
+        - {field: layer7.tls.cert.self_signed, op: eq, value: true}
+        - {field: src_scope, op: eq, value: public}
+        - {field: dst_scope, op: ne, value: public}
+    why: "Public services buy or obtain a certificate from an authority. A server on the internet that signs its own is a private setup: a self-hosted service, a peer-to-peer or sync tool, or a command server stood up in a hurry."
+    response: "Check which app made the connection and whether you expect it to talk to a private server."
+    action: alert
+
+  - id: "SIG-TLS-003"
+    description: "TLS certificate does not cover the server name that was requested"
+    message: "Certificate for {layer7.tls.cert.subject_cn} answered a request for {layer7.tls.cert.requested_name} ({src_ip}:{src_port})"
+    severity: MEDIUM
+    confidence: 0.5
+    mitre: "T1557"
+    tags: [tls, certificate, name_mismatch]
+    match:
+      all:
+        - {field: layer7.tls.cert.matches_sni, op: eq, value: false}
+        - {field: src_scope, op: eq, value: public}
+    why: "The client asked for one name and the server proved it is someone else. That happens on a captive portal or a misconfigured server, when something on the path intercepts the connection, or when a program sends a harmless-looking name to a server that is not that site."
+    response: "On public Wi-Fi this is usually the login portal. Otherwise check which app made the connection and look up the address."
+    action: alert
+
+  # =========================================================================
   # Hygiene — weak or outdated protocols
   # =========================================================================
 
@@ -1314,4 +1371,18 @@ rules:
         - {field: payload_bytes, op: regex, value: '^\x00[\x01\x02][^\x00]{1,200}\x00(octet|netascii)'}
     why: "TFTP has no authentication or encryption. It boots network devices — and is a common way to pull tools onto a compromised machine."
     response: "Expected during network boot or device firmware updates only."
+    action: alert
+
+  - id: "SIG-POL-005"
+    description: "Expired TLS certificate presented by an internet server"
+    message: "Expired certificate ({layer7.tls.cert.subject_cn}) from {src_ip}:{src_port}"
+    severity: LOW
+    confidence: 0.8
+    tags: [policy, tls, certificate, weak_crypto]
+    match:
+      all:
+        - {field: layer7.tls.cert.expired, op: eq, value: true}
+        - {field: src_scope, op: eq, value: public}
+    why: "A certificate past its end date no longer proves who the server is. Programs that still accept it are not checking, and would accept a forged one too."
+    response: "Find the app that made the connection; if it is yours to configure, turn certificate checking back on or update it."
     action: alert

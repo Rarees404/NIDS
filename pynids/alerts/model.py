@@ -121,6 +121,18 @@ class Alert:
         }
 
     @property
+    def detection_id(self) -> str:
+        """
+        What fired: the rule id, or for built-in detectors that carry none
+        the stable ``detector:<what>`` label (``detector:sqli``,
+        ``detector:beaconing`` …).  Two different detections never share one.
+        """
+        if self.rule_id:
+            return self.rule_id
+        from .classify import detector_label  # classify imports this module
+        return detector_label(self.tags, self.alert_type.value)
+
+    @property
     def dedup_key(self) -> str:
         """Key used for alert deduplication within a time window."""
-        return f"{self.rule_id or self.alert_type.value}|{self.src_ip}|{self.dst_ip}|{self.dst_port}"
+        return f"{self.detection_id}|{self.src_ip}|{self.dst_ip}|{self.dst_port}"

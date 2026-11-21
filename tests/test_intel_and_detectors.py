@@ -62,8 +62,17 @@ class TestFeeds:
     def test_update_and_load(self, tmp_path):
         bodies = {
             "feodo": "162.243.103.246\n", "spamhaus_drop_v4": SPAMHAUS, "spamhaus_drop_v6": "",
-            "tor_exits": "171.25.193.25\n", "urlhaus": HOSTFILE, "disconnect": DISCONNECT,
+            "tor_exits": "171.25.193.25\n", "disconnect": DISCONNECT,
             "doh_domains": "dns.example-doh.net\n", "doh_ipv4": "9.9.9.9 # quad9\n",
+            "c2intel_ips": "#ip,ioc\n198.51.100.7,Possible Cobaltstrike C2 IP\n",
+            "c2intel_domains": "#domain,ioc\nevil-dropper.example,Possible Cobalt Strike C2 Domain\n",
+            "et_compromised": "198.51.100.8\n", "blocklist_de": "198.51.100.9\n",
+            "tor_relays": json.dumps({"relays": [{"or_addresses": ["171.25.193.25:443", "[2001:db8::1]:9001"]},
+                                                 {"or_addresses": ["198.51.100.10:9001"]}]}),
+            "openphish": "https://phish.example/\nhttps://sites.shared.example/u/login.php?x=1\n",
+            "sslbl_certs": "# Listingdate,SHA1,Listingreason\n2026-01-01 00:00:00,"
+                           + "ab" * 20 + ",Malware C&C\n",
+            "sslbl_ja3": "# ja3_md5,Firstseen,Lastseen,Listingreason\n" + "cd" * 16 + ",2017,2019,Dridex\n",
         }
         by_url = {spec.url: bodies[spec.name] for spec in feeds.FEEDS}
         results = feeds.update_feeds(tmp_path, fetch=lambda url, timeout: by_url[url])
@@ -71,9 +80,22 @@ class TestFeeds:
         assert status["feodo"].ok and status["feodo"].entries == 1
         assert not status["spamhaus_drop_v6"].ok  # empty feed is an error, old cache kept
         ti = ThreatIntel()
-        assert feeds.load_into(ti, tmp_path) == 4
+        assert feeds.load_into(ti, tmp_path) == 14
         assert ti.check_ip("162.243.103.246").severity == "CRITICAL"
-        assert ti.check_domain("evil-dropper.example").category == "malware"
+        assert ti.check_domain("evil-dropper.example").category == "c2"
+        assert ti.check_ip("198.51.100.7").category == "c2"
+        assert ti.check_ip("198.51.100.9").category == "attacker"
+        assert ti.check_ip("198.51.100.10").category == "tor_relay"
+        assert ti.check_ip("2001:db8::1").category == "tor_relay"
+        assert ti.check_ip("171.25.193.25").category == "tor_exit"   # exit label wins over relay
+        # A phishing site root lists the host; a page on a shared host lists only that page.
+        assert ti.check_domain("phish.example").category == "phishing"
+        assert ti.check_domain("sites.shared.example") is None
+        assert ti.check_url("sites.shared.example", "/u/login.php?x=1").category == "phishing"
+        assert ti.check_url("sites.shared.example", "/other") is None
+        assert ti.check_cert("AB" * 20).category == "c2"
+        assert ti.check_ja3("cd" * 16).description.endswith("(Dridex)")
+        assert ti.check_ja3(None) is None and ti.check_cert("00" * 20) is None
         assert feeds.load_doh(tmp_path) == ({"dns.example-doh.net"}, {"9.9.9.9"})
         assert "adco.example" in feeds.load_trackers(tmp_path)
         assert feeds.oldest_fetch_age(tmp_path) == float("inf")  # v6 missing

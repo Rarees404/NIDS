@@ -57,7 +57,7 @@ def classify_parts(rule_id: str, tags: Iterable[str], alert_type: str) -> str:
     return "other"
 
 
-_DETECTOR_TAGS = ("beaconing", "dga", "dns_tunneling", "brute_force", "host_sweep", "vertical_scan",
+_DETECTOR_TAGS = ("beaconing", "dga", "dns_tunneling", "brute_force", "ping_sweep", "host_sweep", "vertical_scan",
                   "volumetric", "sqli", "xss", "path_traversal", "scanner", "exfiltration",
                   "correlation", "threat_intel")
 

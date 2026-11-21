@@ -19,6 +19,8 @@ scan:
   horizontal_window: 60      # Window in seconds
   vertical_threshold: 12     # Unique dst ports on same host before alert
   vertical_window: 60
+  slow_window: 900           # Failed (refused / unanswered) attempts count this long; 0 disables
+  attempt_timeout: 5         # Seconds without an answer before a SYN counts as failed
 
 # ---------------------------------------------------------------------------
 # Brute-force detection
@@ -50,6 +52,7 @@ behavioral:
   beacon_cv_threshold: 0.20   # Coefficient of variation below = beaconing
   dga_nxdomain_threshold: 12  # Distinct domains answered NXDOMAIN for one client (0 = off)
   dga_window: 60              # ... within this many seconds
+  beacon_max_interval: 86400  # Longest gap between check-ins still followed (slow beacons)
 
 # ---------------------------------------------------------------------------
 # Stealth / X-Ray detectors — surface what browsers hide from DevTools
@@ -71,6 +74,16 @@ flow:
   max_flows: 100000           # Max concurrent tracked flows
   idle_timeout: 300           # Seconds of inactivity before flow expires
   udp_session_gap: 60         # A UDP 5-tuple silent this long starts a new flow (0 = never)
+  stream_window_bytes: 1024   # Bytes kept per TCP direction so rules match patterns split across segments (0 = off)
+
+# ---------------------------------------------------------------------------
+# Local network (layer 2): ARP spoofing, ping sweeps, rogue DHCP / IPv6 routers
+# ---------------------------------------------------------------------------
+lan:
+  enabled: true
+  arp_claim_threshold: 5      # Addresses one MAC may answer for within a minute
+  arp_sweep_threshold: 50     # Addresses one MAC may ask for within a minute
+  rogue_window: 600           # Two DHCP servers / IPv6 routers this close together = rogue
 
 # ---------------------------------------------------------------------------
 # Threat intelligence feeds

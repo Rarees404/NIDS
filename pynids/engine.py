@@ -53,9 +53,10 @@ from .detection.stealth import (
     WebRtcLeakDetector,
     WebSocketDetector,
 )
+from .flow.stream import StreamWindow
 from .flow.tracker import FlowTracker
 from .intel.threat_intel import ThreatIntel
-from .protocols.dissector import dissect
+from .protocols.dissector import cert_matches_name, dissect
 
 if TYPE_CHECKING:
     from .enrich import Enricher
@@ -154,6 +155,11 @@ class DetectionEngine:
             udp_session_gap=float(flow_cfg.get("udp_session_gap", 60)),
         )
 
+        # Bytes preceding each TCP segment, so payload rules can match a
+        # pattern split across two segments (0 disables).
+        tail = int(flow_cfg.get("stream_window_bytes", 1024))
+        self._streams: Optional[StreamWindow] = StreamWindow(tail_bytes=tail) if tail > 0 else None
+
         # --- Threat intelligence ---
         self._intel = intel
 
@@ -210,6 +216,16 @@ class DetectionEngine:
             if context:
                 layer7["context"] = context  # lets detectors see the owning app
 
+            # 1c. Stream continuity: retransmissions, and the bytes just before
+            #     this segment for cross-segment signature matching.
+            if self._streams is not None and meta.get("tcp_seq") is not None:
+                payload = meta.get("payload_bytes") or b""
+                opaque = layer7.get("app_proto") in _OPAQUE_PROTOS or (
+                    len(payload) > 2 and 0x14 <= payload[0] <= 0x17 and payload[1] == 0x03)
+                prefix = self._streams.update(meta, opaque)
+                if prefix:
+                    meta["stream_prefix"] = prefix
+
             # 2. Flow tracking
             flow = self._flow_tracker.update(meta)
             if flow is not None and (layer7 or context):
@@ -217,7 +233,7 @@ class DetectionEngine:
 
             # 3. Threat intelligence checks
             try:
-                alerts.extend(self._run_threat_intel(meta, layer7))
+                alerts.extend(self._run_threat_intel(meta, layer7, flow))
             except Exception as exc:
                 logger.error("Threat-intel check raised: %s", exc)
 
@@ -403,6 +419,8 @@ class DetectionEngine:
                 horizontal_window=float(scan_cfg.get("horizontal_window", 60)),
                 vertical_threshold=int(scan_cfg.get("vertical_threshold", 15)),
                 vertical_window=float(scan_cfg.get("vertical_window", 60)),
+                slow_window=float(scan_cfg.get("slow_window", 900)),
+                attempt_timeout=float(scan_cfg.get("attempt_timeout", 5)),
             )
         )
 
@@ -440,8 +458,25 @@ class DetectionEngine:
             BeaconingDetector(
                 min_connections=int(beh_cfg.get("beacon_min_connections", 6)),
                 cv_threshold=float(beh_cfg.get("beacon_cv_threshold", 0.20)),
+                max_interval_seconds=float(beh_cfg.get("beacon_max_interval", 86400)),
             )
         )
+
+        # Local-network detectors: ARP spoofing, ping sweeps, rogue DHCP
+        # servers and IPv6 routers.  Disable with `lan: { enabled: false }`.
+        lan_cfg = config.get("lan", {}) or {}
+        if lan_cfg.get("enabled", True):
+            from .detection.lan import ArpSpoofDetector, PingSweepDetector, RogueServiceDetector
+            self._detectors.append(ArpSpoofDetector(
+                claim_threshold=int(lan_cfg.get("arp_claim_threshold", 5)),
+                sweep_threshold=int(lan_cfg.get("arp_sweep_threshold", 50)),
+            ))
+            self._detectors.append(PingSweepDetector(
+                threshold=int(lan_cfg.get("ping_sweep_threshold", scan_cfg.get("horizontal_threshold", 20))),
+            ))
+            self._detectors.append(RogueServiceDetector(
+                window=float(lan_cfg.get("rogue_window", 600)),
+            ))
 
         # Stealth-activity detectors — surface what browsers hide from
         # the DevTools Network tab (WebRTC IP leaks, localhost probes,
@@ -485,7 +520,7 @@ class DetectionEngine:
         logger.info("Initialised %d detectors", len(self._detectors))
 
     def _run_threat_intel(
-        self, meta: Dict[str, Any], layer7: Dict[str, Any]
+        self, meta: Dict[str, Any], layer7: Dict[str, Any], flow: Any = None
     ) -> List[Alert]:
         if not self._intel:
             return []
@@ -496,7 +531,40 @@ class DetectionEngine:
         src_ip = meta.get("src_ip")
         if src_ip:
             entry = self._intel.check_ip(src_ip)
-            if entry:
+            # A listed address knocking on the door, with nothing sent back, is
+            # internet background noise.  It only becomes a real finding once
+            # this side answers (or opened the conversation itself).
+            # (TCP: its SYN was seen and not answered; a connection picked up
+            # mid-stream is judged in full.)
+            probe = (entry is not None and flow is not None and flow.src_ip == src_ip
+                     and flow.packets_to_src == 0
+                     and (flow.protocol != "tcp" or flow.outcome == "attempt"))
+            if entry and probe:
+                alerts.append(
+                    Alert(
+                        alert_type=AlertType.THREAT_INTEL,
+                        severity=Severity.LOW,
+                        message=(
+                            f"Unanswered connection attempt from listed address {src_ip} "
+                            f"({entry.category}): {entry.description}"
+                        ),
+                        src_ip=src_ip,
+                        dst_ip=meta.get("dst_ip"),
+                        dst_port=meta.get("dst_port"),
+                        protocol=meta.get("protocol"),
+                        rule_id="INTEL-INBOUND-PROBE",
+                        mitre_technique="T1595",
+                        tags=["threat_intel", "inbound_probe", entry.category],
+                        confidence=0.9,
+                        evidence={
+                            "matched_indicator": entry.indicator,
+                            "category": entry.category,
+                            "listed_severity": entry.severity,
+                            "answered": False,
+                        },
+                    )
+                )
+            elif entry:
                 alerts.append(
                     Alert(
                         alert_type=AlertType.THREAT_INTEL,
@@ -574,6 +642,102 @@ class DetectionEngine:
                     )
                 )
 
+        # Check where the name leads: a harmless-looking name that is an alias
+        # (CNAME) for a listed host ends up at the same server.
+        dns = layer7.get("dns") or {}
+        if dns.get("is_response") and dns.get("answers"):
+            seen = {str(dns_name or "").lower().rstrip(".")}
+            for answer in dns["answers"][:16]:
+                if answer.get("type") != "CNAME":
+                    continue
+                target = str(answer.get("data") or "").lower().rstrip(".")
+                if not target or target in seen:
+                    continue
+                seen.add(target)
+                entry = self._intel.check_domain(target)
+                if entry:
+                    alerts.append(
+                        Alert(
+                            alert_type=AlertType.THREAT_INTEL,
+                            severity=Severity(entry.severity),
+                            message=(
+                                f"'{dns_name}' is an alias for known malicious host '{target}' "
+                                f"({entry.category}): {entry.description}"
+                            ),
+                            src_ip=dst_ip,          # the client that asked
+                            dst_ip=src_ip,
+                            dst_port=meta.get("src_port"),
+                            protocol=meta.get("protocol"),
+                            mitre_technique="T1071.004",
+                            tags=["threat_intel", "dns", "cname", entry.category],
+                            confidence=1.0,
+                            evidence={
+                                "query_name": dns_name,
+                                "cname_target": target,
+                                "matched_indicator": entry.indicator,
+                                "category": entry.category,
+                            },
+                        )
+                    )
+                    break
+
+        # Check TLS fingerprints: the client's JA3 and the server's certificate
+        tls = layer7.get("tls") or {}
+        ja3 = tls.get("ja3") or (layer7.get("quic") or {}).get("ja3")
+        entry = self._intel.check_ja3(ja3)
+        if entry:
+            alerts.append(
+                Alert(
+                    alert_type=AlertType.THREAT_INTEL,
+                    severity=Severity(entry.severity),
+                    message=(
+                        f"TLS client fingerprint of known malware from {src_ip} → {dst_ip}: "
+                        f"{entry.description}"
+                    ),
+                    src_ip=src_ip,
+                    dst_ip=dst_ip,
+                    dst_port=meta.get("dst_port"),
+                    protocol=meta.get("protocol"),
+                    mitre_technique="T1573",
+                    tags=["threat_intel", "ja3", entry.category],
+                    # A JA3 is shared by every program built on the same TLS library.
+                    confidence=0.5,
+                    evidence={
+                        "ja3": ja3,
+                        "sni": tls.get("sni"),
+                        "matched_indicator": entry.indicator,
+                        "category": entry.category,
+                    },
+                )
+            )
+        cert = tls.get("cert") or {}
+        entry = self._intel.check_cert(cert.get("sha1"))
+        if entry:
+            alerts.append(
+                Alert(
+                    alert_type=AlertType.THREAT_INTEL,
+                    severity=Severity(entry.severity),
+                    message=(
+                        f"Server {src_ip}:{meta.get('src_port')} presented a certificate used by malware: "
+                        f"{entry.description}"
+                    ),
+                    src_ip=dst_ip,          # the client talking to that server
+                    dst_ip=src_ip,
+                    dst_port=meta.get("src_port"),
+                    protocol=meta.get("protocol"),
+                    mitre_technique="T1573.002",
+                    tags=["threat_intel", "certificate", entry.category],
+                    confidence=1.0,
+                    evidence={
+                        "cert_sha1": cert.get("sha1"),
+                        "cert_subject": cert.get("subject"),
+                        "cert_issuer": cert.get("issuer"),
+                        "matched_indicator": entry.indicator,
+                        "category": entry.category,
+                    },
+                )
+            )
+
         # Check TLS / QUIC server names — still visible when DNS is encrypted
         sni = (layer7.get("tls") or {}).get("sni") or (layer7.get("quic") or {}).get("sni")
         if sni and sni != dns_name:
@@ -609,7 +773,8 @@ class DetectionEngine:
             host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
             host = host.strip("[]").lower()
         if host and host not in (dns_name, sni):
-            entry = self._intel.check_domain(host)
+            # The whole host, or failing that this exact page on it.
+            entry = self._intel.check_domain(host) or self._intel.check_url(host, http.get("uri"))
             if entry:
                 alerts.append(
                     Alert(
@@ -639,6 +804,10 @@ class DetectionEngine:
         return alerts
 
 
+# Encrypted or binary-framed protocols: no plaintext worth carrying across segments.
+_OPAQUE_PROTOS = frozenset({"tls", "ssh", "quic"})
+
+
 def _annotate_flow(flow: Any, layer7: Dict[str, Any], context: Dict[str, Any]) -> None:
     """Remember what the dissector and enricher learned about a flow."""
     proto = layer7.get("app_proto")
@@ -652,6 +821,40 @@ def _annotate_flow(flow: Any, layer7: Dict[str, Any], context: Dict[str, Any]) -
             flow.server_name = str(name)[:253]
     if flow.app is None and context.get("app"):
         flow.app = context["app"]
+    tls = layer7.get("tls")
+    if tls:
+        _annotate_tls(flow, tls)
+
+
+def _annotate_tls(flow: Any, tls: Dict[str, Any]) -> None:
+    """
+    Keep the handshake facts on the flow, and judge the server certificate
+    against the name the client asked for (``cert.matches_sni``): the two
+    halves arrive in different packets, so only the flow can compare them.
+    """
+    facts: Dict[str, Any] = {}
+    if tls.get("direction") == "server":
+        facts = {"version": tls.get("negotiated_version"), "cipher": tls.get("cipher_suite"),
+                 "ja3s": tls.get("ja3s"), "alpn": tls.get("alpn_selected")}
+        cert = tls.get("cert")
+        if cert:
+            sni = (flow.tls or {}).get("sni")
+            match = cert_matches_name(cert, sni)
+            if match is not None:
+                cert["matches_sni"] = match
+                cert["requested_name"] = sni
+            facts.update({
+                "cert_subject": cert.get("subject_cn") or cert.get("subject"),
+                "cert_issuer": cert.get("issuer_cn") or cert.get("issuer"),
+                "cert_sha256": cert.get("sha256"), "cert_not_after": cert.get("not_after"),
+                "cert_self_signed": cert.get("self_signed"), "cert_matches_sni": cert.get("matches_sni"),
+            })
+    elif tls.get("ja3") or tls.get("sni"):
+        facts = {"sni": tls.get("sni"), "ja3": tls.get("ja3"), "offered_version": tls.get("tls_version"),
+                 "ech": tls.get("ech")}
+    facts = {k: v for k, v in facts.items() if v is not None}
+    if facts:
+        flow.tls = {**(flow.tls or {}), **facts}
 
 
 def _flow_context(flow: Any) -> Dict[str, Any]:
@@ -667,4 +870,5 @@ def _flow_context(flow: Any) -> Dict[str, Any]:
         "duration": round(flow.duration, 2),
         "app_proto": flow.app_proto,
         "server_name": flow.server_name,
+        **({"tls": dict(flow.tls)} if flow.tls else {}),
     }

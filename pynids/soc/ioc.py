@@ -9,11 +9,17 @@ ticket or report.  :func:`classify` turns one value into an :class:`Ioc`;
 Types
 -----
 ``ipv4`` ``ipv6`` ``domain`` ``url`` ``email`` ``md5`` ``sha1`` ``sha256``
-``sha512`` ``asn`` ``cve``
+``sha512`` ``asn`` ``cve`` ``cidr`` ``wallet`` ``filepath`` ``regkey``
+
+The last four are host and context indicators: they are extracted and
+listed, but there is nothing to look up for them at a reputation source.
+An address written with a port (``45.9.1.2:8443``, ``[2001:db8::1]:443``)
+is an ``ipv4`` / ``ipv6`` indicator whose ``original`` keeps the port.
 """
 from __future__ import annotations
 
 import bisect
+import hashlib
 import ipaddress
 import re
 from dataclasses import asdict, dataclass
@@ -21,7 +27,8 @@ from typing import Dict, List, Optional
 from urllib.parse import urlsplit
 
 HASH_TYPES = {32: "md5", 40: "sha1", 64: "sha256", 128: "sha512"}
-TYPES = ("ipv4", "ipv6", "domain", "url", "email", "md5", "sha1", "sha256", "sha512", "asn", "cve")
+TYPES = ("ipv4", "ipv6", "domain", "url", "email", "md5", "sha1", "sha256", "sha512", "asn", "cve",
+         "cidr", "wallet", "filepath", "regkey")
 
 # Defanging conventions seen in the wild, most specific first.
 _REFANG = [
@@ -52,6 +59,37 @@ _X_IPV6 = re.compile(r"(?<![\w:])[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}(?![\w:])",
 _X_HASH = re.compile(r"(?<![a-f0-9])(?:[a-f0-9]{128}|[a-f0-9]{64}|[a-f0-9]{40}|[a-f0-9]{32})(?![a-f0-9])", re.I)
 _X_CVE = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.I)
 _X_DOMAIN = re.compile(rf"(?<![@\w.\-])(?:{_LABEL}\.)+[a-z]{{2,63}}\b(?![@\-])", re.I)
+
+_OCTET = r"(?:25[0-5]|2[0-4]\d|1?\d?\d)"
+_X_CIDR = re.compile(rf"(?<![\d.])(?:{_OCTET}\.){{3}}{_OCTET}/(?:3[0-2]|[12]?\d)(?!\d|\.\d)")
+_IP_PORT_RE = re.compile(rf"^((?:{_OCTET}\.){{3}}{_OCTET}):(\d{{1,5}})$")
+_IP6_PORT_RE = re.compile(r"^\[([0-9a-f:.]+)\]:(\d{1,5})$", re.I)
+
+# Cryptocurrency addresses: Bitcoin (bech32 and base58check) and Ethereum.
+_BECH32 = r"bc1[ac-hj-np-z02-9]{39}(?:[ac-hj-np-z02-9]{20})?"
+_BASE58 = r"[13][1-9A-HJ-NP-Za-km-z]{25,34}"
+_ETH = r"0x[0-9a-fA-F]{40}"
+_WALLET_RE = re.compile(rf"^(?:{_BECH32}|{_BASE58}|{_ETH})$")
+_X_WALLET = re.compile(rf"(?<![0-9A-Za-z])(?:{_BECH32}|{_BASE58}|{_ETH})(?![0-9A-Za-z])")
+
+# Registry keys: spaces are allowed inside a key name, but only when another
+# key follows, so prose after the path is not swallowed.
+_REG_SEG = r"[\w.\-{}()$]+"
+_REGKEY = (r"(?:HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|HKEY_USERS|HKEY_CLASSES_ROOT|HKEY_CURRENT_CONFIG"
+           r"|HKLM|HKCU|HKU|HKCR)"
+           rf"(?:\\{_REG_SEG}(?: {_REG_SEG})*(?=\\))*\\{_REG_SEG}")
+_REGKEY_RE = re.compile(rf"^{_REGKEY}$", re.I)
+_X_REGKEY = re.compile(rf"(?<![A-Za-z_]){_REGKEY}", re.I)
+
+# File paths: Windows drive / UNC / %VAR% paths, and Unix paths under the
+# directories that matter on a compromised host.
+_WIN_SEG = r"[^\\/:*?\"<>|\r\n\t ]+"
+_WIN_PATH = (rf"(?:[A-Za-z]:|%[A-Za-z_()0-9]+%|\\\\[\w.\-$]+)"
+             rf"(?:\\{_WIN_SEG}(?: {_WIN_SEG})*(?=\\))*\\{_WIN_SEG}")
+_UNIX_PATH = (r"(?:/(?:tmp|var|etc|usr|opt|home|root|Users|Library|private|Applications|System|dev/shm"
+              r"|bin|sbin|mnt|srv|proc)|~)(?:/[^\s\"'<>|;,)(\]\[]+)+")
+_FILEPATH_RE = re.compile(rf"^(?:{_WIN_PATH}|{_UNIX_PATH})$")
+_X_FILEPATH = re.compile(rf"(?<![\w/\\.:%~-])(?:{_WIN_PATH}|{_UNIX_PATH})")
 
 # "v1.2.3.4", "version: 10.0.0.1" are versions, not addresses.
 _VERSION_BEFORE = re.compile(r"(?:\bv|\bver|\bversion|\brelease|\bbuild)[\s.:=#-]{0,3}$", re.I)
@@ -137,6 +175,8 @@ def defang(value: str, kind: str) -> str:
         return value.replace(".", "[.]")
     if kind == "ipv6":
         return value.replace(":", "[:]")
+    if kind == "cidr":
+        return value.replace(".", "[.]") if "." in value else value.replace(":", "[:]")
     return value
 
 
@@ -157,6 +197,12 @@ def _strip(text: str) -> str:
 def classify(raw: str) -> Optional[Ioc]:
     """Recognise a single indicator.  Returns ``None`` if it isn't one."""
     original = raw.strip()
+    bracketed = _IP6_PORT_RE.match(refang(original))
+    if bracketed and int(bracketed.group(2)) <= 65535:
+        try:  # "[2001:db8::1]:443" — before the brackets are peeled off as punctuation
+            return Ioc("ipv6", ipaddress.IPv6Address(bracketed.group(1)).compressed, original)
+        except ValueError:
+            pass
     text = _strip(refang(original))
     if not text or len(text) > 4096 or any(c in text for c in "\r\n"):
         return None
@@ -171,6 +217,23 @@ def classify(raw: str) -> Optional[Ioc]:
         return Ioc("ipv4" if ip.version == 4 else "ipv6", ip.compressed, original)
     except ValueError:
         pass
+    # An address with a port: the address is the indicator, `original` keeps the port.
+    m = _IP_PORT_RE.match(text)
+    if m and int(m.group(2)) <= 65535:
+        return Ioc("ipv4", ipaddress.IPv4Address(m.group(1)).compressed, text)
+    if "/" in text and "://" not in text:
+        try:
+            net = ipaddress.ip_network(text, strict=False)
+            if net.prefixlen < net.max_prefixlen:
+                return Ioc("cidr", net.compressed, original)
+        except ValueError:
+            pass
+    if _WALLET_RE.match(text) and _wallet_valid(text):
+        return Ioc("wallet", text, original)
+    if _REGKEY_RE.match(text):
+        return Ioc("regkey", text, original)
+    if _FILEPATH_RE.match(text):
+        return Ioc("filepath", text, original)
     if _HEX_RE.match(text) and len(text) in HASH_TYPES:
         return Ioc(HASH_TYPES[len(text)], text.lower(), original)
     m = _ASN_RE.match(text)
@@ -193,6 +256,20 @@ def classify(raw: str) -> Optional[Ioc]:
     if "/" in text and _DOMAIN_RE.match(text.split("/", 1)[0].lower()):
         return Ioc("url", "http://" + text, original)
     return None
+
+
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def _wallet_valid(value: str) -> bool:
+    """Base58 Bitcoin addresses carry a checksum; random 30-character IDs fail it."""
+    if value.startswith(("bc1", "0x")):
+        return True
+    n = 0
+    for ch in value:
+        n = n * 58 + _B58.index(ch)
+    raw = n.to_bytes(25, "big") if n < (1 << 200) else b""
+    return bool(raw) and hashlib.sha256(hashlib.sha256(raw[:21]).digest()).digest()[:4] == raw[21:]
 
 
 def _ipv6_plausible(value: str) -> bool:
@@ -248,8 +325,17 @@ def extract(text: str, limit: int = 500) -> List[Ioc]:
     scan(_X_EMAIL, lambda m: (m.group(0), True))
     scan(_X_HASH, lambda m: (m.group(0), True))
     scan(_X_CVE, lambda m: (m.group(0), True))
-    scan(_X_IPV4, lambda m: (None if _VERSION_BEFORE.search(clean, max(0, m.start() - 12), m.start())
-                             else m.group(0), True))
+    scan(_X_REGKEY, lambda m: (m.group(0), True))
+    scan(_X_FILEPATH, lambda m: (m.group(0).rstrip(".,;:!?'\""), True))
+    scan(_X_WALLET, lambda m: (m.group(0), _wallet_valid(m.group(0))))
+    scan(_X_CIDR, lambda m: (m.group(0), True))
+
+    def ipv4(m: re.Match):
+        if _VERSION_BEFORE.search(clean, max(0, m.start() - 12), m.start()):
+            return None, True
+        port = re.match(r":(\d{1,5})(?![\d.:])", clean[m.end():m.end() + 7])
+        return m.group(0) + (port.group(0) if port and int(port.group(1)) <= 65535 else ""), True
+    scan(_X_IPV4, ipv4)
     scan(_X_IPV6, lambda m: (m.group(0) if _ipv6_plausible(m.group(0)) else None, True))
 
     def domain(m: re.Match):

@@ -1,25 +1,39 @@
 """
 Live threat-intelligence and privacy feeds.
 
-The bundled YAML files in ``intel/`` are placeholders.  This module pulls
-real, free, keyless feeds, normalises them, and caches them as JSON in the
-data directory so the engine can load them at startup without network
-access.  The daemon refreshes them every few hours.
+This module pulls real, free, keyless feeds, normalises them, and caches
+them as JSON in the data directory so the engine can load them at startup
+without network access.  The daemon refreshes them every few hours.
 
 Feeds
 -----
-=================  ==============================================  =========
-name               source                                          used for
-=================  ==============================================  =========
-feodo              abuse.ch Feodo Tracker botnet C2 IPs            threat IP
-spamhaus_drop_v4   Spamhaus DROP (hijacked / criminal netblocks)   threat IP
-spamhaus_drop_v6   Spamhaus DROP IPv6                              threat IP
-tor_exits          Tor Project bulk exit list                      threat IP
-urlhaus            abuse.ch URLhaus malware-distribution hosts     threat domain
-disconnect         Disconnect.me tracker list (ads, analytics, …)  trackers
-doh_domains        dibdot DoH resolver hostnames                   DoH detector
-doh_ipv4           dibdot DoH resolver IPv4 addresses              DoH detector
-=================  ==============================================  =========
+=================  ================================================  ==============
+name               source                                            used for
+=================  ================================================  ==============
+feodo              abuse.ch Feodo Tracker botnet C2 IPs              threat IP
+c2intel_ips        C2IntelFeeds: C2 servers seen in the last 30 d    threat IP
+c2intel_domains    C2IntelFeeds: C2 domains seen in the last 30 d    threat domain
+spamhaus_drop_v4   Spamhaus DROP (hijacked / criminal netblocks)     threat IP
+spamhaus_drop_v6   Spamhaus DROP IPv6                                threat IP
+et_compromised     Emerging Threats compromised hosts                threat IP
+blocklist_de       blocklist.de hosts reported for attacks           threat IP
+tor_relays         Tor Project Onionoo: every running relay          threat IP
+tor_exits          Tor Project bulk exit list                        threat IP
+openphish          OpenPhish community phishing URLs                 threat URL/host
+sslbl_certs        abuse.ch SSLBL malicious certificate SHA-1s       TLS certificate
+sslbl_ja3          abuse.ch SSLBL malware JA3 client fingerprints    TLS fingerprint
+disconnect         Disconnect.me tracker list (ads, analytics, …)    trackers
+doh_domains        dibdot DoH resolver hostnames                     DoH detector
+doh_ipv4           dibdot DoH resolver IPv4 addresses                DoH detector
+=================  ================================================  ==============
+
+abuse.ch's URLhaus and ThreatFox bulk downloads now answer ``410 Gone``
+without an account key, so they are no longer fetched here; both remain
+available as keyed lookups in the SOC workbench.
+
+Relays versus exits: an *exit* address is where Tor traffic comes out, so
+it matters for inbound connections.  A connection from this machine *to*
+any relay means a Tor client is running here.
 """
 from __future__ import annotations
 
@@ -85,6 +99,58 @@ def _parse_domain_lines(text: str) -> List[str]:
     return out
 
 
+def _parse_csv_first(text: str) -> List[str]:
+    """First column of a CSV, skipping comment / header lines."""
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        value = line.split(",", 1)[0].strip().strip('"').lower()
+        if value:
+            out.append(value)
+    return out
+
+
+def _parse_url_lines(text: str) -> List[str]:
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.lower().startswith(("http://", "https://")) and " " not in line:
+            out.append(line)
+    return out
+
+
+def _parse_sslbl(column: int, length: int) -> Callable[[str], Dict[str, str]]:
+    """abuse.ch SSLBL CSV → ``{hex fingerprint: listing reason}``."""
+    def parse(text: str) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for line in text.splitlines():
+            if not line or line.startswith("#"):
+                continue
+            cols = [c.strip() for c in line.split(",")]
+            if len(cols) <= column:
+                continue
+            value = cols[column].lower()
+            if len(value) == length and all(c in "0123456789abcdef" for c in value):
+                out[value] = cols[-1] or "listed"
+        return out
+    return parse
+
+
+def _parse_onionoo(text: str) -> List[str]:
+    """Onionoo ``details`` document → every relay's OR addresses, without ports."""
+    out: List[str] = []
+    seen: Set[str] = set()
+    for relay in json.loads(text).get("relays") or []:
+        for address in relay.get("or_addresses") or []:
+            host = address.rsplit(":", 1)[0].strip("[]")
+            if host and host not in seen:
+                seen.add(host)
+                out.append(host)
+    return out
+
+
 # Disconnect categories worth surfacing.  "Content" (YouTube embeds, CDNs)
 # and the internal "Disconnect" category are too noisy to flag.
 _DISCONNECT_CATEGORIES = {
@@ -120,7 +186,7 @@ def _parse_disconnect(text: str) -> Dict[str, str]:
 class FeedSpec:
     name: str
     url: str
-    kind: str  # "ip" | "domain" | "trackers" | "doh_domain" | "doh_ip"
+    kind: str  # "ip" | "domain" | "url" | "cert_sha1" | "ja3" | "trackers" | "doh_domain" | "doh_ip"
     description: str
     category: str
     severity: str
@@ -130,17 +196,42 @@ class FeedSpec:
 FEEDS: Tuple[FeedSpec, ...] = (
     FeedSpec("feodo", "https://feodotracker.abuse.ch/downloads/ipblocklist.txt",
              "ip", "Feodo Tracker botnet C2 server", "c2", "CRITICAL", _parse_ip_lines),
+    FeedSpec("c2intel_ips",
+             "https://raw.githubusercontent.com/drb-ra/C2IntelFeeds/master/feeds/IPC2s-30day.csv",
+             "ip", "C2IntelFeeds — command-and-control server seen in the last 30 days", "c2", "HIGH",
+             _parse_csv_first),
+    FeedSpec("c2intel_domains",
+             "https://raw.githubusercontent.com/drb-ra/C2IntelFeeds/master/feeds/domainC2s-30day-filter-abused.csv",
+             "domain", "C2IntelFeeds — command-and-control domain seen in the last 30 days", "c2", "HIGH",
+             _parse_csv_first),
     FeedSpec("spamhaus_drop_v4", "https://www.spamhaus.org/drop/drop_v4.json",
              "ip", "Spamhaus DROP — hijacked or criminal netblock", "drop", "HIGH",
              _parse_spamhaus_json),
     FeedSpec("spamhaus_drop_v6", "https://www.spamhaus.org/drop/drop_v6.json",
              "ip", "Spamhaus DROP — hijacked or criminal netblock", "drop", "HIGH",
              _parse_spamhaus_json),
+    FeedSpec("et_compromised", "https://rules.emergingthreats.net/blockrules/compromised-ips.txt",
+             "ip", "Emerging Threats — compromised host used for attacks", "compromised", "MEDIUM",
+             _parse_ip_lines),
+    FeedSpec("blocklist_de", "https://lists.blocklist.de/lists/all.txt",
+             "ip", "blocklist.de — reported for attacking servers in the last 48 hours", "attacker", "LOW",
+             _parse_ip_lines),
+    # Relays first: an address that is also an exit keeps the exit label.
+    FeedSpec("tor_relays",
+             "https://onionoo.torproject.org/details?type=relay&running=true&fields=or_addresses",
+             "ip", "Tor relay — a connection to it means Tor is in use", "tor_relay", "LOW",
+             _parse_onionoo),
     FeedSpec("tor_exits", "https://check.torproject.org/torbulkexitlist",
              "ip", "Tor exit relay", "tor_exit", "LOW", _parse_ip_lines),
-    FeedSpec("urlhaus", "https://urlhaus.abuse.ch/downloads/hostfile/",
-             "domain", "URLhaus malware distribution host", "malware", "HIGH",
-             _parse_hostfile),
+    FeedSpec("openphish",
+             "https://raw.githubusercontent.com/openphish/public_feed/refs/heads/main/feed.txt",
+             "url", "OpenPhish — reported phishing page", "phishing", "HIGH", _parse_url_lines),
+    FeedSpec("sslbl_certs", "https://sslbl.abuse.ch/blacklist/sslblacklist.csv",
+             "cert_sha1", "abuse.ch SSLBL — certificate used by malware", "malware", "HIGH",
+             _parse_sslbl(column=1, length=40)),
+    FeedSpec("sslbl_ja3", "https://sslbl.abuse.ch/blacklist/ja3_fingerprints.csv",
+             "ja3", "abuse.ch SSLBL — TLS client fingerprint of malware", "malware", "MEDIUM",
+             _parse_sslbl(column=0, length=32)),
     FeedSpec("disconnect",
              "https://raw.githubusercontent.com/disconnectme/disconnect-tracking-protection/master/services.json",
              "trackers", "Disconnect.me tracker list", "tracker", "LOW", _parse_disconnect),
@@ -245,14 +336,25 @@ def load_into(intel: ThreatIntel, directory: Optional[Path] = None) -> int:
     directory = Path(directory) if directory else intel_dir()
     added = 0
     for spec in FEEDS:
-        if spec.kind not in ("ip", "domain"):
+        if spec.kind not in ("ip", "domain", "url", "cert_sha1", "ja3"):
             continue
         cached = _read_cache(directory, spec.name)
         if not cached:
             continue
-        for indicator in cached["entries"]:
+        entries = cached["entries"]
+        if spec.kind in ("cert_sha1", "ja3"):
+            for fingerprint, reason in dict(entries).items():
+                category = "c2" if "c&c" in str(reason).lower() else spec.category
+                intel.add_fingerprint(spec.kind, fingerprint, category, spec.severity,
+                                      f"{spec.description} ({reason})")
+                added += 1
+            continue
+        for indicator in entries:
             if spec.kind == "ip":
                 if intel.add_network(indicator, spec.category, spec.severity, spec.description):
+                    added += 1
+            elif spec.kind == "url":
+                if intel.add_url(indicator, spec.category, spec.severity, spec.description):
                     added += 1
             else:
                 intel.add_domain(indicator, spec.category, spec.severity, spec.description)

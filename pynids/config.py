@@ -31,6 +31,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "horizontal_window": 60,
         "vertical_threshold": 15,
         "vertical_window": 60,
+        "slow_window": 900,       # how long a refused / unanswered attempt counts (0 = off)
+        "attempt_timeout": 5,     # seconds without an answer before a SYN counts as failed
     },
     "brute_force": {
         "threshold": 10,
@@ -45,11 +47,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "beacon_cv_threshold": 0.20,
         "dga_nxdomain_threshold": 12,   # distinct failing domains per client (0 = off)
         "dga_window": 60,
+        "beacon_max_interval": 86400,   # longest gap between check-ins still followed (seconds)
     },
     "flow": {
         "max_flows": 100_000,
         "idle_timeout": 300,
         "udp_session_gap": 60,          # a silent UDP 5-tuple restarts as a new flow
+        "stream_window_bytes": 1024,    # bytes kept per TCP direction for split patterns (0 = off)
+    },
+    "lan": {
+        "enabled": True,                # ARP spoofing, ping sweeps, rogue DHCP / IPv6 routers
+        "arp_claim_threshold": 5,       # addresses one MAC may answer for within a minute
+        "arp_sweep_threshold": 50,      # addresses one MAC may ask for within a minute
+        "rogue_window": 600,            # two DHCP servers / routers this close together = rogue
     },
     "intel": {
         "enabled": False,

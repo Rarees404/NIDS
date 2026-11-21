@@ -37,6 +37,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -50,7 +51,7 @@ class ThreatEntry:
     category: str
     severity: str
     description: str
-    indicator: str  # The CIDR or domain that matched
+    indicator: str  # The CIDR, domain, URL or fingerprint that matched
 
 
 class ThreatIntel:
@@ -83,6 +84,10 @@ class ThreatIntel:
         self._ip_cache: Dict[str, Optional[ThreatEntry]] = {}
         self._domain_exact: Dict[str, ThreatEntry] = {}
         self._domain_suffix: Dict[str, ThreatEntry] = {}
+        # "host/path" → entry, for pages on hosts that are not bad as a whole
+        self._urls: Dict[str, ThreatEntry] = {}
+        # {"ja3": {md5: entry}, "cert_sha1": {sha1: entry}}
+        self._fingerprints: Dict[str, Dict[str, ThreatEntry]] = {"ja3": {}, "cert_sha1": {}}
 
         if bad_ips_path:
             self._load_ips(bad_ips_path)
@@ -156,9 +161,36 @@ class ThreatIntel:
                 return None
             candidate = candidate[dot + 1:]
 
+    def check_url(self, host: Optional[str], uri: Optional[str]) -> Optional[ThreatEntry]:
+        """A listed page: *host* and request *uri* (query string optional)."""
+        if not host or not self._urls:
+            return None
+        host = host.lower().rstrip(".")
+        path = uri or "/"
+        entry = self._urls.get(host + path)
+        if entry is None and "?" in path:
+            entry = self._urls.get(host + path.split("?", 1)[0])
+        return entry
+
+    def check_ja3(self, ja3: Optional[str]) -> Optional[ThreatEntry]:
+        """A TLS client fingerprint (JA3 MD5) used by known malware."""
+        return self._fingerprints["ja3"].get(ja3.lower()) if ja3 else None
+
+    def check_cert(self, sha1: Optional[str]) -> Optional[ThreatEntry]:
+        """A server certificate (SHA-1 of the DER bytes) used by known malware."""
+        return self._fingerprints["cert_sha1"].get(sha1.lower()) if sha1 else None
+
     @property
     def ip_entry_count(self) -> int:
         return self._ip_count
+
+    @property
+    def url_entry_count(self) -> int:
+        return len(self._urls)
+
+    @property
+    def fingerprint_entry_count(self) -> int:
+        return sum(len(v) for v in self._fingerprints.values())
 
     @property
     def domain_entry_count(self) -> int:
@@ -204,6 +236,45 @@ class ThreatIntel:
             self._domain_suffix[domain.lstrip(".")] = entry
         else:
             self._domain_exact[domain] = entry
+
+    def add_url(self, url: str, category: str, severity: str, description: str) -> bool:
+        """
+        Index a malicious page.
+
+        A URL that is just a site root lists the whole host (so it is also
+        caught by SNI and DNS); one with a path lists only that page, because
+        the host may be a shared platform that is mostly legitimate.
+        """
+        try:
+            parts = urlsplit(url.strip())
+        except ValueError:
+            return False
+        host = (parts.hostname or "").lower().rstrip(".")
+        if not host:
+            return False
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        entry = ThreatEntry(category=category, severity=_normalise_severity(severity),
+                            description=description, indicator=url.strip()[:300])
+        if path == "/":
+            try:
+                ipaddress.ip_address(host)
+                self.add_network(host, category, severity, description)
+            except ValueError:
+                self._domain_exact.setdefault(host, entry)
+        self._urls[host + path] = entry
+        return True
+
+    def add_fingerprint(self, kind: str, value: str, category: str, severity: str,
+                        description: str) -> None:
+        """Index a ``ja3`` or ``cert_sha1`` fingerprint."""
+        table = self._fingerprints.get(kind)
+        value = (value or "").strip().lower()
+        if table is None or not value:
+            return
+        table[value] = ThreatEntry(category=category, severity=_normalise_severity(severity),
+                                   description=description, indicator=value)
 
     # ------------------------------------------------------------------
     # Loaders

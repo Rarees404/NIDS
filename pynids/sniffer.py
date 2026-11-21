@@ -33,6 +33,14 @@ Meta dictionary keys
 ``ip_ttl``         int    — IP TTL / Hop Limit
 ``ip_tos``         int    — IP TOS / DSCP byte
 ``packet_len``     int    — Total captured packet length in bytes
+``tcp_seq``        int    — TCP sequence number (TCP only)
+``src_mac``        str    — Ethernet source address (Ethernet frames only)
+``dst_mac``        str    — Ethernet destination address
+``icmp_type``      int    — ICMP / ICMPv6 type (``icmp_code`` likewise)
+``ra_lifetime``    int    — Router lifetime of an IPv6 router advertisement
+``arp``            dict   — For ARP frames (``protocol`` is ``'arp'``, no IPs or
+                            ports): ``op`` ('request' | 'reply'), ``sender_mac``,
+                            ``sender_ip``, ``target_mac``, ``target_ip``
 ``malformed``      bool   — Present (True) when a header was invalid; the
                             packet's other fields are then left empty
 """
@@ -48,6 +56,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 _U16 = struct.Struct("!H")
+_U32 = struct.Struct("!I")
 _PORTS = struct.Struct("!HH")
 _inet_ntoa = socket.inet_ntoa
 
@@ -120,6 +129,11 @@ def decode_frame(frame: bytes, link: str = "Ether", ts: float = 0.0) -> Dict[str
             while ethertype in (0x8100, 0x88A8, 0x9100):
                 ethertype = _U16.unpack_from(frame, offset + 2)[0]
                 offset += 4
+            meta["dst_mac"] = frame[0:6].hex(":")
+            meta["src_mac"] = frame[6:12].hex(":")
+            if ethertype == 0x0806:
+                _decode_arp(frame, offset, meta)
+                return meta
             if ethertype not in (0x0800, 0x86DD):
                 return meta
         _decode_ip(frame, offset, meta)
@@ -129,6 +143,23 @@ def decode_frame(frame: bytes, link: str = "Ether", ts: float = 0.0) -> Dict[str
     except (struct.error, IndexError, ValueError, OSError):
         pass  # truncated: keep whatever was decoded
     return meta
+
+
+def _decode_arp(frame: bytes, o: int, meta: Dict[str, Any]) -> None:
+    """IPv4-over-Ethernet ARP.  The addresses go under ``meta['arp']``, not into
+    ``src_ip`` / ``dst_ip``: an ARP frame is not an IP conversation."""
+    htype, ptype = _U16.unpack_from(frame, o)[0], _U16.unpack_from(frame, o + 2)[0]
+    if htype != 1 or ptype != 0x0800 or frame[o + 4] != 6 or frame[o + 5] != 4 or len(frame) < o + 28:
+        return
+    op = _U16.unpack_from(frame, o + 6)[0]
+    meta["protocol"] = "arp"
+    meta["arp"] = {
+        "op": {1: "request", 2: "reply"}.get(op, str(op)),
+        "sender_mac": frame[o + 8:o + 14].hex(":"),
+        "sender_ip": _inet_ntoa(frame[o + 14:o + 18]),
+        "target_mac": frame[o + 18:o + 24].hex(":"),
+        "target_ip": _inet_ntoa(frame[o + 24:o + 28]),
+    }
 
 
 def _decode_ip(frame: bytes, o: int, meta: Dict[str, Any]) -> None:
@@ -184,6 +215,7 @@ def _decode_ip(frame: bytes, o: int, meta: Dict[str, Any]) -> None:
     if proto == 6:
         meta["protocol"] = "tcp"
         meta["src_port"], meta["dst_port"] = _PORTS.unpack_from(frame, l4)
+        meta["tcp_seq"] = _U32.unpack_from(frame, l4 + 4)[0]
         data_offset = (frame[l4 + 12] >> 4) * 4
         if data_offset < 20:
             raise _Malformed("TCP data offset < 5")
@@ -195,11 +227,19 @@ def _decode_ip(frame: bytes, o: int, meta: Dict[str, Any]) -> None:
         meta["payload_bytes"] = frame[l4 + 8:end]
     elif proto == 1:
         meta["protocol"] = "icmp"
+        meta["icmp_type"], meta["icmp_code"] = frame[l4], frame[l4 + 1]
         if frame[l4] in (0, 8):  # echo reply / request carry data
             meta["payload_bytes"] = frame[l4 + 8:end]
-    elif proto == 58 and frame[l4] == 128:
-        meta["protocol"] = "icmpv6"
-        meta["payload_bytes"] = frame[l4 + 8:end]
+    elif proto == 58:
+        meta["icmp_type"], meta["icmp_code"] = frame[l4], frame[l4 + 1]
+        if frame[l4] == 128:
+            meta["protocol"] = "icmpv6"
+            meta["payload_bytes"] = frame[l4 + 8:end]
+        else:
+            # Neighbour discovery and the rest: typed, but not a conversation.
+            meta["protocol"] = "other"
+            if frame[l4] == 134:  # router advertisement
+                meta["ra_lifetime"] = _U16.unpack_from(frame, l4 + 6)[0]
     else:
         meta["protocol"] = "other"
 

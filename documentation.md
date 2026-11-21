@@ -690,6 +690,12 @@ Per-port and per-target alert suppression (`horiz_alerted` / `vert_alerted` sets
 | `horizontal_window` | 60 s |
 | `vertical_threshold` | 12 unique dst ports |
 | `vertical_window` | 60 s |
+| `slow_window` | 900 s |
+| `attempt_timeout` | 5 s |
+
+**Failed connections (slow scans)**
+- TCP attempts that are reset or go unanswered for `attempt_timeout` seconds are remembered for `slow_window` seconds.
+- Alert when one source has failed against `vertical_threshold` ports of one host, or `horizontal_threshold` hosts on one port, however slowly. Evidence carries `method: failed_connections`.
 
 #### `BruteForceDetector` — Credential Service Attack
 
@@ -1520,4 +1526,47 @@ outputs. A rule with only `kind: threat` or `kind: attack` is refused as too bro
 and unauthenticated `GET /static/<file>` for the vendored map libraries (flat allowlist of
 `.js` / `.json` names). The server's listen backlog is raised to 128, because the dashboard
 opens more parallel requests than socketserver's default of 5.
+
+---
+
+## 19. Visibility: Streams, the Local Network, Intel Fingerprints, Attachments
+
+### 19.1 Stream continuity
+
+| Piece | Where | What it does |
+|---|---|---|
+| `tcp_seq` | `sniffer.py` | TCP sequence number in every packet's meta |
+| `_HttpRequestAssembler` | `protocols/dissector.py` | Buffers an HTTP request until its headers (and up to 4 KiB of body) have arrived; the packet that completes it carries the parsed request, earlier ones `{"partial": true}` |
+| `StreamWindow` | `flow/stream.py` | Per TCP direction: follows sequence numbers, flags `tcp_retransmit`, and hands the engine the last `flow.stream_window_bytes` of plaintext before each in-order segment (`meta["stream_prefix"]`) |
+| Window matching | `detection/signature.py` | A rule with `contains` / `regex` on `payload_bytes` that misses the packet alone is retried on *previous bytes + packet*; it fires only if the match needs the new packet. Evidence carries `reassembled: true` |
+
+Limits: segments are followed in order — an out-of-order segment restarts the window rather than being buffered — and a pattern must fit in the window. Retransmitted bytes are no longer counted in flow byte totals.
+
+### 19.2 Beaconing
+
+Series are keyed on the DNS-verified host name when there is one (rotating addresses of one name add up), otherwise on the address. Gaps beyond 3× the median interval are set aside (sleep, missed beats), and check-ins up to `behavioral.beacon_max_interval` apart are followed.
+
+### 19.3 Local network — `detection/lan.py`
+
+The sniffer decodes ARP frames (`protocol: "arp"`, addresses under `meta["arp"]`), Ethernet addresses (`src_mac` / `dst_mac`), ICMP type and code, and IPv6 router advertisements; the dissector decodes DHCP (`layer7.dhcp`).
+
+| Rule | Fires when | Severity |
+|---|---|---|
+| `LAN-ARP-GATEWAY` | The default gateway's IP answers from a different MAC | HIGH |
+| `LAN-ARP-CONFLICT` | An address changes MAC twice within 5 minutes | MEDIUM |
+| `LAN-ARP-MULTI` | One MAC answers for `arp_claim_threshold` addresses in a minute | HIGH |
+| `LAN-ARP-SWEEP` | One MAC asks for `arp_sweep_threshold` addresses in a minute | LOW |
+| `detector:ping_sweep` | One source pings 20 hosts in a minute | MEDIUM |
+| `LAN-DHCP-ROGUE` | Two DHCP servers answer within `rogue_window` seconds | HIGH |
+| `LAN-RA-ROUTER` | Two IPv6 routers advertise within `rogue_window` seconds | MEDIUM |
+
+The gateway comes from the routing table (`route -n get default` / `ip route`) and from DHCP answers seen on the wire. A DHCP ACK resets what was learned, so joining another network that reuses the same addresses is not reported.
+
+### 19.4 Threat intelligence
+
+`ThreatIntel` also indexes listed pages (`add_url` / `check_url`), JA3 client fingerprints and certificate SHA-1s (`add_fingerprint`, `check_ja3`, `check_cert`). The engine additionally checks the JA3 of every ClientHello, the SHA-1 of every server certificate it can read, CNAME targets in DNS answers, and `Host` + path of plaintext HTTP requests. A listed address whose connection attempt was never answered raises `INTEL-INBOUND-PROBE` at LOW instead of the listed severity. Feed list: see `intel/feeds.py`.
+
+### 19.5 Indicators and attachments
+
+`soc/ioc.py` adds the types `cidr`, `wallet` (Bitcoin, Ethereum), `filepath` and `regkey`, and reads `ip:port` as an address whose `original` keeps the port. `soc/mail/filetype.py` inflates PDF streams, lists and triages members of ZIP / gzip / tar archives to `MAX_DEPTH` levels, and returns the URLs, email addresses and public IPs found in a file's content (`urls`, `iocs`); `soc/mail/analyze.py` reports them as links "inside attachment" and as indicators, together with the SHA-256 of every nested file.
 

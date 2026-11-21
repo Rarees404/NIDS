@@ -30,7 +30,7 @@ import logging
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, Iterable, Optional, Set, Tuple
+from typing import Any, Deque, Dict, Iterable, Optional, Set, Tuple
 
 from .base import BaseDetector
 from ..alerts.model import Alert, AlertType, Severity
@@ -81,16 +81,27 @@ _SERVICE_NAMES = {
 @dataclass
 class _RateStats:
     ewma_rate: float = 0.0
-    counts_window: Deque[Tuple[float, int]] = field(default_factory=lambda: deque(maxlen=60))
+    window_key: Optional[float] = None   # start of the window being counted
+    count: int = 0                       # packets in that window so far
+    alerted: bool = False                # already alerted for that window
+    last_seen: float = 0.0
+    # Rates (pkt/s) of the windows that have closed, oldest first.
+    history: Deque[float] = field(default_factory=lambda: deque(maxlen=60))
 
 
 class AnomalyDetector(BaseDetector):
     """
     Per-source EWMA volumetric anomaly detector.
 
-    For each observed source IP the detector maintains a sliding-window
-    count and an EWMA of recent packet rates.  When the current window
-    rate exceeds ``ewma ± sigma * stddev`` an alert is raised.
+    Packets are counted per source in fixed windows.  When a window closes,
+    its rate joins the source's baseline: an EWMA and the standard deviation
+    of up to 60 closed windows (silent windows count as zero).  The window
+    still being counted is compared against that baseline and alerts, once,
+    as soon as its rate exceeds ``ewma + sigma * stddev``.  The current
+    window never feeds its own threshold, so a spike cannot hide itself.
+
+    A source with no history has a baseline of zero: a flood from an address
+    never seen before alerts once it passes ``min_rate_pps``.
 
     Args:
         ewma_alpha:       Smoothing factor α ∈ (0, 1].  Higher = faster adaptation.
@@ -113,7 +124,7 @@ class AnomalyDetector(BaseDetector):
     ) -> None:
         self.ewma_alpha = ewma_alpha
         self.sigma_threshold = sigma_threshold
-        self.window_seconds = window_seconds
+        self.window_seconds = max(1, int(window_seconds))
         self.min_rate_pps = min_rate_pps
         self._per_source: Dict[str, _RateStats] = defaultdict(_RateStats)
 
@@ -125,8 +136,7 @@ class AnomalyDetector(BaseDetector):
         # The rate history covers 60 windows; a source silent for longer
         # starts from scratch anyway.
         horizon = now - 60 * self.window_seconds
-        for src in [s for s, st in self._per_source.items()
-                    if not st.counts_window or st.counts_window[-1][0] < horizon]:
+        for src in [s for s, st in self._per_source.items() if st.last_seen < horizon]:
             del self._per_source[src]
 
     def analyze(
@@ -144,57 +154,71 @@ class AnomalyDetector(BaseDetector):
         ts = meta.get("timestamp", time.time())
         yield from self._observe(src_ip, ts)
 
+    def _close_window(self, stats: _RateStats, wkey: float) -> None:
+        """Move the finished window (and any silent ones after it) into the baseline."""
+        closed = [stats.count / float(self.window_seconds)]
+        gap = int(round((wkey - stats.window_key) / self.window_seconds)) - 1
+        closed.extend([0.0] * max(0, min(gap, stats.history.maxlen or 60)))
+        for rate in closed:
+            if stats.history:
+                stats.ewma_rate = self.ewma_alpha * rate + (1 - self.ewma_alpha) * stats.ewma_rate
+            else:
+                stats.ewma_rate = rate
+            stats.history.append(rate)
+
     def _observe(self, src_ip: str, ts: float) -> Iterable[Alert]:
         stats = self._per_source[src_ip]
+        stats.last_seen = max(stats.last_seen, ts)
         wkey = ts - (ts % self.window_seconds)
 
-        if not stats.counts_window or stats.counts_window[-1][0] != wkey:
-            stats.counts_window.append((wkey, 1))
-        else:
-            w, c = stats.counts_window[-1]
-            stats.counts_window[-1] = (w, c + 1)
+        if stats.window_key is None:
+            stats.window_key = wkey
+        elif wkey > stats.window_key:
+            self._close_window(stats, wkey)
+            stats.window_key, stats.count, stats.alerted = wkey, 0, False
+        # A packet stamped before the current window (another capture thread
+        # running slightly behind) is counted in the current one.
+        stats.count += 1
 
-        current_count = stats.counts_window[-1][1]
-        current_rate = current_count / float(self.window_seconds)
+        if stats.alerted or stats.count <= 5:
+            return
+        current_rate = stats.count / float(self.window_seconds)
+        if current_rate < self.min_rate_pps:
+            return
 
-        if stats.ewma_rate == 0.0:
-            stats.ewma_rate = current_rate
-        else:
-            stats.ewma_rate = (
-                self.ewma_alpha * current_rate + (1 - self.ewma_alpha) * stats.ewma_rate
-            )
-
-        rates = [c / float(self.window_seconds) for _, c in stats.counts_window]
-        if len(rates) >= 3:
+        rates = stats.history
+        if len(rates) >= 2:
             mean = sum(rates) / len(rates)
-            variance = sum((r - mean) ** 2 for r in rates) / (len(rates) - 1)
-            stddev = variance ** 0.5
+            stddev = (sum((r - mean) ** 2 for r in rates) / (len(rates) - 1)) ** 0.5
         else:
             stddev = 0.0
-
         threshold = stats.ewma_rate + self.sigma_threshold * stddev
+        if current_rate <= threshold:
+            return
 
-        if (stddev > 0 and current_rate > threshold and current_count > 5
-                and current_rate >= self.min_rate_pps):
-            yield Alert(
-                alert_type=AlertType.ANOMALY,
-                severity=Severity.HIGH,
-                message=(
-                    f"Traffic spike from {src_ip}: "
-                    f"{current_rate:.1f} pkt/s (threshold {threshold:.1f} pkt/s)"
-                ),
-                src_ip=src_ip,
-                mitre_technique="T1498",
-                tags=["volumetric", "anomaly", "dos"],
-                confidence=min(1.0, (current_rate - threshold) / threshold),
-                evidence={
-                    "current_rate_pps": current_rate,
-                    "threshold_pps": threshold,
-                    "ewma_rate": stats.ewma_rate,
-                    "stddev": stddev,
-                    "window_start": wkey,
-                },
-            )
+        stats.alerted = True
+        floor = max(threshold, self.min_rate_pps, 1e-9)
+        yield Alert(
+            alert_type=AlertType.ANOMALY,
+            severity=Severity.HIGH,
+            message=(
+                f"Traffic spike from {src_ip}: more than "
+                f"{current_rate:.1f} pkt/s (baseline {stats.ewma_rate:.1f}, threshold {threshold:.1f} pkt/s)"
+            ),
+            src_ip=src_ip,
+            mitre_technique="T1498",
+            tags=["volumetric", "anomaly", "dos"],
+            confidence=min(1.0, max(0.3, (current_rate - threshold) / floor)),
+            evidence={
+                "current_rate_pps": current_rate,
+                "threshold_pps": threshold,
+                "ewma_rate": stats.ewma_rate,
+                "stddev": stddev,
+                "baseline_windows": len(rates),
+                "window_start": wkey,
+                "packets_in_window": stats.count,
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -213,18 +237,41 @@ class _ScanState:
     # Track which alerts have already fired to avoid floods
     horiz_alerted: Set[int] = field(default_factory=set)
     vert_alerted: Set[str] = field(default_factory=set)
+    # Connection attempts still waiting for an answer: {(dst_ip, dst_port) → sent at}
+    pending: Dict[Tuple[str, int], float] = field(default_factory=dict)
+    last_sweep: float = 0.0
+    # Attempts that failed (reset or never answered), by target host and by port:
+    # {dst_ip → {dst_port → failed at}} and {dst_port → {dst_ip → failed at}}
+    failed_ports: Dict[str, Dict[int, float]] = field(default_factory=dict)
+    failed_hosts: Dict[int, Dict[str, float]] = field(default_factory=dict)
+    slow_alerted: Dict[Tuple[str, Any], float] = field(default_factory=dict)
 
 
 class PortScanDetector(BaseDetector):
     """
     Detect horizontal (host-sweep) and vertical (port-scan) scan activity.
 
+    Two methods run side by side:
+
+    * **Burst** — many distinct targets within a short window, whatever the
+      outcome.  Catches ordinary fast scans.
+    * **Failed connections** — TCP attempts that were reset or never
+      answered are remembered for ``slow_window`` seconds.  A scanner that
+      paces itself below the burst window still piles up closed and
+      filtered ports; ordinary clients almost never fail against many
+      different ports of one host, or many hosts on one port.
+
     Args:
         horizontal_threshold: Unique destination IPs on the same port before alert.
         horizontal_window:    Observation window in seconds for horizontal scans.
         vertical_threshold:   Unique destination ports on the same host before alert.
         vertical_window:      Observation window in seconds for vertical scans.
+        slow_window:          How long a failed attempt counts (0 disables the
+                              failed-connection method).
+        attempt_timeout:      Seconds without any answer before a SYN counts as failed.
     """
+
+    _MAX_PENDING = 4096   # unanswered attempts remembered per source
 
     def __init__(
         self,
@@ -232,12 +279,19 @@ class PortScanDetector(BaseDetector):
         horizontal_window: float = 60.0,
         vertical_threshold: int = 15,
         vertical_window: float = 60.0,
+        slow_window: float = 900.0,
+        attempt_timeout: float = 5.0,
     ) -> None:
         self.horizontal_threshold = horizontal_threshold
         self.horizontal_window = horizontal_window
         self.vertical_threshold = vertical_threshold
         self.vertical_window = vertical_window
+        self.slow_window = slow_window
+        self.attempt_timeout = attempt_timeout
         self._state: Dict[str, _ScanState] = defaultdict(_ScanState)
+        # Alerts found while pruning (no packet to attach them to); the next
+        # analyze() call hands them over.
+        self._deferred: list = []
 
     @property
     def name(self) -> str:
@@ -251,7 +305,13 @@ class PortScanDetector(BaseDetector):
             for ip in [d for d, t in st.vert_first_seen.items() if now - t > self.vertical_window]:
                 del st.vert[ip], st.vert_first_seen[ip]
                 st.vert_alerted.discard(ip)
-            if not st.horiz and not st.vert:
+            if self.slow_window:
+                # A scanner that has gone quiet still owes its last unanswered probes.
+                for target, failed_at in self._expire_pending(st, now):
+                    if now - failed_at <= self.slow_window:
+                        self._deferred.extend(self._record_failure(src, st, target, failed_at, "unanswered"))
+                self._expire_failed(st, now)
+            if not (st.horiz or st.vert or st.pending or st.failed_ports or st.failed_hosts):
                 del self._state[src]
 
     def analyze(
@@ -264,6 +324,16 @@ class PortScanDetector(BaseDetector):
         dst_ip = meta.get("dst_ip")
         dst_port = meta.get("dst_port")
         if not (src_ip and dst_ip and dst_port is not None):
+            return
+
+        if self._deferred:
+            deferred, self._deferred = self._deferred, []
+            yield from deferred
+
+        tcp = meta.get("protocol") == "tcp"
+        if tcp and self.slow_window and flow is not None and flow.src_ip != src_ip:
+            # The responder answered one of the initiator's attempts.
+            yield from self._on_answer(meta, flow)
             return
 
         # Scans are connection *attempts*: only the first packet of a flow
@@ -289,6 +359,12 @@ class PortScanDetector(BaseDetector):
 
         ts = meta.get("timestamp", time.time())
         state = self._state[src_ip]
+
+        if tcp and self.slow_window and (meta.get("tcp_flags") or 0) & 0x02:
+            # Sweep first: with every SYN, older unanswered attempts become failures.
+            yield from self._sweep(src_ip, state, ts)
+            if len(state.pending) < self._MAX_PENDING:
+                state.pending[(dst_ip, dst_port)] = ts
 
         # Visiting many websites = many hosts on 443.  Only sweeps of other
         # ports, or of private address space, look like reconnaissance.
@@ -385,6 +461,126 @@ class PortScanDetector(BaseDetector):
                     "ports_per_second": round(unique_ports / max(elapsed, 1.0), 2),
                 },
             )
+
+
+    # -- failed-connection method -------------------------------------------
+
+    def _on_answer(self, meta: dict, flow: Flow) -> Iterable[Alert]:
+        """A packet from the responder: the attempt either succeeded or was refused."""
+        state = self._state.get(flow.src_ip)
+        if state is None:
+            return
+        target = (flow.dst_ip, flow.dst_port)
+        if state.pending.pop(target, None) is None:
+            return
+        if flow.outcome == "rejected":   # RST straight back: the port is closed
+            ts = meta.get("timestamp", time.time())
+            yield from self._record_failure(flow.src_ip, state, target, ts, "rejected")
+
+    def _expire_pending(self, state: _ScanState, now: float) -> list:
+        """Attempts nobody answered within ``attempt_timeout`` (filtered port, dead host)."""
+        state.last_sweep = now
+        expired = [(t, sent + self.attempt_timeout) for t, sent in state.pending.items()
+                   if now - sent > self.attempt_timeout]
+        for target, _ in expired:
+            del state.pending[target]
+        return expired  # [(target, the moment it counted as failed)]
+
+    def _expire_failed(self, state: _ScanState, now: float) -> None:
+        horizon = now - self.slow_window
+        for table in (state.failed_ports, state.failed_hosts):
+            for key in list(table):
+                live = {k: t for k, t in table[key].items() if t >= horizon}
+                if live:
+                    table[key] = live
+                else:
+                    del table[key]
+        state.slow_alerted = {k: t for k, t in state.slow_alerted.items() if t >= horizon}
+
+    def _sweep(self, src_ip: str, state: _ScanState, now: float) -> Iterable[Alert]:
+        if now - state.last_sweep < 1.0:
+            return
+        for target, failed_at in self._expire_pending(state, now):
+            if now - failed_at <= self.slow_window:
+                yield from self._record_failure(src_ip, state, target, failed_at, "unanswered")
+
+    def _record_failure(self, src_ip: str, state: _ScanState, target: Tuple[str, int],
+                        ts: float, how: str) -> Iterable[Alert]:
+        dst_ip, dst_port = target
+        horizon = ts - self.slow_window
+
+        if dst_ip not in state.failed_ports and len(state.failed_ports) >= self._MAX_PENDING:
+            return  # a source spraying this many hosts is caught by the burst method
+        ports = state.failed_ports.setdefault(dst_ip, {})
+        ports[dst_port] = ts
+        if len(ports) >= self.vertical_threshold:
+            for port in [p for p, t in ports.items() if t < horizon]:
+                del ports[port]
+        key: Tuple[str, Any] = ("v", dst_ip)
+        if len(ports) >= self.vertical_threshold and ts - state.slow_alerted.get(key, -1e18) > self.slow_window:
+            state.slow_alerted[key] = ts
+            span = ts - min(ports.values())
+            yield Alert(
+                alert_type=AlertType.ANOMALY,
+                severity=Severity.HIGH,
+                message=(
+                    f"Port scan from {src_ip} → {dst_ip}: {len(ports)} ports refused or "
+                    f"unanswered over {_span(span)}"
+                ),
+                src_ip=src_ip,
+                dst_ip=dst_ip,
+                mitre_technique="T1046",
+                tags=["recon", "portscan", "vertical_scan", "failed_connections"],
+                confidence=min(1.0, 0.5 + len(ports) / (self.vertical_threshold * 4)),
+                evidence={
+                    "method": "failed_connections",
+                    "failed_ports": len(ports),
+                    "target_host": dst_ip,
+                    "window_seconds": round(span, 1),
+                    "sample_ports": sorted(ports)[:40],
+                    "last_failure": how,
+                },
+            )
+
+        # Many websites being down at once is an outage, not a sweep.
+        if dst_port in _CLIENT_WEB_PORTS and _is_public(dst_ip):
+            return
+        hosts = state.failed_hosts.setdefault(dst_port, {})
+        if dst_ip not in hosts and len(hosts) >= self._MAX_PENDING:
+            return
+        hosts[dst_ip] = ts
+        if len(hosts) >= self.horizontal_threshold:
+            for ip in [h for h, t in hosts.items() if t < horizon]:
+                del hosts[ip]
+        key = ("h", dst_port)
+        if len(hosts) >= self.horizontal_threshold and ts - state.slow_alerted.get(key, -1e18) > self.slow_window:
+            state.slow_alerted[key] = ts
+            span = ts - min(hosts.values())
+            yield Alert(
+                alert_type=AlertType.ANOMALY,
+                severity=Severity.HIGH,
+                message=(
+                    f"Host sweep from {src_ip}: {len(hosts)} hosts refused or did not answer "
+                    f"on port {dst_port} over {_span(span)}"
+                ),
+                src_ip=src_ip,
+                dst_port=dst_port,
+                mitre_technique="T1046",
+                tags=["recon", "host_sweep", "portscan", "failed_connections"],
+                confidence=min(1.0, 0.5 + len(hosts) / (self.horizontal_threshold * 4)),
+                evidence={
+                    "method": "failed_connections",
+                    "failed_hosts": len(hosts),
+                    "target_port": dst_port,
+                    "window_seconds": round(span, 1),
+                    "sample_targets": sorted(hosts)[:10],
+                    "last_failure": how,
+                },
+            )
+
+
+def _span(seconds: float) -> str:
+    return f"{seconds:.0f}s" if seconds < 120 else f"{seconds / 60:.0f} min"
 
 
 # ---------------------------------------------------------------------------

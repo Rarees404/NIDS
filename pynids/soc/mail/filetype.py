@@ -3,15 +3,37 @@ Static attachment triage: what a file *really* is, and what's risky about it.
 
 Nothing is executed, opened by another program, or written to disk.  Only
 the bytes in memory are inspected.
+
+Looking inside
+--------------
+* **PDF** — compressed object streams are inflated, so links and active
+  content hidden inside them are found, not just what sits in plain view.
+* **Archives** — ZIP, gzip and tar members are listed and the interesting
+  ones triaged in turn (an archive in an archive, a document in an
+  archive), to a fixed depth and size.
+* **Indicators** — URLs, email addresses and public IP addresses found in
+  the content (document relationships, PDF streams, strings of a binary or
+  shortcut) are returned as ``urls`` / ``iocs``.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import math
 import re
+import tarfile
 import zipfile
+import zlib
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
+
+from ..ioc import extract, is_public_ip
+
+MAX_DEPTH = 3                      # archive-in-archive levels followed
+MAX_INNER_FILES = 20               # members triaged per archive
+MAX_INNER_SIZE = 20 * 1024 * 1024  # largest member read
+MAX_IOC_TEXT = 2 * 1024 * 1024     # content scanned for indicators per file
 
 # (offset, magic, label, canonical extensions)
 _MAGIC: List[Tuple[int, bytes, str, Tuple[str, ...]]] = [
@@ -65,6 +87,8 @@ def sniff(data: bytes) -> Optional[Tuple[str, Tuple[str, ...]]]:
             if label.startswith("ZIP"):
                 return _zip_flavour(data) or (label, exts)
             return label, exts
+    if data[257:262] == b"ustar":
+        return "tar archive", ("tar",)
     head = data[:2048].lstrip().lower()
     if head.startswith((b"<!doctype html", b"<html")) or b"<script" in head[:512]:
         return "HTML document", ("html", "htm")
@@ -115,7 +139,38 @@ _PDF_KEYS = ["/JavaScript", "/JS", "/OpenAction", "/AA", "/Launch", "/EmbeddedFi
 _PDF_RISKY = {"/JavaScript", "/JS", "/OpenAction", "/AA", "/Launch", "/EmbeddedFile", "/RichMedia", "/XFA", "/GoToR"}
 
 
-def _pdf(data: bytes, findings: List[Dict[str, Any]], info: Dict[str, Any]) -> None:
+_PDF_STREAM = re.compile(rb"stream\r?\n(.*?)endstream", re.DOTALL)
+
+
+def _pdf_inflate(data: bytes, max_streams: int = 400, max_total: int = 16 * 1024 * 1024) -> bytes:
+    """
+    The contents of the PDF's Flate-compressed streams, concatenated.
+
+    Modern PDFs keep most objects — link annotations and JavaScript actions
+    included — inside compressed object streams, where a scan of the raw
+    file finds nothing.
+    """
+    out: List[bytes] = []
+    total = 0
+    for i, m in enumerate(_PDF_STREAM.finditer(data)):
+        if i >= max_streams or total >= max_total:
+            break
+        try:
+            chunk = zlib.decompressobj().decompress(m.group(1), 2 * 1024 * 1024)
+        except zlib.error:
+            continue
+        if chunk:
+            out.append(chunk)
+            total += len(chunk)
+    return b"\n".join(out)
+
+
+def _pdf(data: bytes, findings: List[Dict[str, Any]], info: Dict[str, Any]) -> bytes:
+    inflated = _pdf_inflate(data)
+    if inflated:
+        info["pdf_streams_inflated"] = len(inflated)
+    # Everything below looks at the file as stored *and* at what its streams hold.
+    data = data + b"\n" + inflated
     counts = {k: len(re.findall(re.escape(k.encode()) + rb"(?![A-Za-z])", data)) for k in _PDF_KEYS}
     # Names can be hex-escaped to dodge keyword scans (/J#61vaScript).
     obfuscated = len(re.findall(rb"/[A-Za-z]*#[0-9A-Fa-f]{2}", data))
@@ -127,20 +182,97 @@ def _pdf(data: bytes, findings: List[Dict[str, Any]], info: Dict[str, Any]) -> N
     if risky:
         sev = "high" if {"/JavaScript", "/JS", "/Launch", "/EmbeddedFile"} & set(risky) else "medium"
         findings.append(_f(sev, "PDF contains active content", ", ".join(sorted(risky))))
-    info["pdf_uris"] = sorted({u.decode("latin-1") for u in re.findall(rb"/URI\s*\(([^)]{1,2000})\)", data)})[:100]
+    uris = {u.decode("latin-1") for u in re.findall(rb"/URI\s*\(([^)]{1,2000})\)", data)}
+    for hexed in re.findall(rb"/URI\s*<([0-9A-Fa-f\s]{8,4000})>", data):  # /URI <68747470…>
+        try:
+            uris.add(bytes.fromhex(hexed.decode("ascii")).decode("latin-1"))
+        except ValueError:
+            pass
+    info["pdf_uris"] = sorted(uris)[:100]
+    return inflated
 
 
 def _ole_macros(data: bytes) -> bool:
     return b"V\x00B\x00A\x00" in data or b"_VBA_PROJECT" in data or b"Macros" in data and b"VBA" in data
 
 
-def _zip(data: bytes, findings: List[Dict[str, Any]], info: Dict[str, Any]) -> None:
+# Text-like members of a document or archive worth scanning for indicators.
+_TEXT_MEMBER_EXT = {"rels", "xml", "txt", "htm", "html", "js", "jse", "vbs", "vbe", "wsf", "hta", "ps1", "bat",
+                    "cmd", "sh", "url", "json", "csv", "svg", "iqy", "slk"}
+_OFFICE_FLAVOURS = ("OOXML", "OpenDocument")
+
+
+def _nested(inner: bytes, name: str, depth: int, findings: List[Dict[str, Any]],
+            info: Dict[str, Any]) -> None:
+    """Triage one member of an archive and fold the result into the parent's."""
+    tri = analyze_file(inner, name.rsplit("/", 1)[-1], None, _depth=depth + 1)
+    info.setdefault("nested", []).append({
+        "name": name, "size": len(inner), "detected": tri.get("detected"),
+        "sha256": hashlib.sha256(inner).hexdigest(),
+        "findings": tri["findings"], "nested": tri.get("nested"),
+    })
+    for f in tri["findings"]:
+        findings.append(_f(f["severity"], f"Inside the archive — {f['title']}",
+                           f"{name}" + (f": {f['detail']}" if f["detail"] else "")))
+    for key in ("urls", "iocs"):
+        for item in tri.get(key) or []:
+            if item not in info.setdefault("_" + key, []):
+                info["_" + key].append(item)
+    for u in tri.get("pdf_uris") or []:
+        if u not in info.setdefault("_urls", []):
+            info["_urls"].append(u)
+
+
+def _gzip(data: bytes, name: Optional[str], depth: int, findings: List[Dict[str, Any]],
+          info: Dict[str, Any]) -> None:
+    try:
+        inner = zlib.decompressobj(zlib.MAX_WBITS | 16).decompress(data, MAX_INNER_SIZE)
+    except zlib.error as exc:
+        info["gzip_error"] = str(exc)
+        return
+    if not inner or depth >= MAX_DEPTH:
+        return
+    stem = (name or "content.gz")
+    stem = stem[:-3] if stem.lower().endswith(".gz") else stem[:-4] + ".tar" if stem.lower().endswith(".tgz") else stem
+    _nested(inner, stem, depth, findings, info)
+
+
+def _tar(data: bytes, depth: int, findings: List[Dict[str, Any]], info: Dict[str, Any]) -> None:
+    try:
+        tf = tarfile.open(fileobj=io.BytesIO(data), mode="r:")
+        members = [m for m in tf.getmembers()[:500]]
+    except (tarfile.TarError, EOFError, OSError, ValueError) as exc:
+        info["tar_error"] = str(exc)
+        return
+    info["archive"] = [{"name": m.name, "size": m.size, "compressed": m.size, "encrypted": False}
+                       for m in members]
+    inner_names = [m.name for m in members if _ext(m.name) in DANGEROUS_EXT]
+    if inner_names:
+        findings.append(_f("high", "Archive contains executable / script files", ", ".join(inner_names[:10])))
+    if depth >= MAX_DEPTH:
+        return
+    done = 0
+    for m in members:
+        if done >= MAX_INNER_FILES or not m.isfile() or not 0 < m.size <= MAX_INNER_SIZE:
+            continue
+        try:
+            fh = tf.extractfile(m)
+            inner = fh.read(MAX_INNER_SIZE) if fh else b""
+        except (tarfile.TarError, OSError, KeyError):
+            continue
+        done += 1
+        _nested(inner, m.name, depth, findings, info)
+
+
+def _zip(data: bytes, findings: List[Dict[str, Any]], info: Dict[str, Any], depth: int = 0,
+         office: bool = False) -> str:
+    """List a ZIP container; returns the text of its text-like members (for indicators)."""
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
         entries = zf.infolist()
     except (zipfile.BadZipFile, ValueError, RuntimeError, NotImplementedError, OSError) as exc:
         info["zip_error"] = str(exc)
-        return
+        return ""
     listing = []
     for e in entries[:500]:
         enc = bool(e.flag_bits & 0x1)
@@ -162,6 +294,37 @@ def _zip(data: bytes, findings: List[Dict[str, Any]], info: Dict[str, Any]) -> N
     ratio = sum(e.file_size for e in entries) / max(1, len(data))
     if ratio > 100:
         findings.append(_f("medium", "Very high compression ratio", f"{ratio:.0f}× — possible zip bomb or padded payload"))
+
+    # Look inside: text members for indicators, the rest triaged as files of
+    # their own.  An Office document is itself a ZIP, so only its embedded
+    # objects are opened, not every XML part.
+    text: List[str] = []
+    budget = MAX_IOC_TEXT
+    triaged = 0
+    for e in entries[:500]:
+        if e.is_dir() or e.flag_bits & 0x1 or not 0 < e.file_size <= MAX_INNER_SIZE:
+            continue
+        ext = _ext(e.filename)
+        if ext in _TEXT_MEMBER_EXT and budget > 0:
+            chunk = _read(zf, e.filename)[:budget]
+            budget -= len(chunk)
+            text.append(chunk.decode("utf-8", "replace"))
+            if office or ext in ("rels", "xml"):
+                continue
+        if office and "embeddings/" not in e.filename.lower() and ext not in ("bin", "ole"):
+            continue
+        if ext in ("png", "jpg", "jpeg", "gif", "bmp", "emf", "wmf", "ttf", "otf", "woff", "woff2", "css"):
+            continue
+        if depth >= MAX_DEPTH or triaged >= MAX_INNER_FILES:
+            continue
+        try:
+            with zf.open(e.filename) as fh:
+                inner = fh.read(MAX_INNER_SIZE)
+        except Exception:  # noqa: BLE001 — unsupported compression, bad CRC …
+            continue
+        triaged += 1
+        _nested(inner, e.filename, depth, findings, info)
+    return "\n".join(text)
 
 
 def _read(zf: zipfile.ZipFile, name: str) -> bytes:
@@ -201,20 +364,73 @@ def analyze_name(name: Optional[str]) -> List[Dict[str, Any]]:
     return findings
 
 
-def analyze_file(data: bytes, name: Optional[str], declared_type: Optional[str]) -> Dict[str, Any]:
+# Hosts that appear in every document's boilerplate (XML namespaces, colour
+# profiles, code-signing infrastructure) and say nothing about its author.
+_BOILERPLATE_HOSTS = (
+    "schemas.openxmlformats.org", "schemas.microsoft.com", "www.w3.org", "purl.org", "ns.adobe.com",
+    "schemas.xmlsoap.org", "www.iec.ch", "iptc.org", "www.aiim.org", "www.npes.org", "www.color.org",
+    "ns.useplus.org", "xmlns.com", "www.adobe.com", "openoffice.org", "relaxng.org", "dublincore.org",
+    "www.pdfa.org", "cipa.jp", "java.sun.com", "xml.apache.org", "www.oasis-open.org",
+)
+_SHELL_IN_SHORTCUT = re.compile(
+    r"(?i)\b(?:powershell|pwsh|cmd(?:\.exe)?\s*/[ck]|mshta|wscript|cscript|rundll32|regsvr32|certutil|bitsadmin"
+    r"|curl|msiexec|forfiles|conhost)\b.{0,200}")
+
+
+def _boilerplate(host: str) -> bool:
+    host = host.lower()
+    return (any(host == h or host.endswith("." + h) for h in _BOILERPLATE_HOSTS)
+            or host.startswith(("ocsp.", "crl.", "crl3.", "crl4.", "cacerts.", "crt.")))
+
+
+def _content_iocs(text: str, info: Dict[str, Any]) -> None:
+    """URLs, email addresses and public IPs found in a file's content."""
+    urls: List[str] = list(info.pop("_urls", []))
+    iocs: List[Dict[str, str]] = list(info.pop("_iocs", []))
+    for u in info.get("pdf_uris") or []:
+        if u not in urls:
+            urls.append(u)
+    for ioc in extract(text[:MAX_IOC_TEXT], limit=200) if text else ():
+        if ioc.type == "url":
+            host = urlsplit(ioc.value).hostname or ""
+            if host and not _boilerplate(host) and not urlsplit(ioc.value).path.lower().endswith((".crl", ".crt", ".cer")) \
+                    and ioc.value not in urls:
+                urls.append(ioc.value)
+        elif ioc.type == "email" or (ioc.type in ("ipv4", "ipv6") and is_public_ip(ioc.value)):
+            item = {"type": ioc.type, "value": ioc.value}
+            if item not in iocs:
+                iocs.append(item)
+    if urls:
+        info["urls"] = urls[:200]
+    if iocs:
+        info["iocs"] = iocs[:200]
+
+
+def analyze_file(data: bytes, name: Optional[str], declared_type: Optional[str],
+                 _depth: int = 0) -> Dict[str, Any]:
     findings = analyze_name(name)
     info: Dict[str, Any] = {"size": len(data), "entropy": round(entropy(data), 3)}
     sniffed = sniff(data)
     info["detected"] = sniffed[0] if sniffed else None
+    content = ""   # text in which indicators are looked for
     ext = _ext(name or "")
     if sniffed and ext and ext not in sniffed[1] and not (ext in ("txt", "csv", "log") and "text" in sniffed[0].lower()):
         sev = "high" if any(k in sniffed[0] for k in ("executable", "LNK", "ISO", "HTML", "OneNote", "disk")) else "medium"
         findings.append(_f(sev, "Extension doesn't match content", f".{ext} file is really: {sniffed[0]}"))
     label = sniffed[0] if sniffed else ""
     if label.startswith("PDF"):
-        _pdf(data, findings, info)
+        inflated = _pdf(data, findings, info)
+        content = (data[:MAX_IOC_TEXT] + b"\n" + inflated[:MAX_IOC_TEXT]).decode("latin-1")
     elif "ZIP" in label or "OOXML" in label or "OpenDocument" in label or "JAR" in label or "APK" in label:
-        _zip(data, findings, info)
+        content = _zip(data, findings, info, _depth, office=any(k in label for k in _OFFICE_FLAVOURS))
+    elif label == "gzip":
+        _gzip(data, name, _depth, findings, info)
+    elif label == "tar archive":
+        _tar(data, _depth, findings, info)
+    elif label in ("RAR archive", "7-Zip archive", "Microsoft Cabinet", "bzip2", "xz"):
+        info["note"] = "this archive format can't be opened here — its contents were not examined"
+        findings.append(_f("info", f"{label}: contents not examined",
+                           "only ZIP, gzip and tar archives are looked into"))
     elif label.startswith("OLE2"):
         if _ole_macros(data):
             findings.append(_f("high", "Legacy Office file contains VBA macros"))
@@ -224,6 +440,7 @@ def analyze_file(data: bytes, name: Optional[str], declared_type: Optional[str])
         if re.search(rb"\\objdata|\\objupdate|\\objemb", data):
             findings.append(_f("high", "RTF embeds OLE objects", "classic exploit delivery (\\objdata)"))
     elif label.startswith(("HTML", "SVG")):
+        content = data[:MAX_IOC_TEXT].decode("utf-8", "replace")
         low = data.lower()
         hits = [k for k in (b"atob(", b"blob(", b"mssaveoropenblob", b"createobjecturl", b"download=", b"eval(",
                             b"document.write", b"window.location", b"fromcharcode") if k in low]
@@ -237,5 +454,14 @@ def analyze_file(data: bytes, name: Optional[str], declared_type: Optional[str])
     if info["entropy"] > 7.5 and label not in ("ZIP archive", "JPEG image", "PNG image", "gzip", "7-Zip archive",
                                                 "RAR archive") and "OOXML" not in label and len(data) > 4096:
         info["note"] = "high entropy — compressed or encrypted content"
-    info["strings_sample"] = _strings(data, 200)
+    strings = _strings(data, 2000)
+    info["strings_sample"] = strings[:200]
+    if "LNK" in label:
+        cmd = next((m.group(0) for s in strings for m in [_SHELL_IN_SHORTCUT.search(s)] if m), None)
+        if cmd:
+            findings.append(_f("high", "Shortcut launches a command interpreter", cmd[:200]))
+    if not content and not label.startswith(("PNG", "JPEG", "GIF", "BMP", "TIFF", "RIFF")):
+        # Binaries, legacy Office files, shortcuts, plain text: their readable strings.
+        content = "\n".join(strings) if sniffed else data[:MAX_IOC_TEXT].decode("utf-8", "replace")
+    _content_iocs(content, info)
     return {"findings": findings, **info}

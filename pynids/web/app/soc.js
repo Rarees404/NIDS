@@ -18,7 +18,8 @@ const SOC = {
 const VERDICT_LABEL = { malicious: "Malicious", suspicious: "Suspicious", clean: "Clean", info: "Info", unknown: "No verdict" };
 const VERDICT_ORDER = ["malicious", "suspicious", "clean", "info", "unknown"];
 const TYPE_LABEL = { ipv4: "IPv4", ipv6: "IPv6", domain: "Domain", url: "URL", email: "Email", md5: "MD5", sha1: "SHA-1",
-  sha256: "SHA-256", sha512: "SHA-512", asn: "ASN", cve: "CVE" };
+  sha256: "SHA-256", sha512: "SHA-512", asn: "ASN", cve: "CVE", cidr: "Network", wallet: "Crypto wallet",
+  filepath: "File path", regkey: "Registry key" };
 const RANK = { unknown: 0, info: 1, clean: 2, suspicious: 3, malicious: 4 };
 
 async function copyText(text, what) {
